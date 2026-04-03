@@ -1,4 +1,4 @@
-"""Polygon YOLOv26 — Loss Operations
+"""RayCastED — Loss Operations
 
 Angular smoothness regularization for polygon training.
 Includes both NumPy (validation/debugging) and PyTorch (training) variants.

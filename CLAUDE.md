@@ -43,7 +43,7 @@ Ingestors → .npz files  [image + raycast annotations, pixel space]
 .npz tiles  [content_h, content_w preserved]
     ↓  PolygonTileDataset  [NOT YET IMPLEMENTED]
 [B, 3, H, W] + [M, 36] labels (normalised)
-    ↓  PolygonYOLOv26  [NOT YET IMPLEMENTED]
+    ↓  RayCastED  [NOT YET IMPLEMENTED]
 Trained weights
 ```
 

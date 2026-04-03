@@ -1,4 +1,4 @@
-"""Polygon YOLOv26 — Conversion Operations
+"""RayCastED — Conversion Operations
 
 Core conversion functions between polygon and raycast representations.
 These are used during ETL ingestion and inference decoding.

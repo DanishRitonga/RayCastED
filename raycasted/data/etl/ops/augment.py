@@ -1,4 +1,4 @@
-"""Polygon YOLOv26 — Augmentation Operations.
+"""RayCastED — Augmentation Operations.
 
 Geometric augmentations for star-convex polygon annotations.
 Uses precomputed permutation indices for efficient ray reordering.

@@ -1,4 +1,4 @@
-"""Polygon YOLOv26 — Constants and Permutation Indices.
+"""RayCastED — Constants and Permutation Indices.
 
 Angular Convention (IMMUTABLE):
     θ₁ = 0° → East (+X axis)

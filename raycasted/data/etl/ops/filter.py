@@ -1,4 +1,4 @@
-"""Polygon YOLOv26 — Filtering Operations
+"""RayCastED — Filtering Operations
 
 Annotation filtering and clipping for crop regions.
 Implements the 4-step filtering pipeline.

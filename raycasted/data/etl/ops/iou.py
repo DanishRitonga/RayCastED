@@ -1,4 +1,4 @@
-"""Polygon YOLOv26 — Polar IoU Operations
+"""RayCastED — Polar IoU Operations
 
 Polar-IoU computation for star-convex polygons.
 Includes both NumPy (ETL) and PyTorch (training) variants.

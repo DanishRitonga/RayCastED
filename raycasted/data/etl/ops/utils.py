@@ -1,4 +1,4 @@
-"""Polygon YOLOv26 — Utility Operations
+"""RayCastED — Utility Operations
 
 Helper functions for annotation validation and quality monitoring.
 """

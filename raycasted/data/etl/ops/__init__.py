@@ -1,4 +1,4 @@
-"""Polygon YOLOv26 — Operations Module
+"""RayCastED — Operations Module
 
 Single source of truth for all polygon/raycast geometry logic.
 This module is imported by:

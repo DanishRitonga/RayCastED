@@ -1,8 +1,8 @@
-# POLYGON YOLOv26 — RAYCAST CELL DETECTION
+# RayCastED — RayCast-based End-to-end Detection
 ## Project Plan v4.12 — Architecture Reference & Bug Registry
 
 > **Status:** Pre-implementation. This document is the authoritative specification.  
-> **Scope:** RayCastED ETL → PolygonYOLOv26 training → inference → NVIDIA Jetson deployment.  
+> **Scope:** RayCastED ETL → RayCastED training → inference → NVIDIA Jetson deployment.  
 > **Dataset targets:** MoNuSAC (Parquet), PUMA (GeoJSON), PanopTILs (CSV polygons).  
 > **Deployment target:** NVIDIA Jetson (Orin/Xavier) via ONNX → TensorRT.
 
@@ -69,7 +69,7 @@ Raw datasets (Parquet / GeoJSON / CSV)
 .npz tiles  [content_h, content_w preserved]
         ↓  PolygonTileDataset
 [B, 3, H, W] + [M, 36] labels  (normalised)
-        ↓  PolygonYOLOv26  (PolygonE2ELoss + PolygonAssigner)
+        ↓  RayCastED  (PolygonE2ELoss + PolygonAssigner)
 Trained weights
         ↓  PolygonPredictor
 [N, 32, 2] polygon vertices  (pixel space)
@@ -191,7 +191,7 @@ Prefect orchestrates the ETL pipeline with the following task structure:
 ```python
 from prefect import flow, task
 
-@flow(name="Polygon YOLOv26 ETL Pipeline")
+@flow(name="RayCastED ETL Pipeline")
 def etl_pipeline(config_path: str):
     """Main ETL flow coordinating ingestion and transform stages."""
     config = load_config(config_path)
@@ -1186,7 +1186,7 @@ Report both in all evaluation runs. Use `shapely_f1` as the primary metric for y
 **Critical evaluation nuance — polygon overlap and PanNuke:**  
 PanNuke ground truth annotations are forced to be non-overlapping (watershed-derived instance masks). LSP-DETR applies a deterministic distance-transform watershed refinement during inference to match this constraint before evaluation.
 
-Polygon YOLOv26 predicts biologically correct polygon boundaries that may legitimately overlap for touching cells. If you evaluate directly against PanNuke's non-overlapping GT without post-processing, overlapping predictions are penalised even when they are geometrically accurate.
+RayCastED predicts biologically correct polygon boundaries that may legitimately overlap for touching cells. If you evaluate directly against PanNuke's non-overlapping GT without post-processing, overlapping predictions are penalised even when they are geometrically accurate.
 
 Options:
 1. **No post-processing (default):** Accept the metric penalty. Document the discrepancy explicitly in the evaluation section of your thesis.
@@ -1204,7 +1204,7 @@ Start with option 1. Switch to option 2 only if reviewers require strict LSP-DET
 
 ### 16.1 Overview
 
-Deploy the trained PolygonYOLOv26 model on NVIDIA Jetson (Orin / Xavier) for edge inference on WSI tiles. The pipeline is:
+Deploy the trained RayCastED model on NVIDIA Jetson (Orin / Xavier) for edge inference on WSI tiles. The pipeline is:
 
 ```
 PyTorch checkpoint (.pt)
@@ -1235,7 +1235,7 @@ def export_polygon_yolo_onnx(
     simplify: bool = True,
     dynamic_batch: bool = False,
 ) -> str:
-    """Export PolygonYOLOv26 to ONNX.
+    """Export RayCastED to ONNX.
 
     Args:
         weights_path: Path to .pt checkpoint.
