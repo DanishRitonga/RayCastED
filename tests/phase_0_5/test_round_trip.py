@@ -15,9 +15,8 @@ import os
 import numpy as np
 from shapely.geometry import Polygon
 
-from hievnet.data.etl.ops import decode_to_vertices, polygon_to_raycast, raycast_to_polygon
-from hievnet.data.etl.utils.constants import CX_IDX, CY_IDX, RAY_END_IDX, RAY_START_IDX
-
+from raycasted.data.etl.ops import decode_to_vertices, polygon_to_raycast, raycast_to_polygon
+from raycasted.data.etl.utils.constants import CX_IDX, CY_IDX, RAY_END_IDX, RAY_START_IDX
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -6,7 +6,7 @@ import numpy as np
 import polars as pl
 from matplotlib.patches import Rectangle
 
-from hievnet.data.etl import ETLConfig, ParquetIngestor
+from raycasted.data.etl import ETLConfig, ParquetIngestor
 
 pl.Config.set_fmt_str_lengths(100)
 

@@ -9,7 +9,7 @@ import pandas as pd
 import seaborn as sns
 from PIL import Image
 
-from hievnet.data.utils import load_parquet_as_df
+from raycasted.data.utils import load_parquet_as_df
 
 # %%
 script_dir = Path(__file__).parent

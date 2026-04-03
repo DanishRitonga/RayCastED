@@ -1,6 +1,6 @@
 global_settings:
-  root_dir: "/home/danishrtg/projects/HiEvNet/hievnet/data/dataset"
-  # root_dir: "/mnt/data/projects/HiEvNet/hievnet/data/dataset"
+  root_dir: "/home/danishrtg/projects/HiEvNet/raycasted/data/dataset"
+  # root_dir: "/mnt/data/projects/HiEvNet/raycasted/data/dataset"
   output_image_size: [1024, 1024]
   output_mpp: 0.25
   patching_overlap_pct: 10

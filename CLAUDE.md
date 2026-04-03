@@ -17,7 +17,7 @@ uv run ruff check .
 uv run ruff format .
 
 # Run a script
-uv run python hievnet/data/etl/utils/constants.py
+uv run python raycasted/data/etl/utils/constants.py
 ```
 
 No test runner is configured yet. Tests are plain `assert`-based scripts:
@@ -27,7 +27,7 @@ No test runner is configured yet. Tests are plain `assert`-based scripts:
 uv run python tests/phase_0_5/test_round_trip.py
 ```
 
-**Ruff config** (`pyproject.toml`): line length 120, single quotes, Google-style docstrings, isort with `hievnet` as first-party.
+**Ruff config** (`pyproject.toml`): line length 120, single quotes, Google-style docstrings, isort with `raycasted` as first-party.
 
 ## Architecture
 
@@ -37,7 +37,7 @@ uv run python tests/phase_0_5/test_round_trip.py
 
 ```
 YAML config (main/dataset.yaml)
-    ↓  ETLConfig (Pydantic) + IngestionOrchestrator  [NOT YET IMPLEMENTED]
+    ↓  ETLConfig (Pydantic) + IngestionOrchestrator (ingestors/ingestion_orchestrator.py)
 Ingestors → .npz files  [image + raycast annotations, pixel space]
     ↓  TransformOrchestrator (SpatialChunker + NormalizerAndPadder)
 .npz tiles  [content_h, content_w preserved]
@@ -49,17 +49,17 @@ Trained weights
 
 ### Key modules
 
-**`hievnet/data/etl/ops/`** — Single source of truth for ALL geometry logic. Every caller imports from here; nothing is reimplemented elsewhere. PyTorch variants (`polar_iou_torch`, `angular_smoothness_loss_torch`) use **lazy imports** (`import torch` inside the function body) so this package is safe to import without PyTorch in ETL environments. `decode_pred_xy` is NOT here — it is a method of `PolygonDetectionLoss` only.
+**`raycasted/data/etl/ops/`** — Single source of truth for ALL geometry logic. Every caller imports from here; nothing is reimplemented elsewhere. PyTorch variants (`polar_iou_torch`, `angular_smoothness_loss_torch`) use **lazy imports** (`import torch` inside the function body) so this package is safe to import without PyTorch in ETL environments. `decode_pred_xy` is NOT here — it is a method of `PolygonDetectionLoss` only.
 
-**`hievnet/data/etl/utils/constants.py`** — Angular convention, permutation indices, and format indices. Import from here; never recompute inline. Key constants: `RAY_ANGLES`, `FLIP_H_IDX`, `FLIP_V_IDX`, `ROT_INDICES`, `CLASS_IDX=0`, `CX_IDX=1`, `CY_IDX=2`, `RAY_START_IDX=3`, `RAY_END_IDX=35`.
+**`raycasted/data/etl/utils/constants.py`** — Angular convention, permutation indices, and format indices. Import from here; never recompute inline. Key constants: `RAY_ANGLES`, `FLIP_H_IDX`, `FLIP_V_IDX`, `ROT_INDICES`, `CLASS_IDX=0`, `CX_IDX=1`, `CY_IDX=2`, `RAY_START_IDX=3`, `RAY_END_IDX=35`.
 
-**`hievnet/data/etl/utils/config.py`** — `ETLConfig` wraps a YAML file via Pydantic (`ETLConfigModel`). `annotation_type` is a **global-only** setting — one pipeline run uses one annotation type for all datasets. To ingest with different types, run separate configs.
+**`raycasted/data/etl/utils/config.py`** — `ETLConfig` wraps a YAML file via Pydantic (`ETLConfigModel`). `annotation_type` is a **global-only** setting — one pipeline run uses one annotation type for all datasets. To ingest with different types, run separate configs.
 
-**`hievnet/data/etl/ingestors/_base.py`** — `BaseDataIngestor` handles file discovery, split assignment, and MPP scaling. Label translation is two-step: raw dataset string → namespace-standard string → global integer (via `namespace_map` + `global_cell_map`). The split column in the Polars registry is always `'split'`.
+**`raycasted/data/etl/ingestors/_base.py`** — `BaseDataIngestor` handles file discovery, split assignment, and MPP scaling. Label translation is two-step: raw dataset string → namespace-standard string → global integer (via `namespace_map` + `global_cell_map`). The split column in the Polars registry is always `'split'`.
 
 ### Structural note
 
-The plan (`docs/project.md §7`) specifies `hievnet/data/ops/`, `hievnet/data/utils/`, and `hievnet/data/loader/` as top-level siblings of `etl/`. The actual implementation nests them under `etl/`: `hievnet/data/etl/ops/`, `hievnet/data/etl/utils/`, `hievnet/data/etl/loader/`. All import paths must use the actual locations.
+The plan (`docs/project.md §7`) specifies `raycasted/data/ops/`, `raycasted/data/utils/`, and `raycasted/data/loader/` as top-level siblings of `etl/`. The actual implementation nests them under `etl/`: `raycasted/data/etl/ops/`, `raycasted/data/etl/utils/`, `raycasted/data/etl/loader/`. All import paths must use the actual locations.
 
 ### Annotation format
 
@@ -91,8 +91,9 @@ Follow `docs/project.md §8` strictly — each phase depends only on phases abov
 Phase 0   — ops/ + constants  ✓
 Phase 0.5 — visual round-trip tests  ✓
 Phase 1   — raycast extraction in all 3 ingestors  ✓
-Phase 1.5 — IngestionOrchestrator
+Phase 1.5 — IngestionOrchestrator  ✓
 Phase 2   — SpatialChunker / NormalizerAndPadder / TransformOrchestrator patches
 Phase 3   — PolygonTileDataset + collate_fn
 Phase 4–8 — Model (YOLOv26 modifications in ultralytics/)
+Phase 9   — ONNX export + TensorRT deployment (NVIDIA Jetson)
 ```

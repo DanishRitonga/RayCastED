@@ -1,5 +1,5 @@
 [project]
-name = "HiEvNet"
+name = "RayCastED"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -57,7 +57,7 @@ docstring-code-format = true
 skip-magic-trailing-comma = false
 
 [tool.ruff.lint.isort]
-known-first-party = ["hievnet"]
+known-first-party = ["raycasted"]
 
 section-order = [
     "future", 
@@ -71,4 +71,4 @@ section-order = [
 convention = "google"
 
 [tool.setuptools.packages.find]
-include = ["hievnet*"]
+include = ["raycasted*"]

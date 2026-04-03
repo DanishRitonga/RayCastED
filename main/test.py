@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
-from hievnet.data.etl import ETLConfig, GeoJSONIngestor
+from raycasted.data.etl import ETLConfig, GeoJSONIngestor
 
 pl.Config.set_fmt_str_lengths(100)
 

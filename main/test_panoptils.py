@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import polars as pl
 from matplotlib.patches import Rectangle
 
-from hievnet.data.etl import CSVPolygonIngestor, ETLConfig
+from raycasted.data.etl import CSVPolygonIngestor, ETLConfig
 
 pl.Config.set_fmt_str_lengths(100)
 

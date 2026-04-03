@@ -1,9 +1,10 @@
 # POLYGON YOLOv26 — RAYCAST CELL DETECTION
-## Project Plan v4.8 — Architecture Reference & Bug Registry
+## Project Plan v4.12 — Architecture Reference & Bug Registry
 
 > **Status:** Pre-implementation. This document is the authoritative specification.  
-> **Scope:** HiEvNet ETL → PolygonYOLOv26 training. Inference pipeline deferred.  
-> **Dataset targets:** MoNuSAC (Parquet), PUMA (GeoJSON), PanopTILs (CSV polygons).
+> **Scope:** RayCastED ETL → PolygonYOLOv26 training → inference → NVIDIA Jetson deployment.  
+> **Dataset targets:** MoNuSAC (Parquet), PUMA (GeoJSON), PanopTILs (CSV polygons).  
+> **Deployment target:** NVIDIA Jetson (Orin/Xavier) via ONNX → TensorRT.
 
 ---
 
@@ -24,9 +25,10 @@
 13. [Module E — DataLoader](#13-module-e--dataloader)
 14. [Module F — Inference & Visualisation](#14-module-f--inference--visualisation)
 15. [Module G — Validation Metrics](#15-module-g--validation-metrics)
-16. [Hyperparameter Reference](#16-hyperparameter-reference)
-17. [Bug & Vulnerability Registry](#17-bug--vulnerability-registry)
-18. [Testing Checkpoints](#18-testing-checkpoints)
+16. [Module H — Deployment (NVIDIA Jetson)](#16-module-h--deployment-nvidia-jetson)
+17. [Hyperparameter Reference](#17-hyperparameter-reference)
+18. [Bug & Vulnerability Registry](#18-bug--vulnerability-registry)
+19. [Testing Checkpoints](#19-testing-checkpoints)
 
 ---
 
@@ -47,6 +49,7 @@
 | v4.9 | **5 plan errors corrected.** (1) `ANGLES` import in §12.4 code block corrected to `RAY_ANGLES`. (2) `LineString` intersection case added to §12.4 ray casting code (tangent rays). (3) §18 Phase 0 tests extended with `polar_iou_torch`, `polar_iou_pairwise_flat_torch`, and `angular_smoothness_loss_torch`. (4) §5.1 clarified: `decode_pred_xy` is a method of `PolygonDetectionLoss` only — not exported from `ops/`. (5) §10.1 Ultralytics API verification note added. |
 | v4.11 | **Phase 0 implementation fixes.** (1) `polygon_to_raycast` signature corrected — returns `np.ndarray\|None` (shape 35), added `fallback_counter`, removed `use_representative_point_fallback` flag, fixed `R_far` to `sqrt(bbox_w²+bbox_h²)×1.1`. (2) `polar_iou_pairwise_torch` renamed to `polar_iou_pairwise_flat_torch`; both flat variants now accept pre-expanded `[N_cand, N_gt, 32]` inputs per §7.1 shape contract. (3) `polar_iou_pairwise` (non-flat, not in spec) removed. (4) `decode_pred_xy` removed from `ops/loss.py`. (5) `smoothness.py` naming superseded — module is `loss.py` throughout; plan updated to match. (6) `loader/__init__.py` restored (was overwritten with project.md content). |
 | v4.10 | **4 specification gaps closed.** (1) §10.3 `decode_pred_xy` formula added — anchor grid decoding from grid-cell-relative to absolute normalised space. (2) §11.3 75th-percentile containment radius edge case specified — exclude zero rays; fallback to max non-zero ray when < 8 non-zero rays remain. (3) §14.1 `crop_size` source at inference specified — must be stored in model training config and read by `PolygonPredictor`. (4) §10.5 `update()` call timing clarified — lambda_smooth is still 0.001 during epoch 50's batches; reaches `smooth_end` after `update(50)` completes. |
+| v4.12 | **Jetson deployment added.** New Module H (§16) specifying ONNX export and TensorRT deployment on NVIDIA Jetson. Phase 9 added to execution order. Scope updated to include deployment target. Tech stack updated with ONNX/TensorRT dependencies. Testing checkpoints added for Phase 9. |
 
 ---
 
@@ -84,7 +87,7 @@ Trained weights
 | **StarDist** | Angular spacing convention (θ₁ = 0° → East, counter-clockwise), center-of-mass anchoring |
 | **CPP-Net** | `RayRefinementBlock`: 3×3 depthwise conv before final projection for neighbour-blended ray prediction |
 | **SplineDist** | Angular smoothness regularisation — circular first-difference penalty on predicted rays |
-| **HiEvNet ETL** | WSI tiling (`SpatialChunker`), stain normalisation (Macenko), white padding, `.npz` cache, existing `raycast` annotation type infrastructure |
+| **RayCastED ETL** | WSI tiling (`SpatialChunker`), stain normalisation (Macenko), white padding, `.npz` cache, existing `raycast` annotation type infrastructure |
 
 ---
 
@@ -113,6 +116,16 @@ Trained weights
 | **orjson** | Fast JSON parsing for GeoJSON files |
 | **MLflow** | Experiment tracking, model versioning, metric logging |
 
+### 4.2.1 Deployment Dependencies (Jetson)
+
+| Library | Version | Purpose | Where installed |
+|---------|---------|---------|-----------------|
+| **onnx** | ≥1.14 | ONNX model format | Training machine (export) |
+| **onnxruntime** | ≥1.16 | ONNX validation & CPU inference | Training machine (validation) |
+| **onnx-simplifier** | ≥0.4 | Graph optimisation before TensorRT conversion | Training machine (export) |
+| **TensorRT** | ≥8.6 | Optimised inference engine | Jetson device only |
+| **pycuda** / **cuda-python** | — | TensorRT host↔device memory transfers | Jetson device only |
+
 ### 4.3 Dependency by Pipeline Stage
 
 ```
@@ -134,6 +147,16 @@ Trained weights
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           INFERENCE STAGE                                    │
 │  pytorch • numpy • opencv • shapely                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      EXPORT (Training Machine)                               │
+│  pytorch • onnx • onnxruntime • onnx-simplifier                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      DEPLOYMENT (NVIDIA Jetson)                              │
+│  tensorrt • pycuda • numpy • opencv                                         │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -157,8 +180,8 @@ The ETL pipeline is designed to run **without PyTorch installed**. This is enfor
 
 3. **Docker images:**
    ```
-   hievnet-etl:latest        # Lightweight ETL-only image
-   hievnet-train:latest      # Full training image with GPU support
+   raycasted-etl:latest        # Lightweight ETL-only image
+   raycasted-train:latest      # Full training image with GPU support
    ```
 
 ### 4.5 Prefect Integration
@@ -205,7 +228,7 @@ def transform_tiles(config: ETLConfig):
 
 ### 5.1 Single Source of Truth for Geometry
 
-Every piece of polygon/raycast geometry logic lives in **`hievnet/data/ops/`**.  
+Every piece of polygon/raycast geometry logic lives in **`raycasted/data/ops/`**.  
 The modules are **imported** by every caller. They are **never duplicated**.
 
 **Module responsibilities:**
@@ -221,9 +244,9 @@ The modules are **imported** by every caller. They are **never duplicated**.
 > **`decode_pred_xy` is NOT in `ops/`.** It is a method of `PolygonDetectionLoss` only (§10.3). It requires knowledge of the anchor grid layout and has no meaning outside the training loss context. Placing it in `ops/` would violate the ETL/training isolation contract — `ops/` must be importable without PyTorch.
 
 **Callers:**
-- `hievnet/data/etl/ingestors/*.py` (NumPy, offline ETL)
-- `hievnet/data/etl/transform/spatialChunker.py` (NumPy, offline ETL)
-- `hievnet/data/loader/polygon_dataset.py` (NumPy, online DataLoader)
+- `raycasted/data/etl/ingestors/*.py` (NumPy, offline ETL)
+- `raycasted/data/etl/transform/spatialChunker.py` (NumPy, offline ETL)
+- `raycasted/data/loader/polygon_dataset.py` (NumPy, online DataLoader)
 - `ultralytics/utils/loss.py` (PyTorch, training)
 - `ultralytics/utils/tal.py` (PyTorch, assignment)
 - `ultralytics/models/yolo/detect/predict.py` (PyTorch, inference)
@@ -267,7 +290,7 @@ Angles increase counter-clockwise.
 Angular spacing: 11.25° (= 2π / 32)
 ```
 
-Defined once in `hievnet/data/utils/constants.py`. Imported everywhere. Never recomputed inline. Any label generation script that uses a different convention will produce silently wrong training data.
+Defined once in `raycasted/data/utils/constants.py`. Imported everywhere. Never recomputed inline. Any label generation script that uses a different convention will produce silently wrong training data.
 
 ---
 
@@ -326,12 +349,12 @@ annotations = data.get('annotations', data.get('bboxes'))
 ## 7. Repository Layout
 
 ```
-hievnet/
+raycasted/
 ├── data/
 │   ├── etl/
-│   │   ├── ingestion_orchestrator.py    NEW — drives ingestors from YAML config
 │   │   ├── ingestors/
 │   │   │   ├── _base.py                 EXISTS — BaseDataIngestor (add raycast handling)
+│   │   │   ├── ingestion_orchestrator.py  EXISTS — drives ingestors from YAML config
 │   │   │   ├── geojson_ingestor.py      MODIFY — implement _extract_raycast_annotations()
 │   │   │   ├── csv_poly_ingestor.py     MODIFY — implement _extract_raycast_annotations()
 │   │   │   ├── parquet_ingestor.py      MODIFY — implement _extract_raycast_annotations()
@@ -340,7 +363,7 @@ hievnet/
 │   │       ├── spatialChunker.py        MODIFY — add _slice_raycast()
 │   │       ├── normalizer.py            MODIFY — return content_h, content_w
 │   │       ├── stainEstimator.py        EXISTS — no changes needed
-│   │       └── orchestrator.py          MODIFY — save content dims to .npz, use 'annotations' key
+│   │       └── transform_orchestrator.py  MODIFY — save content dims to .npz, use 'annotations' key
 │   ├── ops/                             NEW — modular geometry operations
 │   │   ├── __init__.py                  NEW — re-exports all ops
 │   │   ├── convert.py                   NEW — polygon_to_raycast, raycast_to_annotation, decode_to_vertices
@@ -395,11 +418,11 @@ The `ops/` folder provides a clean, modular API for all geometry operations:
 **Import convention:**
 ```python
 # Preferred: import from ops package
-from hievnet.data.ops import polygon_to_raycast, filter_and_clip_annotations
-from hievnet.data.ops.iou import polar_iou_pairwise_flat_torch
+from raycasted.data.ops import polygon_to_raycast, filter_and_clip_annotations
+from raycasted.data.ops.iou import polar_iou_pairwise_flat_torch
 
 # Or import specific module
-from hievnet.data.ops.convert import polygon_to_raycast
+from raycasted.data.ops.convert import polygon_to_raycast
 ```
 
 ---
@@ -420,6 +443,7 @@ Phase 5   — PolygonAssigner (masked pairwise IoU)
 Phase 6   — PolygonDetectionLoss + PolygonE2ELoss
 Phase 7   — PolygonPredictor + PolygonAnnotator
 Phase 8   — PolygonValidator
+Phase 9   — ONNX export + TensorRT deployment (NVIDIA Jetson)
 ```
 
 ---
@@ -724,7 +748,7 @@ containment_radius = radius * radius_scale
 
 ### 11.4 Pairwise IoU Helper
 
-`polar_iou_pairwise_flat_torch(d_pred, d_gt)` lives in `hievnet/data/ops/iou.py` and is shared with the loss function via `polar_iou_torch`. It accepts `[N_cand, N_gt, 32]` and returns `[N_cand, N_gt]`. It must not be reimplemented in `tal.py`.
+`polar_iou_pairwise_flat_torch(d_pred, d_gt)` lives in `raycasted/data/ops/iou.py` and is shared with the loss function via `polar_iou_torch`. It accepts `[N_cand, N_gt, 32]` and returns `[N_cand, N_gt]`. It must not be reimplemented in `tal.py`.
 
 The `_flat` suffix is meaningful: it signals that the batch dimension has already been collapsed by the caller's per-batch loop. The function never sees the `B` dimension. See §7.1 for the full naming contract.
 
@@ -743,9 +767,7 @@ Both stages write `.npz` files. Ingestion produces full-ROI `.npz`. Transform pr
 
 ### 12.2 IngestionOrchestrator
 
-**File:** `hievnet/data/etl/ingestion_orchestrator.py`
-
-Reads YAML config via `ETLConfig` → instantiates correct ingestor per dataset → iterates registry → saves `.npz`.
+**File:** `raycasted/data/etl/ingestors/ingestion_orchestrator.py`
 
 **Ingestor dispatch map:**
 
@@ -862,7 +884,7 @@ def polygon_to_raycast(
     shapely.prepare(poly)   # build spatial index once; ~5× faster per-ray query
     rays = np.zeros(n_rays, dtype=np.float32)
 
-    angles = RAY_ANGLES   # from hievnet.data.utils.constants
+    angles = RAY_ANGLES   # from raycasted.data.utils.constants
 
     for i, theta in enumerate(angles):
         dx      = math.cos(theta) * R_far
@@ -1007,7 +1029,7 @@ def process_roi(self, image: np.ndarray, annotations: Any) -> tuple[np.ndarray, 
 
 ### 12.7 TransformOrchestrator Patch
 
-**Current code** (`orchestrator.py`, lines 42-48):
+**Current code** (`transform_orchestrator.py`, lines 42-48):
 ```python
 # Run the memory-only Stage 3 transformer
 final_img, final_annotations = self.normalizer.process_roi(img, annotations)
@@ -1042,7 +1064,7 @@ np.savez_compressed(
 
 ## 13. Module E — DataLoader
 
-**File:** `hievnet/data/loader/polygon_dataset.py`
+**File:** `raycasted/data/loader/polygon_dataset.py`
 
 ### 13.1 PolygonTileDataset
 
@@ -1178,7 +1200,162 @@ Start with option 1. Switch to option 2 only if reviewers require strict LSP-DET
 
 ---
 
-## 16. Hyperparameter Reference
+## 16. Module H — Deployment (NVIDIA Jetson)
+
+### 16.1 Overview
+
+Deploy the trained PolygonYOLOv26 model on NVIDIA Jetson (Orin / Xavier) for edge inference on WSI tiles. The pipeline is:
+
+```
+PyTorch checkpoint (.pt)
+    → ONNX export (training machine)
+    → ONNX validation (onnxruntime, training machine)
+    → TensorRT engine build (on Jetson device — engines are GPU-architecture-specific)
+    → FP16 inference (Jetson)
+```
+
+TensorRT engines are **not portable** across GPU architectures. Always build the engine on the target Jetson device (or use the same JetPack version in a cross-compilation container). Never ship a `.engine` file built on a desktop GPU.
+
+### 16.2 ONNX Export
+
+**File:** `raycasted/export/onnx_export.py` (NEW)
+
+**Graph boundary:** The ONNX graph contains the full model forward pass up to and including the detection head's raw output. Post-processing (confidence thresholding, xy decoding, ray denormalisation, vertex construction, deduplication) is **not** in the ONNX graph — it runs in Python/C++ on the Jetson.
+
+**Why exclude post-processing:** Post-processing uses `crop_size` from training config and pre-computed trigonometric constants (`RAY_COS`, `RAY_SIN`). Baking these into the ONNX graph creates a fragile coupling: changing `crop_size` or `N_RAYS` requires re-exporting. Keeping post-processing external allows runtime configuration.
+
+**Export function:**
+
+```python
+def export_polygon_yolo_onnx(
+    weights_path: str,
+    output_path: str,
+    imgsz: int = 640,
+    opset: int = 17,
+    simplify: bool = True,
+    dynamic_batch: bool = False,
+) -> str:
+    """Export PolygonYOLOv26 to ONNX.
+
+    Args:
+        weights_path: Path to .pt checkpoint.
+        output_path: Path to write .onnx file.
+        imgsz: Input image size (square).
+        opset: ONNX opset version. 17 covers all ops used (GroupNorm, Softplus, SiLU).
+        simplify: Run onnx-simplifier to fold constants and remove redundant nodes.
+        dynamic_batch: If True, export with dynamic batch dimension (batch_size=1..N).
+
+    Returns:
+        Path to the exported .onnx file.
+    """
+```
+
+**Key steps:**
+1. Load checkpoint, set model to eval mode
+2. Create dummy input: `torch.randn(1, 3, imgsz, imgsz)`
+3. `torch.onnx.export()` with:
+   - `opset_version=17`
+   - `input_names=['images']`
+   - `output_names=['output']`
+   - `dynamic_axes={'images': {0: 'batch'}, 'output': {0: 'batch'}}` if `dynamic_batch=True`
+4. Validate with `onnx.checker.check_model()`
+5. If `simplify=True`, run `onnxsim.simplify()`
+6. Save and return path
+
+**ONNX output shape:** `[B, N_anchors, nc + 34]` — identical to the PyTorch head output. `N_anchors` depends on `imgsz` (e.g., 8400 for 640×640 with standard YOLO stride set {8, 16, 32}).
+
+**Opset 17 rationale:** GroupNorm (opset 6), Softplus (opset 1), SiLU/Swish (opset 14), Sigmoid (opset 1) are all covered. Opset 17 is the safe minimum that avoids known TensorRT compatibility issues with older opsets.
+
+### 16.3 ONNX Validation
+
+Before deploying to Jetson, validate numerical equivalence on the training machine:
+
+1. Run PyTorch model on N sample images → collect raw outputs
+2. Run same images through `onnxruntime.InferenceSession` → collect ONNX outputs
+3. Assert `np.allclose(pytorch_output, onnx_output, atol=1e-5, rtol=1e-4)`
+
+Small FP32 divergence (<1e-5) is normal due to operator fusion. If divergence exceeds 1e-4 on any output element, the export is broken — do not deploy.
+
+### 16.4 TensorRT Engine Build (On-Device)
+
+**File:** `raycasted/deploy/build_engine.py` (NEW — runs on Jetson only)
+
+Build the TensorRT engine from the ONNX file on the target Jetson:
+
+```bash
+# CLI option (simplest)
+/usr/src/tensorrt/bin/trtexec \
+    --onnx=polygon_yolo.onnx \
+    --saveEngine=polygon_yolo.engine \
+    --fp16 \
+    --workspace=4096 \
+    --verbose
+```
+
+Or programmatic build via `tensorrt.Builder` API for tighter control over:
+- FP16 mode (default — Jetson Orin achieves ~2× throughput vs FP32 with <0.5% mAP drop on detection tasks)
+- Workspace size (4 GB default; reduce to 2 GB on Jetson Nano)
+- Dynamic batch size (min=1, opt=1, max=8 for WSI tile streaming)
+
+**FP16 is the default precision.** INT8 quantization requires a calibration dataset and post-training quantization (PTQ) or quantization-aware training (QAT). Defer INT8 unless FP16 throughput is insufficient.
+
+### 16.5 Jetson Inference Runtime
+
+**File:** `raycasted/deploy/jetson_inference.py` (NEW — runs on Jetson only)
+
+The inference runtime on Jetson:
+
+1. **Load engine:** Deserialise `.engine` file via `tensorrt.Runtime`
+2. **Allocate buffers:** Host and device memory for input/output tensors
+3. **Preprocess:** Load tile → resize to `imgsz` → normalise [0,1] → CHW → contiguous float32/float16
+4. **Execute:** `context.execute_v2(bindings)` or async `execute_async_v2`
+5. **Post-process** (on host, NumPy):
+   - Extract class logits, xy offsets, ray distances from `[1, N_anchors, nc+34]`
+   - Apply Sigmoid to class logits and xy offsets
+   - Apply Softplus to ray distances: `log(1 + exp(x))`
+   - Decode xy to absolute pixel coordinates using anchor grid
+   - Denormalise rays: `rays_px = rays_norm × crop_size`
+   - Confidence threshold filter (default 0.25)
+   - Distance-based deduplication (same logic as `PolygonPredictor`)
+   - Build polygon vertices: `(cx + d_i × cos θ_i, cy + d_i × sin θ_i)`
+
+**`crop_size` source:** Read from a sidecar metadata file exported alongside the ONNX model (e.g., `polygon_yolo_meta.json` containing `{"crop_size": 640, "nc": 5, "n_rays": 32, "ray_angles": [...]}`). Never hardcode.
+
+**Anchor grid:** The anchor grid positions depend on `imgsz` and stride set. Pre-compute during engine load and cache — it does not change between inference calls at the same resolution.
+
+### 16.6 Export Metadata Sidecar
+
+The ONNX export step must also write a JSON sidecar file containing all parameters needed for post-processing:
+
+```json
+{
+    "crop_size": 640,
+    "imgsz": 640,
+    "nc": 5,
+    "n_rays": 32,
+    "ray_angles": [0.0, 0.19635, ...],
+    "ray_cos": [1.0, 0.98079, ...],
+    "ray_sin": [0.0, 0.19509, ...],
+    "strides": [8, 16, 32],
+    "conf_threshold": 0.25,
+    "dedup_radius_px": 5
+}
+```
+
+This decouples the Jetson runtime from the training codebase — the Jetson deployment needs only the `.engine` file, the sidecar JSON, and `jetson_inference.py`.
+
+### 16.7 Performance Targets
+
+| Platform | Precision | Target throughput | Latency target |
+|----------|-----------|-------------------|----------------|
+| Jetson Orin (32GB) | FP16 | ≥ 30 tiles/sec at 640×640 | ≤ 33 ms/tile |
+| Jetson Xavier NX | FP16 | ≥ 10 tiles/sec at 640×640 | ≤ 100 ms/tile |
+
+These targets are estimates based on published YOLO benchmarks on Jetson. Actual throughput depends on model complexity (backbone size, number of heads). Profile with `trtexec --onnx=model.onnx --fp16 --iterations=100` to measure before optimising.
+
+---
+
+## 17. Hyperparameter Reference
 
 | Parameter | Value | Location | Notes |
 |-----------|-------|----------|-------|
@@ -1211,7 +1388,7 @@ Start with option 1. Switch to option 2 only if reviewers require strict LSP-DET
 
 ---
 
-## 17. Bug & Vulnerability Registry
+## 18. Bug & Vulnerability Registry
 
 Every entry here must be addressed during implementation. Entries are classified by the severity of the consequence if ignored.
 
@@ -1222,7 +1399,7 @@ Every entry here must be addressed during implementation. Entries are classified
 ---
 
 #### BUG-01 — Bias introduced by `eps` in clipping denominators
-**File:** `hievnet/data/utils/annotation_ops.py` → `filter_and_clip_annotations()`
+**File:** `raycasted/data/utils/annotation_ops.py` → `filter_and_clip_annotations()`
 
 The `where` condition gates out near-zero cosine/sine values before the division, so the denominators are already safe. Adding `eps` to them biases the boundary distance calculation.
 
@@ -1322,7 +1499,7 @@ The one-line replacement is the correct pattern. It is safe because all inherite
 ---
 
 #### BUG-08 — `validate_batch` ray upper bound must be 1.0, not 1.5
-**File:** `hievnet/data/loader/polygon_dataset.py`
+**File:** `raycasted/data/loader/polygon_dataset.py`
 
 `filter_and_clip_annotations()` clips all rays to the crop content boundary. After normalisation by `crop_size`, no ray can exceed `crop_size / crop_size = 1.0`. Using an upper bound of 1.5 in the assertion would silently pass batches with incorrectly normalised rays.
 
@@ -1338,7 +1515,7 @@ assert labels[:, 4:36].max() <= 1.0, "ray > 1.0: clipping or normalisation bug"
 ---
 
 #### GAP-01 — `MatInstIngestor` must be registered in the ingestion dispatch map
-**File:** `hievnet/data/etl/ingestion_orchestrator.py`
+**File:** `raycasted/data/etl/ingestors/ingestion_orchestrator.py`
 
 `mat_inst_ingestor.py` (`ingestion_method=3`) exists in the repo. CoNSeP is currently commented out in the YAML config, but the orchestrator must still register method 3. Without it, uncommenting CoNSeP produces a confusing `ValueError` rather than a clear "not implemented" message.
 
@@ -1347,14 +1524,14 @@ assert labels[:, 4:36].max() <= 1.0, "ray > 1.0: clipping or normalisation bug"
 ---
 
 #### GAP-02 — `split` column name ✅ RESOLVED
-**File:** `hievnet/data/etl/ingestion_orchestrator.py`
+**File:** `raycasted/data/etl/ingestors/ingestion_orchestrator.py`
 
 **Resolution:** The split column is named `'split'` in the Polars DataFrame produced by `BaseDataIngestor._build_registry()` (verified in existing code at line 58-60). Use `row['split']` to read the split label.
 
 ---
 
 #### GAP-03 — `annotation_type` is global-only by design
-**File:** `hievnet/data/etl/config.py`
+**File:** `raycasted/data/etl/config.py`
 
 `annotation_type` is declared in `GlobalSettings` and applies to all datasets in a single pipeline run. This is intentional. To ingest different datasets with different annotation types, run the pipeline separately with different YAML configs.
 
@@ -1363,7 +1540,7 @@ This is not a bug. It is documented here to prevent it from being re-raised as a
 ---
 
 #### GAP-04 — Flip/rotate function signatures: permutation indices are internal
-**File:** `hievnet/data/utils/annotation_ops.py`
+**File:** `raycasted/data/utils/annotation_ops.py`
 
 Permutation index arrays (`FLIP_H_IDX`, `FLIP_V_IDX`, `ROT_INDICES`) must be imported from `constants.py` inside `annotation_ops.py` and used internally. They must **not** be passed as arguments by callers.
 
@@ -1401,7 +1578,7 @@ Ultralytics' built-in mosaic and mixup pipelines validate and transform annotati
 ---
 
 #### NOTE-01 — `CHAIN_APPROX_NONE` vs `CHAIN_APPROX_SIMPLE` in Parquet ingestor
-**File:** `hievnet/data/etl/ingestors/parquet_ingestor.py`
+**File:** `raycasted/data/etl/ingestors/parquet_ingestor.py`
 
 `CHAIN_APPROX_NONE` is required for correctness: it preserves all boundary pixels, producing a dense polygon for Shapely ray-casting. `CHAIN_APPROX_SIMPLE` suppresses collinear edge pixels, which causes ray misses on small circular cells (< 0.5px error but concentrated on the axes where contour points were suppressed).
 
@@ -1410,14 +1587,14 @@ If MoNuSAC ingestion is unexpectedly slow, switching to `CHAIN_APPROX_SIMPLE` is
 ---
 
 #### NOTE-02 — `ProcessPoolExecutor` pickling risk in the ingestion orchestrator
-**File:** `hievnet/data/etl/ingestion_orchestrator.py`
+**File:** `raycasted/data/etl/ingestors/ingestion_orchestrator.py`
 
 When `num_workers > 1`, the orchestrator serialises `_process_dataset` as a bound method via `ProcessPoolExecutor`. If `BaseDataIngestor` holds non-picklable state (open file handles, database connections), multiprocessing fails with an opaque pickle error. Start with `num_workers=1` and increase only after confirming the ingestor instances are picklable.
 
 ---
 
 #### NOTE-03 — Polar-IoU is a sector-area approximation, not exact 2D polygon IoU
-**File:** `hievnet/data/utils/annotation_ops.py`
+**File:** `raycasted/data/utils/annotation_ops.py`
 
 `PolarIoU = Σ min(d,d')² / Σ max(d,d')²` approximates sector areas assuming uniform angular spacing. For near-circular TILs this is tight. For elongated or irregularly-shaped cells the approximation diverges from exact 2D polygon IoU.
 
@@ -1426,7 +1603,7 @@ When `num_workers > 1`, the orchestrator serialises `_process_dataset` as a boun
 ---
 
 #### NOTE-04 — Zero rays from `polygon_to_raycast` indicate geometry failures
-**File:** `hievnet/data/utils/annotation_ops.py`
+**File:** `raycasted/data/utils/annotation_ops.py`
 
 Any ray that does not intersect the polygon boundary returns `d_i = 0.0`. These cells are not immediately dropped — they pass through ingestion and are filtered during `filter_and_clip_annotations()` based on the ray survival fraction threshold.
 
@@ -1436,7 +1613,7 @@ Add a diagnostic counter in each ingestor that logs the number of cells with mor
 
 ---
 
-## 18. Testing Checkpoints
+## 19. Testing Checkpoints
 
 ### Phase 0 — Shared Utilities
 
@@ -1472,8 +1649,8 @@ Add a diagnostic counter in each ingestor that logs the number of cells with mor
 ### Phase 1 — ETL Ingestion
 
 - [x] All three ingestors produce `(N, 35)` float32 arrays for `annotation_type=raycast`
-- [ ] `IngestionOrchestrator` writes correct `<dataset>/<split>/` directory layout  *(Phase 1.5)*
-- [ ] Split subdirectories populated correctly (use `row['split']`)  *(Phase 1.5)*
+- [x] `IngestionOrchestrator` writes correct `<dataset>/<split>/` directory layout
+- [x] Split subdirectories populated correctly (use `row['split']`)
 - [x] `MatInstIngestor` registered in dispatch map without error (see GAP-01)  *(importable from module; dispatch map is Phase 1.5)*
 - [ ] Diagnostic: each ingestor passes `fallback_counter` to `polygon_to_raycast()` and logs fallback rate (§12.4)  *(deferred — implement before first real-data run)*
 - [ ] Diagnostic: each ingestor logs count of cells with > 5 zero rays; fraction < 1% per dataset (NOTE-04)  *(deferred — implement before first real-data run)*
@@ -1528,6 +1705,18 @@ Add a diagnostic counter in each ingestor that logs the number of cells with mor
 - [ ] mAP50 > 0.30 within 20 epochs on held-out validation set
 - [ ] Both `shapely_f1` and `centroid_f1` are computed and logged each evaluation epoch (see §14.2)
 - [ ] `centroid_f1` at LSP-DETR distance threshold µ matches expected range for direct comparison
+
+### Phase 9 — ONNX Export + TensorRT Deployment
+
+- [ ] ONNX export produces valid model (passes `onnx.checker.check_model`)
+- [ ] ONNX output shape matches PyTorch: `[1, N_anchors, nc + 34]`
+- [ ] PyTorch vs ONNX numerical agreement: `np.allclose(output, atol=1e-5, rtol=1e-4)`
+- [ ] onnx-simplifier reduces node count without changing output
+- [ ] Metadata sidecar JSON written alongside `.onnx` with `crop_size`, `nc`, `n_rays`, `ray_angles`, `strides`
+- [ ] TensorRT engine builds on Jetson without errors (`trtexec --fp16`)
+- [ ] TensorRT FP16 output matches PyTorch FP32 within FP16 tolerance (`atol=0.01`)
+- [ ] Jetson inference end-to-end: image in → polygon vertices out (pixel space)
+- [ ] Throughput target met: ≥ 30 tiles/sec on Jetson Orin (FP16, 640×640)
 ```
 
 ---

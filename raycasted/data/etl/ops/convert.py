@@ -79,7 +79,7 @@ def polygon_to_raycast(
     shapely.prepare(poly)  # build spatial index once; ~5x faster per-ray query
     rays = np.zeros(n_rays, dtype=np.float32)
 
-    angles = RAY_ANGLES  # from hievnet.data.etl.utils.constants
+    angles = RAY_ANGLES  # from raycasted.data.etl.utils.constants
 
     for i, theta in enumerate(angles):
         dx = math.cos(theta) * R_far

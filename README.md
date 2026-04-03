@@ -1,3 +1,3 @@
-# HiEvNet: Hierarchical Evidence Network
+# RayCastED: RayCast-based End-to-end Detection
 ---
-A Feature Pyramid Network (FPN) inspired extension to YOLOv26 used to capture uncertainty through different layers of the bottleneck.
+A raycast polygon detector built on YOLOv26 for detecting cells in histopathological whole-slide images. The model detects objects by casting rays from centroids to predict their boundaries.

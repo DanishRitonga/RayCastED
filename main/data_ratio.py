@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Adjust these imports to match your project structure
-from hievnet.data.etl import CSVPolygonIngestor, ETLConfig, GeoJSONIngestor, ParquetIngestor
+from raycasted.data.etl import CSVPolygonIngestor, ETLConfig, GeoJSONIngestor, ParquetIngestor
 
 
 def get_ingestor(dataset_name: str, config: dict):

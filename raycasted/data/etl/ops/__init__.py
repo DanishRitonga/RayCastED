@@ -2,9 +2,9 @@
 
 Single source of truth for all polygon/raycast geometry logic.
 This module is imported by:
-    - hievnet/data/etl/ingestors/*.py (NumPy, offline ETL)
-    - hievnet/data/etl/transform/*.py (NumPy, offline ETL)
-    - hievnet/data/etl/loader/polygon_dataset.py (NumPy, online DataLoader)
+    - raycasted/data/etl/ingestors/*.py (NumPy, offline ETL)
+    - raycasted/data/etl/transform/*.py (NumPy, offline ETL)
+    - raycasted/data/etl/loader/polygon_dataset.py (NumPy, online DataLoader)
     - ultralytics/utils/loss.py (PyTorch, training)
     - ultralytics/utils/tal.py (PyTorch, assignment)
     - ultralytics/models/yolo/detect/predict.py (PyTorch, inference)

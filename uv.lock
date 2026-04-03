@@ -912,51 +912,6 @@ wheels = [
 ]
 
 [[package]]
-name = "hievnet"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "matplotlib" },
-    { name = "numcodecs" },
-    { name = "numpy" },
-    { name = "opencv-python" },
-    { name = "openslide-bin" },
-    { name = "pathlib" },
-    { name = "pillow" },
-    { name = "polars" },
-    { name = "prefect" },
-    { name = "pyarrow" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-    { name = "scipy" },
-    { name = "seaborn" },
-    { name = "shapely" },
-    { name = "torch" },
-    { name = "torchvision" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "matplotlib", specifier = ">=3.9.3" },
-    { name = "numcodecs", specifier = "<0.13.0" },
-    { name = "numpy", specifier = ">=1.26.4" },
-    { name = "opencv-python", specifier = ">=4.9.0.80" },
-    { name = "openslide-bin", specifier = ">=4.0.0.11" },
-    { name = "pathlib", specifier = ">=1.0.1" },
-    { name = "pillow", specifier = ">=11.0.0" },
-    { name = "polars", specifier = ">=1.38.1" },
-    { name = "prefect", specifier = ">=3.6.21" },
-    { name = "pyarrow", specifier = ">=23.0.1" },
-    { name = "pydantic", specifier = ">=2.12.5" },
-    { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "scipy", specifier = ">=1.14.1" },
-    { name = "seaborn", specifier = ">=0.13.2" },
-    { name = "shapely", specifier = ">=2.1.2" },
-    { name = "torch", specifier = ">=2.11.0" },
-    { name = "torchvision", specifier = ">=0.26.0" },
-]
-
-[[package]]
 name = "hpack"
 version = "4.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2405,6 +2360,51 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/fe/0f/25911a9f080464c59fab9027482f822b86bf0608957a5fcc6eaac85aa515/PyYAML-6.0.2-cp313-cp313-musllinux_1_1_x86_64.whl", hash = "sha256:68ccc6023a3400877818152ad9a1033e3db8625d899c72eacb5a668902e4d652", size = 751597, upload-time = "2024-08-06T20:32:56.985Z" },
     { url = "https://files.pythonhosted.org/packages/14/0d/e2c3b43bbce3cf6bd97c840b46088a3031085179e596d4929729d8d68270/PyYAML-6.0.2-cp313-cp313-win32.whl", hash = "sha256:bc2fa7c6b47d6bc618dd7fb02ef6fdedb1090ec036abab80d4681424b84c1183", size = 140527, upload-time = "2024-08-06T20:33:03.001Z" },
     { url = "https://files.pythonhosted.org/packages/fa/de/02b54f42487e3d3c6efb3f89428677074ca7bf43aae402517bc7cca949f3/PyYAML-6.0.2-cp313-cp313-win_amd64.whl", hash = "sha256:8388ee1976c416731879ac16da0aff3f63b286ffdd57cdeb95f3f2e085687563", size = 156446, upload-time = "2024-08-06T20:33:04.33Z" },
+]
+
+[[package]]
+name = "raycasted"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "numcodecs" },
+    { name = "numpy" },
+    { name = "opencv-python" },
+    { name = "openslide-bin" },
+    { name = "pathlib" },
+    { name = "pillow" },
+    { name = "polars" },
+    { name = "prefect" },
+    { name = "pyarrow" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "scipy" },
+    { name = "seaborn" },
+    { name = "shapely" },
+    { name = "torch" },
+    { name = "torchvision" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "matplotlib", specifier = ">=3.9.3" },
+    { name = "numcodecs", specifier = "<0.13.0" },
+    { name = "numpy", specifier = ">=1.26.4" },
+    { name = "opencv-python", specifier = ">=4.9.0.80" },
+    { name = "openslide-bin", specifier = ">=4.0.0.11" },
+    { name = "pathlib", specifier = ">=1.0.1" },
+    { name = "pillow", specifier = ">=11.0.0" },
+    { name = "polars", specifier = ">=1.38.1" },
+    { name = "prefect", specifier = ">=3.6.21" },
+    { name = "pyarrow", specifier = ">=23.0.1" },
+    { name = "pydantic", specifier = ">=2.12.5" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "scipy", specifier = ">=1.14.1" },
+    { name = "seaborn", specifier = ">=0.13.2" },
+    { name = "shapely", specifier = ">=2.1.2" },
+    { name = "torch", specifier = ">=2.11.0" },
+    { name = "torchvision", specifier = ">=0.26.0" },
 ]
 
 [[package]]
