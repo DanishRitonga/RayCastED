@@ -12,7 +12,6 @@ import collections
 import math
 import os
 
-import cv2
 import numpy as np
 from shapely.geometry import Polygon
 
@@ -152,58 +151,72 @@ def test_r_far_validation():
 # ---------------------------------------------------------------------------
 
 def test_visual_output():
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print('  [INFO] test_visual_output  skipped (matplotlib not available)')
+        return
+
     output_dir = os.path.join(os.path.dirname(__file__), 'output')
     os.makedirs(output_dir, exist_ok=True)
 
-    canvas_size = 300
-    canvas = np.ones((canvas_size, canvas_size, 3), dtype=np.uint8) * 255
+    # Build shapes
+    circle = _circle_polygon(cx=60, cy=60, radius=40, n_pts=64)
 
-    # Draw three polygons side-by-side: circle, star, C-shape
-    shapes = [
-        ('circle',   _circle_polygon(cx=60, cy=150, radius=40, n_pts=64),   (200, 80,  80)),
-        ('star',     None,                                                    (80,  160, 80)),
-        ('C-shape',  None,                                                    (80,  80,  200)),
-    ]
-
-    # Build 2:1 ellipse (mirrors test_irregular_round_trip)
-    cx_s, cy_s = 150.0, 150.0
-    a_vis, b_vis = 45.0, 22.0
+    cx_s, cy_s = 60.0, 60.0
     ellipse_coords = [
-        (cx_s + a_vis * math.cos(2 * math.pi * i / 64), cy_s + b_vis * math.sin(2 * math.pi * i / 64))
+        (cx_s + 45.0 * math.cos(2 * math.pi * i / 64), cy_s + 22.0 * math.sin(2 * math.pi * i / 64))
         for i in range(64)
     ]
-    shapes[1] = ('ellipse', Polygon(ellipse_coords), (80, 160, 80))
+    ellipse = Polygon(ellipse_coords)
 
-    # Build C-shape polygon (scaled/offset version of the fallback test shape)
-    outer = Polygon([(210, 110), (290, 110), (290, 210), (210, 210)])
-    notch = Polygon([(235, 125), (300, 125), (300, 195), (235, 195)])
+    outer = Polygon([(20, 20), (100, 20), (100, 100), (20, 100)])
+    notch = Polygon([(45, 30), (110, 30), (110, 90), (45, 90)])
     c_poly = outer.difference(notch)
-    shapes[2] = ('C-shape', c_poly, (80, 80, 200))
 
-    for label, poly, colour in shapes:
+    shapes = [('circle', circle), ('ellipse', ellipse), ('C-shape', c_poly)]
+    colours = ['tab:blue', 'tab:green', 'tab:orange']
+
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+    for ax, (label, poly), colour in zip(axes, shapes, colours):
         ann = polygon_to_raycast(poly, class_id=0)
         if ann is None:
+            ax.set_title(f'{label} (None)')
             continue
 
-        cx = np.array([ann[CX_IDX]])
-        cy = np.array([ann[CY_IDX]])
-        rays = ann[np.newaxis, RAY_START_IDX:RAY_END_IDX]
+        cx_arr = np.array([ann[CX_IDX]])
+        cy_arr = np.array([ann[CY_IDX]])
+        rays_arr = ann[np.newaxis, RAY_START_IDX:RAY_END_IDX]
+        vertices = decode_to_vertices(rays_arr, cx_arr, cy_arr)[0]  # (32, 2)
 
-        vertices = decode_to_vertices(rays, cx, cy)[0]  # (32, 2)
-        pts = vertices.astype(np.int32)
+        # Original boundary
+        ox, oy = poly.exterior.xy
+        ax.plot(ox, oy, color='lightgray', linewidth=1, label='original')
+        ax.fill(ox, oy, color='lightgray', alpha=0.3)
 
-        # Draw original polygon boundary in grey
-        orig_coords = np.array(list(poly.exterior.coords), dtype=np.int32)
-        cv2.polylines(canvas, [orig_coords], isClosed=True, color=(180, 180, 180), thickness=1)
+        # Decoded polygon (closed loop)
+        vx = np.append(vertices[:, 0], vertices[0, 0])
+        vy = np.append(vertices[:, 1], vertices[0, 1])
+        ax.plot(vx, vy, color=colour, linewidth=2, label='decoded')
+        ax.fill(vx, vy, color=colour, alpha=0.2)
 
-        # Draw decoded raycast polygon in colour
-        cv2.polylines(canvas, [pts], isClosed=True, color=colour, thickness=2)
+        # Centroid
+        ax.plot(ann[CX_IDX], ann[CY_IDX], 'k+', markersize=8)
 
-        # Mark centroid
-        cv2.circle(canvas, (int(ann[CX_IDX]), int(ann[CY_IDX])), 3, colour, -1)
+        intersection = poly.intersection(raycast_to_polygon(rays_arr[0], float(ann[CX_IDX]), float(ann[CY_IDX]))).area
+        union = poly.union(raycast_to_polygon(rays_arr[0], float(ann[CX_IDX]), float(ann[CY_IDX]))).area
+        iou = intersection / union if union > 0 else 0.0
 
+        ax.set_title(f'{label}  IoU={iou:.3f}')
+        ax.set_aspect('equal')
+        ax.legend(fontsize=7)
+
+    plt.tight_layout()
     out_path = os.path.join(output_dir, 'round_trip.png')
-    cv2.imwrite(out_path, canvas)
+    plt.savefig(out_path, dpi=150)
+    plt.close()
     print(f'  [INFO] test_visual_output  saved → {out_path}')
 
 

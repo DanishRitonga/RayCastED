@@ -1453,21 +1453,21 @@ Add a diagnostic counter in each ingestor that logs the number of cells with mor
 
 ### Phase 0.5 — Ingestor Verification (before any full ETL run)
 
-- [ ] `polygon_to_raycast` round-trip: polygon → rays → vertices; area overlap threshold is **dataset-dependent**:
+- [x] `polygon_to_raycast` round-trip: polygon → rays → vertices; area overlap threshold is **dataset-dependent**:
     - MoNuSAC / PanNuke (roughly circular nuclei): ≥ 0.95
     - PanopTILs (irregular lymphocyte shapes):     ≥ 0.90
     - Use 0.90 as the universal fallback if per-dataset shapes are unknown at test time.
 
-- [ ] `representative_point()` fallback: given a known concave test polygon (manually construct a C-shaped polygon where `.centroid` falls outside), confirm that:
+- [x] `representative_point()` fallback: given a known concave test polygon (manually construct a C-shaped polygon where `.centroid` falls outside), confirm that:
     - The output row's `cx/cy` (indices 1–2) match the representative point, not the original centroid.
     - The decoded polygon vertices reconstruct visually correctly when rendered on the polygon's source image.
     - The fallback counter increments by exactly 1 for this test case.
 
-- [ ] `R_far` validation: for a circular polygon of radius `r`, confirm that `R_far = sqrt((2r)² + (2r)²) × 1.1 = 2r√2 × 1.1 ≈ 3.11r` and that all 32 rays are non-zero (i.e., `R_far` reaches the boundary in every direction).
+- [x] `R_far` validation: for a circular polygon of radius `r`, confirm that `R_far = sqrt((2r)² + (2r)²) × 1.1 = 2r√2 × 1.1 ≈ 3.11r` and that all 32 rays are non-zero (i.e., `R_far` reaches the boundary in every direction).
 
-- [ ] Visual: overlay decoded GT rays on 10 H&E crops from each dataset — boundaries align with cell membranes
-- [ ] No annotation has any `d_i` greater than the centroid's distance to the nearest image edge
-- [ ] Fraction of cells with > 5 zero rays < 1% per dataset (see NOTE-04)
+- [ ] Visual: overlay decoded GT rays on 10 H&E crops from each dataset — boundaries align with cell membranes  *(deferred to Phase 1 — requires real dataset)*
+- [ ] No annotation has any `d_i` greater than the centroid's distance to the nearest image edge  *(deferred to Phase 1)*
+- [ ] Fraction of cells with > 5 zero rays < 1% per dataset (see NOTE-04)  *(deferred to Phase 1)*
 
 ### Phase 1 — ETL Ingestion
 
