@@ -1471,10 +1471,12 @@ Add a diagnostic counter in each ingestor that logs the number of cells with mor
 
 ### Phase 1 — ETL Ingestion
 
-- [ ] All three ingestors produce `(N, 35)` float32 arrays for `annotation_type=raycast`
-- [ ] `IngestionOrchestrator` writes correct `<dataset>/<split>/` directory layout
-- [ ] Split subdirectories populated correctly (use `row['split']`)
-- [ ] `MatInstIngestor` registered in dispatch map without error (see GAP-01)
+- [x] All three ingestors produce `(N, 35)` float32 arrays for `annotation_type=raycast`
+- [ ] `IngestionOrchestrator` writes correct `<dataset>/<split>/` directory layout  *(Phase 1.5)*
+- [ ] Split subdirectories populated correctly (use `row['split']`)  *(Phase 1.5)*
+- [x] `MatInstIngestor` registered in dispatch map without error (see GAP-01)  *(importable from module; dispatch map is Phase 1.5)*
+- [ ] Diagnostic: each ingestor passes `fallback_counter` to `polygon_to_raycast()` and logs fallback rate (§12.4)  *(deferred — implement before first real-data run)*
+- [ ] Diagnostic: each ingestor logs count of cells with > 5 zero rays; fraction < 1% per dataset (NOTE-04)  *(deferred — implement before first real-data run)*
 
 ### Phase 2 — ETL Transform
 

@@ -81,6 +81,7 @@ Post-`TransformOrchestrator` tiles contain: `image` (uint8, HWC), `annotations` 
 
 - `MatInstIngestor._extract_raycast_annotations()` is a stub (`NotImplementedError`) — deferred, requires contour extraction from instance maps.
 - Phase 0.5 deferred items (require real datasets): H&E overlay, `d_i` ≤ centroid-to-edge check, zero-ray fraction < 1%.
+- Ingestor diagnostic counters not yet wired: `fallback_counter` not passed to `polygon_to_raycast()`, zero-ray logging not implemented. Must be added before first real-data run (see §12.4, NOTE-04).
 
 ### Implementation order
 
