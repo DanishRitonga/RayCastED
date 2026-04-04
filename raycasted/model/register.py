@@ -1,11 +1,11 @@
 """RayCastED — Ultralytics Registration Utility.
 
-Registers PolygonDetect and RayRefinementBlock with the Ultralytics
+Registers RayCastDetect and RayRefinementBlock with the Ultralytics
 module resolution system so YAML model configs can reference them.
 
 Usage:
-    from raycasted.model import register_polygon_head
-    register_polygon_head()  # call before loading any YAML config
+    from raycasted.model import register_raycast_head
+    register_raycast_head()  # call before loading any YAML config
 
 Note:
     Full parse_model() frozenset integration requires monkey-patching.
@@ -16,11 +16,11 @@ Note:
 _REGISTERED = False
 
 
-def register_polygon_head() -> None:
-    """Patch PolygonDetect into ultralytics module namespaces.
+def register_raycast_head() -> None:
+    """Patch RayCastDetect into ultralytics module namespaces.
 
-    Makes PolygonDetect resolvable by parse_model's globals() lookup.
-    Must be called before loading any YAML config that references PolygonDetect.
+    Makes RayCastDetect resolvable by parse_model's globals() lookup.
+    Must be called before loading any YAML config that references RayCastDetect.
     Safe to call multiple times — subsequent calls are no-ops.
     """
     global _REGISTERED
@@ -30,14 +30,14 @@ def register_polygon_head() -> None:
     import ultralytics.nn.modules as modules
     import ultralytics.nn.tasks as tasks
 
-    from raycasted.model.head import PolygonDetect, RayRefinementBlock
+    from raycasted.model.head import RayCastDetect, RayRefinementBlock
 
     # Inject into ultralytics.nn.modules namespace
-    setattr(modules, 'PolygonDetect', PolygonDetect)
+    setattr(modules, 'RayCastDetect', RayCastDetect)
     setattr(modules, 'RayRefinementBlock', RayRefinementBlock)
 
     # Inject into ultralytics.nn.tasks namespace (for globals() resolution in parse_model)
-    setattr(tasks, 'PolygonDetect', PolygonDetect)
+    setattr(tasks, 'RayCastDetect', RayCastDetect)
     setattr(tasks, 'RayRefinementBlock', RayRefinementBlock)
 
     _REGISTERED = True

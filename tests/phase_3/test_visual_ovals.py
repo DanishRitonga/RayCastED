@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from raycasted.data.etl.loader.polygon_dataset import PolygonTileDataset
+from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.data.etl.ops.convert import decode_to_vertices, polygon_to_raycast
 from raycasted.data.etl.utils.constants import CX_IDX, CY_IDX, RAY_END_IDX, RAY_START_IDX
 
@@ -165,7 +165,7 @@ def generate_oval_visuals():
             semi_a_range=(15, 50), semi_b_range=(5, 18),
         )
 
-        ds = PolygonTileDataset(str(tile_dir), crop_size=crop_size, augment=True)
+        ds = RayCastTileDataset(str(tile_dir), crop_size=crop_size, augment=True)
 
         fig, axes = plt.subplots(3, 4, figsize=(20, 15))
         fig.suptitle('Oval Annotations — Dense Edge Cases (cyan=safe, yellow=close, red=near-edge)',
@@ -187,7 +187,7 @@ def generate_oval_visuals():
             semi_a_range=(30, 60), semi_b_range=(8, 20),
         )
 
-        ds = PolygonTileDataset(str(tile_dir), crop_size=crop_size, augment=True)
+        ds = RayCastTileDataset(str(tile_dir), crop_size=crop_size, augment=True)
 
         fig, axes = plt.subplots(3, 4, figsize=(20, 15))
         fig.suptitle('Oval Annotations — Large Shapes (cyan=safe, yellow=close, red=near-edge)',
@@ -209,7 +209,7 @@ def generate_oval_visuals():
             semi_a_range=(15, 50), semi_b_range=(5, 18),
         )
 
-        ds = PolygonTileDataset(str(tile_dir), crop_size=crop_size, augment=False)
+        ds = RayCastTileDataset(str(tile_dir), crop_size=crop_size, augment=False)
 
         fig, axes = plt.subplots(3, 4, figsize=(20, 15))
         fig.suptitle('Oval Annotations — No Augmentation (raw crop clipping only)',

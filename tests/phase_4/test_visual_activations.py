@@ -9,7 +9,7 @@ Run with: uv run python tests/phase_4/test_visual_activations.py
 import torch
 import torch.nn.functional as F
 
-from raycasted.model.head import POLYGON_DIM, PolygonDetect
+from raycasted.model.head import RAYCAST_DIM, RayCastDetect
 
 NC = 4
 REG_MAX = 16
@@ -27,7 +27,7 @@ def generate_activation_plots():
     import matplotlib.pyplot as plt
     from pathlib import Path
 
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
     head.eval()
     head.stride = torch.tensor([8.0, 16.0, 32.0])
 

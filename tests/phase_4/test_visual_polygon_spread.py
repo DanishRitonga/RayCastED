@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from raycasted.data.etl.ops.convert import decode_to_vertices
-from raycasted.model.head import PolygonDetect
+from raycasted.model.head import RayCastDetect
 
 NC = 4
 REG_MAX = 16
@@ -30,7 +30,7 @@ def generate_polygon_spread_plots():
     import matplotlib.pyplot as plt
     from pathlib import Path
 
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
     head.eval()
     head.stride = torch.tensor([8.0, 16.0, 32.0])
 

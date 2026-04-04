@@ -1,5 +1,5 @@
 """RayCastED — DataLoader Module."""
 
-from .polygon_dataset import PolygonTileDataset, collate_fn
+from .raycast_dataset import RayCastTileDataset, collate_fn
 
-__all__ = ['PolygonTileDataset', 'collate_fn']
+__all__ = ['RayCastTileDataset', 'collate_fn']

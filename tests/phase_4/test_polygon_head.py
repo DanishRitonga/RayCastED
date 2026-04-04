@@ -1,4 +1,4 @@
-"""Phase 4 tests — PolygonDetect head.
+"""Phase 4 tests — RayCastDetect head.
 
 Validates all checkpoints from docs/project.md §19, Phase 4:
   - Output shape: [B, N_anchors, 34]
@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from raycasted.model.head import POLYGON_DIM, PolygonDetect, RayRefinementBlock
+from raycasted.model.head import RAYCAST_DIM, RayCastDetect, RayRefinementBlock
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -66,7 +66,7 @@ def test_ray_refinement_block_small_channels():
 
 def test_output_shape():
     """Forward pass produces [B, 34, N_anchors] polygon output."""
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
     feats = _make_feats()
     head.eval()
 
@@ -76,15 +76,15 @@ def test_output_shape():
     poly = preds['boxes']
     n_anchors = _count_anchors()
 
-    assert poly.shape == (BATCH, POLYGON_DIM, n_anchors), (
-        f'Expected ({BATCH}, {POLYGON_DIM}, {n_anchors}), got {poly.shape}'
+    assert poly.shape == (BATCH, RAYCAST_DIM, n_anchors), (
+        f'Expected ({BATCH}, {RAYCAST_DIM}, {n_anchors}), got {poly.shape}'
     )
     print(f'PASS: output shape — {poly.shape} == (B={BATCH}, 34, N={n_anchors})')
 
 
 def test_softplus_active():
     """Ray channels after Softplus have min() > 0."""
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
     feats = _make_feats()
     head.eval()
 
@@ -101,7 +101,7 @@ def test_softplus_active():
 
 def test_sigmoid_active():
     """XY channels after Sigmoid are in [0, 1]."""
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
     feats = _make_feats()
     head.eval()
 
@@ -119,8 +119,8 @@ def test_sigmoid_active():
 
 def test_self_no_override():
     """head.no == nc + 34 (BUG-02)."""
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
-    expected = NC + POLYGON_DIM
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    expected = NC + RAYCAST_DIM
     assert head.no == expected, f'Expected no={expected}, got no={head.no}'
     print(f'PASS: self.no = {head.no} == nc({NC}) + 34 = {expected}')
 
@@ -129,7 +129,7 @@ def test_dfl_absent():
     """DFL is nn.Identity, not DFL module."""
     from ultralytics.nn.modules.head import DFL
 
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
 
     # DFL should be Identity
     assert isinstance(head.dfl, nn.Identity), f'DFL should be Identity, got {type(head.dfl)}'
@@ -144,7 +144,7 @@ def test_dfl_absent():
 
 def test_inference_path():
     """Inference path applies activations and produces valid output."""
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
 
     # Compute strides by running a forward pass
     feats = _make_feats()
@@ -171,7 +171,7 @@ def test_inference_path():
 
 def test_training_forward():
     """Training forward returns raw logits (no activations)."""
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
     head.stride = torch.tensor([8.0, 16.0, 32.0])
     head.train()
 
@@ -184,14 +184,14 @@ def test_training_forward():
 
     poly = preds['boxes']
     n_anchors = _count_anchors()
-    assert poly.shape == (BATCH, POLYGON_DIM, n_anchors)
+    assert poly.shape == (BATCH, RAYCAST_DIM, n_anchors)
     print(f'PASS: training forward — {list(preds.keys())}, poly shape={poly.shape}')
 
 
 def test_loss_stub_no():
-    """PolygonDetectionLoss stub: self.no == nc + 34, use_dfl == False."""
-    # Build a minimal model with PolygonDetect as the head
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    """RayCastDetectionLoss stub: self.no == nc + 34, use_dfl == False."""
+    # Build a minimal model with RayCastDetect as the head
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
     head.stride = torch.tensor([8.0, 16.0, 32.0])
 
     # Create a minimal model-like object for v8DetectionLoss
@@ -210,10 +210,10 @@ def test_loss_stub_no():
         def parameters(self):
             return self._head.parameters()
 
-    from raycasted.model.loss import PolygonDetectionLoss
+    from raycasted.model.loss import RayCastDetectionLoss
 
     model = _FakeModel(head)
-    loss = PolygonDetectionLoss(model)
+    loss = RayCastDetectionLoss(model)
 
     assert loss.no == NC + 34, f'Expected no={NC + 34}, got no={loss.no}'
     assert loss.use_dfl is False, f'Expected use_dfl=False, got use_dfl={loss.use_dfl}'
@@ -231,7 +231,7 @@ def test_decode_round_trip():
 
     from raycasted.data.etl.ops.convert import decode_to_vertices
 
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
     head.eval()
     head.stride = torch.tensor([8.0, 16.0, 32.0])
 
@@ -241,7 +241,7 @@ def test_decode_round_trip():
 
     # Zero out all predictions so we can set specific anchors
     n_anchors = _count_anchors()
-    boxes = torch.zeros(1, POLYGON_DIM, n_anchors)
+    boxes = torch.zeros(1, RAYCAST_DIM, n_anchors)
     scores = torch.zeros(1, NC, n_anchors)
 
     # --- Choose test anchors across all three scales ---
@@ -328,7 +328,7 @@ def test_decode_round_trip():
 
 def test_bias_init():
     """bias_init sets ray biases to ~15px at 0.25 MPP across all scales."""
-    head = PolygonDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
+    head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
     head.stride = torch.tensor([8.0, 16.0, 32.0])
     head.bias_init()
 

@@ -1,4 +1,4 @@
-"""Phase 3 tests — PolygonTileDataset and collate_fn.
+"""Phase 3 tests — RayCastTileDataset and collate_fn.
 
 Validates all checkpoints from docs/project.md §19.
 Run with: uv run python tests/phase_3/test_dataloader.py
@@ -10,10 +10,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from raycasted.data.etl.loader.polygon_dataset import PolygonTileDataset, collate_fn
+from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset, collate_fn
 from raycasted.data.etl.ops.augment import flip_horizontal, flip_vertical, rotate_90
 from raycasted.data.etl.utils.constants import CX_IDX, CY_IDX, RAY_END_IDX, RAY_START_IDX
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -69,7 +68,7 @@ def test_normalise_bounds():
         tile_dir = Path(tmp)
         _create_synthetic_tile(tile_dir, n_cells=20, image_size=(1024, 1024), content_h=900, content_w=900)
 
-        ds = PolygonTileDataset(str(tile_dir), crop_size=640, augment=False)
+        ds = RayCastTileDataset(str(tile_dir), crop_size=640, augment=False)
 
         for i in range(len(ds)):
             img, labels = ds[i]
@@ -96,7 +95,7 @@ def test_random_crop_origin_constrained():
         # content smaller than crop_size
         _create_synthetic_tile(tile_dir, image_size=(512, 512), content_h=400, content_w=400, n_cells=5)
 
-        ds = PolygonTileDataset(str(tile_dir), crop_size=640, augment=False)
+        ds = RayCastTileDataset(str(tile_dir), crop_size=640, augment=False)
         img, labels = ds[0]
 
         # Image should be padded to crop_size
@@ -114,7 +113,7 @@ def test_random_crop_within_content():
         tile_dir = Path(tmp)
         _create_synthetic_tile(tile_dir, image_size=(1024, 1024), content_h=800, content_w=800, n_cells=30)
 
-        ds = PolygonTileDataset(str(tile_dir), crop_size=640, augment=False)
+        ds = RayCastTileDataset(str(tile_dir), crop_size=640, augment=False)
 
         # Run multiple times to check randomness
         any_annotations = False
@@ -168,7 +167,7 @@ def test_empty_annotations_handled():
         path = tile_dir / 'empty.npz'
         np.savez_compressed(path, image=img, annotations=np.zeros((0, 35), dtype=np.float32), tissue=np.int32(1), content_h=np.int32(640), content_w=np.int32(640))
 
-        ds = PolygonTileDataset(str(tile_dir), crop_size=640, augment=False)
+        ds = RayCastTileDataset(str(tile_dir), crop_size=640, augment=False)
         img_tensor, labels = ds[0]
 
         assert labels.shape == (0, 35), f'Expected (0, 35), got {labels.shape}'
@@ -242,7 +241,7 @@ def test_validate_batch_passes():
         tile_dir = Path(tmp)
         _create_synthetic_tile(tile_dir, n_cells=20, image_size=(1024, 1024), content_h=900, content_w=900)
 
-        ds = PolygonTileDataset(str(tile_dir), crop_size=640, augment=False)
+        ds = RayCastTileDataset(str(tile_dir), crop_size=640, augment=False)
 
         # Should not assert for valid data
         for i in range(min(5, len(ds))):
@@ -271,7 +270,7 @@ def test_image_annotation_spatial_consistency():
         path = tile_dir / 'center.npz'
         np.savez_compressed(path, image=img, annotations=anns, tissue=np.int32(1), content_h=np.int32(640), content_w=np.int32(640))
 
-        ds = PolygonTileDataset(str(tile_dir), crop_size=640, augment=False)
+        ds = RayCastTileDataset(str(tile_dir), crop_size=640, augment=False)
         _, labels = ds[0]
 
         if len(labels) > 0:
@@ -292,7 +291,7 @@ def test_e2e_dataset_iteration():
         for i in range(5):
             _create_synthetic_tile(tile_dir, name=f'tile_{i:03d}.npz', n_cells=np.random.randint(5, 30))
 
-        ds = PolygonTileDataset(str(tile_dir), crop_size=640, augment=True)
+        ds = RayCastTileDataset(str(tile_dir), crop_size=640, augment=True)
         loader = torch.utils.data.DataLoader(ds, batch_size=3, shuffle=True, collate_fn=collate_fn)
 
         for i, (images, targets) in enumerate(loader):
@@ -342,7 +341,7 @@ def test_visual_output():
         # Create a synthetic tile with cells spread across the image
         _create_synthetic_tile(tile_dir, name='visual.npz', n_cells=15, image_size=(1024, 1024), content_h=900, content_w=900)
 
-        ds = PolygonTileDataset(str(tile_dir), crop_size=640, augment=True)
+        ds = RayCastTileDataset(str(tile_dir), crop_size=640, augment=True)
 
         fig, axes = plt.subplots(2, 3, figsize=(15, 10))
         fig.suptitle('Phase 3 — Augmented Tiles with Polygon Overlays', fontsize=14)

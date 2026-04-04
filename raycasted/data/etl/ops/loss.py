@@ -3,7 +3,7 @@
 Angular smoothness regularization for polygon training.
 Includes both NumPy (validation/debugging) and PyTorch (training) variants.
 
-Note: decode_pred_xy is NOT here. It is a method of PolygonDetectionLoss
+Note: decode_pred_xy is NOT here. It is a method of RayCastDetectionLoss
 in ultralytics/utils/loss.py — it requires anchor grid knowledge and
 must not be imported in ETL environments.
 """

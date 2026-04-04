@@ -1,17 +1,17 @@
-"""RayCastED — Polygon Detection Loss (Phase 4 stub).
+"""RayCastED — RayCast Detection Loss (Phase 4 stub).
 
-Provides a minimal PolygonDetectionLoss that overrides self.no and use_dfl.
+Provides a minimal RayCastDetectionLoss that overrides self.no and use_dfl.
 Full 5-term loss implementation deferred to Phase 6.
 """
 
 from ultralytics.utils.loss import v8DetectionLoss
 
 
-class PolygonDetectionLoss(v8DetectionLoss):
+class RayCastDetectionLoss(v8DetectionLoss):
     """Phase 4 stub — overrides self.no and disables DFL.
 
     Full loss computation (L_PolarIoU, L_L1, L_cls, L_smooth, L_dfl=0)
-    and PolygonAssigner integration deferred to Phase 6.
+    and RayCastAssigner integration deferred to Phase 6.
     """
 
     def __init__(self, model, tal_topk: int = 10, tal_topk2: int | None = None):

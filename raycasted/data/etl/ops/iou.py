@@ -115,7 +115,7 @@ def polar_iou_pairwise_flat_torch(d_pred, d_gt, eps=POLAR_IOU_EPS):
     """PyTorch pairwise Polar-IoU from pre-expanded flat inputs.
 
     The caller is responsible for expanding d_pred and d_gt to the
-    pairwise shape before calling this function. Used by PolygonAssigner
+    pairwise shape before calling this function. Used by RayCastAssigner
     inside its per-batch loop (see §11.2).
 
     Args:

@@ -41,19 +41,19 @@ YAML config (main/dataset.yaml)
 Ingestors → .npz files  [image + raycast annotations, pixel space]
     ↓  TransformOrchestrator (SpatialChunker + NormalizerAndPadder)
 .npz tiles  [content_h, content_w preserved]
-    ↓  PolygonTileDataset
+    ↓  RayCastTileDataset
 [B, 3, H, W] + [M, 36] labels (normalised)
-    ↓  PolygonDetect head (raycasted/model/head.py) + PolygonDetectionLoss (Phase 6)
+    ↓  RayCastDetect head (raycasted/model/head.py) + RayCastDetectionLoss (Phase 6)
 Trained weights
-    ↓  PolygonPredictor (Phase 7)
+    ↓  RayCastPredictor (Phase 7)
 [N, 32, 2] polygon vertices  (pixel space)
 ```
 
 ### Key modules
 
-**`raycasted/model/`** — Prediction head package (Phase 4). Subclasses `ultralytics.nn.modules.head.Detect` rather than modifying ultralytics in-place. Contains `PolygonDetect`, `RayRefinementBlock`, `register_polygon_head()` for namespace injection, and `PolygonDetectionLoss` stub. Files: `head.py`, `register.py`, `loss.py`.
+**`raycasted/model/`** — Prediction head package (Phase 4). Subclasses `ultralytics.nn.modules.head.Detect` rather than modifying ultralytics in-place. Contains `RayCastDetect`, `RayRefinementBlock`, `register_raycast_head()` for namespace injection, and `RayCastDetectionLoss` stub. Files: `head.py`, `register.py`, `loss.py`.
 
-**`raycasted/data/etl/ops/`** — Single source of truth for ALL geometry logic. Every caller imports from here; nothing is reimplemented elsewhere. PyTorch variants (`polar_iou_torch`, `angular_smoothness_loss_torch`) use **lazy imports** (`import torch` inside the function body) so this package is safe to import without PyTorch in ETL environments. `decode_pred_xy` is NOT here — it is a method of `PolygonDetectionLoss` only.
+**`raycasted/data/etl/ops/`** — Single source of truth for ALL geometry logic. Every caller imports from here; nothing is reimplemented elsewhere. PyTorch variants (`polar_iou_torch`, `angular_smoothness_loss_torch`) use **lazy imports** (`import torch` inside the function body) so this package is safe to import without PyTorch in ETL environments. `decode_pred_xy` is NOT here — it is a method of `RayCastDetectionLoss` only.
 
 **`raycasted/data/etl/utils/constants.py`** — Angular convention, permutation indices, and format indices. Import from here; never recompute inline. Key constants: `RAY_ANGLES`, `FLIP_H_IDX`, `FLIP_V_IDX`, `ROT_INDICES`, `CLASS_IDX=0`, `CX_IDX=1`, `CY_IDX=2`, `RAY_START_IDX=3`, `RAY_END_IDX=35`.
 
@@ -75,7 +75,7 @@ All stages share a single array format — no conversion between ETL and model:
 
 Collated batch format adds a leading `batch_idx` column: shape `(sum_M, 36)`.
 
-Normalisation (divide by `crop_size=640`) happens **only** in `PolygonTileDataset._normalise()`. Denormalisation at inference must use `crop_size` read from `model.training_args['crop_size']` — never hardcoded.
+Normalisation (divide by `crop_size=640`) happens **only** in `RayCastTileDataset._normalise()`. Denormalisation at inference must use `crop_size` read from `model.training_args['crop_size']` — never hardcoded.
 
 ### .npz schema
 
@@ -97,13 +97,13 @@ Phase 0.5 — visual round-trip tests  ✓
 Phase 1   — raycast extraction in all 3 ingestors  ✓
 Phase 1.5 — IngestionOrchestrator  ✓
 Phase 2   — SpatialChunker / NormalizerAndPadder / TransformOrchestrator patches  ✓
-Phase 3   — PolygonTileDataset + collate_fn  ✓
-Phase 4   — Model head (RayRefinementBlock, PolygonDetect, 34-dim output)  ✓
-Phase 5   — PolygonAssigner (masked pairwise IoU)
-Phase 6   — PolygonDetectionLoss (5 terms) + PolygonE2ELoss
-Phase 7   — PolygonPredictor + PolygonAnnotator
-Phase 8   — PolygonValidator
+Phase 3   — RayCastTileDataset + collate_fn  ✓
+Phase 4   — Model head (RayRefinementBlock, RayCastDetect, 34-dim output)  ✓
+Phase 5   — RayCastAssigner (masked pairwise IoU)
+Phase 6   — RayCastDetectionLoss (5 terms) + RayCastE2ELoss
+Phase 7   — RayCastPredictor + RayCastAnnotator
+Phase 8   — RayCastValidator
 Phase 9   — ONNX export + TensorRT deployment (NVIDIA Jetson)
 ```
 
-**Phase 4 approach:** Subclasses `ultralytics Detect` in `raycasted/model/head.py` instead of modifying `ultralytics/` in-place. Registration via `register_polygon_head()` injects into the ultralytics namespace. Full YAML config integration deferred to Phase 7.
+**Phase 4 approach:** Subclasses `ultralytics Detect` in `raycasted/model/head.py` instead of modifying `ultralytics/` in-place. Registration via `register_raycast_head()` injects into the ultralytics namespace. Full YAML config integration deferred to Phase 7.

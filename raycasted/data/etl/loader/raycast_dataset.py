@@ -1,4 +1,4 @@
-"""RayCastED — PolygonTileDataset and collate_fn.
+"""RayCastED — RayCastTileDataset and collate_fn.
 
 Reads tiled .npz files from TransformOrchestrator output, applies online
 augmentation and random cropping, normalises to [0, 1], and emits tensors
@@ -16,7 +16,7 @@ from ..ops.filter import filter_and_clip_annotations
 from ..utils.constants import CX_IDX, CY_IDX, RAY_END_IDX, RAY_START_IDX
 
 
-class PolygonTileDataset(Dataset):
+class RayCastTileDataset(Dataset):
     """PyTorch dataset for raycast polygon tiles.
 
     Reads tiled .npz files produced by TransformOrchestrator. Each tile contains

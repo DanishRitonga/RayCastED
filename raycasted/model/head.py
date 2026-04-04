@@ -1,6 +1,6 @@
-"""RayCastED — Polygon Detection Head.
+"""RayCastED — RayCast Detection Head.
 
-Implements the RayRefinementBlock and PolygonDetect head that replaces
+Implements the RayRefinementBlock and RayCastDetect head that replaces
 YOLO's bounding-box regression with 34-dim raycast polygon predictions.
 
 Output format: [xy_offset(2), rays(32)] per anchor.
@@ -20,7 +20,7 @@ from ultralytics.nn.modules.conv import Conv
 from ultralytics.nn.modules.head import Detect
 from ultralytics.utils.tal import make_anchors
 
-POLYGON_DIM = 34  # xy_offset(2) + rays(32)
+RAYCAST_DIM = 34  # xy_offset(2) + rays(32)
 
 
 class RayRefinementBlock(nn.Module):
@@ -43,7 +43,7 @@ class RayRefinementBlock(nn.Module):
         return x + self.act(self.gn(self.dwconv(x)))
 
 
-class PolygonDetect(Detect):
+class RayCastDetect(Detect):
     """Polygon detection head replacing bounding-box regression with raycast.
 
     Subclasses ultralytics Detect, replacing the cv2 regression branch with:
@@ -66,7 +66,7 @@ class PolygonDetect(Detect):
         super().__init__(nc, reg_max, end2end, ch)
 
         # BUG-02 fix: override self.no from nc + reg_max*4 to nc + 34
-        self.no = nc + POLYGON_DIM
+        self.no = nc + RAYCAST_DIM
 
         # Replace cv2 (box regression) with polygon regression stack
         c2 = max(16, ch[0] // 4)
@@ -75,7 +75,7 @@ class PolygonDetect(Detect):
                 Conv(x, c2, 3),
                 Conv(c2, c2, 3),
                 RayRefinementBlock(c2),
-                nn.Conv2d(c2, POLYGON_DIM, 1),
+                nn.Conv2d(c2, RAYCAST_DIM, 1),
             )
             for x in ch
         )
@@ -101,7 +101,7 @@ class PolygonDetect(Detect):
         if box_head is None or cls_head is None:
             return {}
         bs = x[0].shape[0]
-        poly = torch.cat([box_head[i](x[i]).view(bs, POLYGON_DIM, -1) for i in range(self.nl)], dim=-1)
+        poly = torch.cat([box_head[i](x[i]).view(bs, RAYCAST_DIM, -1) for i in range(self.nl)], dim=-1)
         scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
         return dict(boxes=poly, scores=scores, feats=x)
 
