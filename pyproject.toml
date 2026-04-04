@@ -22,6 +22,7 @@ dependencies = [
     "shapely>=2.1.2",
     "torch>=2.11.0",
     "torchvision>=0.26.0",
+    "ultralytics>=8.3",
 ]
 
 [tool.ruff]
@@ -48,6 +49,7 @@ ignore = [
     "D100", # Missing docstring in public module
     "D104", # Missing docstring in public package
     "D107", # Missing docstring in __init__
+    "N812", # Lowercase `functional` imported as non-lowercase `F` (PyTorch convention)
 ]
 
 [tool.ruff.format]
