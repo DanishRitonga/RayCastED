@@ -4,6 +4,8 @@ from typing import Any
 
 import numpy as np
 
+from ..ops.filter import filter_and_clip_annotations
+
 
 class SpatialChunker:
     """A memory-only functional transformer that chunks massive spatial arrays.
@@ -78,6 +80,9 @@ class SpatialChunker:
 
         elif self.annotation_type == 'instance_mask':
             return annotations[y_start : y_start + chunk_h, x_start : x_start + chunk_w]
+
+        elif self.annotation_type == 'raycast':
+            return filter_and_clip_annotations(annotations, x_start, y_start, chunk_w, chunk_h, min_rays_after_clip=0.5)
 
         else:
             raise NotImplementedError(f'Chunk slicing for {self.annotation_type} is not yet implemented.')

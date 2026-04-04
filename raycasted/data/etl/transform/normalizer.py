@@ -12,7 +12,7 @@ class NormalizerAndPadder:
     stain normalization and bottom-right constant padding.
     """
 
-    def __init__(self, config: dict[str, Any], profile_path: str = None):
+    def __init__(self, config: dict[str, Any], profile_path: str | None = None):
         self.target_size = config.get('output_image_size', [256, 256])[0]
 
         # Load the Population Profile
