@@ -89,14 +89,13 @@ def filter_and_clip_annotations(
     # Note: cx_rel, cy_rel are in crop-relative coordinates where (0,0) is top-left
     # +X is right, +Y is down (image coordinates)
 
-    # Get ray directions (adjusting for image coordinate system)
-    # RAY_COS[i], RAY_SIN[i] are for standard math coords (CCW from +X)
-    # In image coords: +X is right (same), +Y is down (flipped)
-    # So we negate the Y component of direction
+    # Ray directions: RAY_COS[i], RAY_SIN[i] already represent directions in
+    # image coordinate space (+X right, +Y down). Both polygon_to_raycast and
+    # decode_to_vertices use them directly, so no Y-flip is needed here.
 
     for i in range(N_RAYS):
         cos_a = RAY_COS[i]
-        sin_a = -RAY_SIN[i]  # Negate for image coordinates (Y down)
+        sin_a = RAY_SIN[i]
 
         # Distance to each boundary
         # Right boundary: chunk_w - cx_rel, hit if cos_a > 0
