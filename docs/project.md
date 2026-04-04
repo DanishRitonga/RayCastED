@@ -43,13 +43,14 @@
 | v4.3 | **Naming convention unified:** Switched from `star_convex` to `raycast` throughout. Leverages existing `raycast` infrastructure in `BaseDataIngestor.standardize_mpp()`. Added `content_h/w` return signature requirements for `NormalizerAndPadder`. Resolved GAP-02 (split column = `'split'`). Added annotation key standardization (`'annotations'` preferred). |
 | v4.4 | Added Tech Stack section (§4) documenting all core dependencies and their usage contexts. |
 | v4.5 | Added explicit filtering pipeline order for `filter_and_clip_annotations` (§12.5). Specified uniform weighting for `L_L1` loss (§10.2). Corrected architectural sources attribution: Polar-IoU from PolarMask (not LSP-DETR); LSP-DETR contributes bipartite matching and 32-ray parameterisation. Marked inference pipeline as deferred. |
-| v4.6 | **Format unification:** ETL format now matches YOLO format — `[class_id, cx, cy, d_1..d_32]`. **Modular refactor:** Split `annotation_ops.py` into `ops/` folder with separate modules (convert, filter, iou, augment, smoothness). Moved `config.py` to `utils/`. Updated repository layout (§7). |
+| v4.6 | **Format unification:** ETL format now matches YOLO format — `[class_id, cx, cy, d_1..d_32]`. **Modular refactor:** Split `annotation_ops.py` into `ops/` folder with separate modules (convert, filter, iou, augment, loss). Moved `config.py` to `utils/`. Updated repository layout (§7). |
 | v4.7 | **8 issues resolved from design review.** (1) `representative_point()` fallback now updates `cx/cy` to match the fallback point before ray casting — previously decoded polygons would be offset from their stored centroid. (2) BUG-05 VRAM fix extended with an explicit N_candidates × N_gt chunk-size guard for dense TIL fields. (3) `R_far` formula specified as `sqrt(bbox_w² + bbox_h²) × 1.1`. (4) `polar_iou_pairwise_flat` vs `polar_iou_pairwise_torch` naming resolved with explicit shape contracts per function. (5) `PolygonDetectionLoss.__init__` assigner-swap pattern made explicit. (6) `lambda_smooth` per-epoch delta and post-epoch-50 clamping behaviour stated. (7) `dedup_radius_px` formula corrected from `min(20, imgsz*0.03)` to `min(5, imgsz*0.008)`. (8) Round-trip test threshold relaxed to dataset-dependent values. |
 | v4.8 | **10 issues resolved from v4.7 audit.** (1) §12.5.1 filtering diagram corrected to use unified format `[class_id, cx, cy, d_1..d_32]`. (2) §11.2 Phase 1 + Phase 2 code blocks merged into single conditional implementation. (3) §10.1 and §9.4 undefined `m` replaced with `model.model[-1]`. (4) §12.4 `_fallback_counter` specified as optional `collections.Counter` argument. (5) §14.1 ray denormalization corrected from image dimensions to `crop_size`. (6) §15 section numbering fixed (15.3 → 15.2). (7) `PolygonAssigner` constructor `eps` parameter removed (not in parent). (8) Phase 0.5 wording clarified. (9) Method name standardized to `_normalise()`. (10) §5.1 ops table synchronized with §7.1. |
 | v4.9 | **5 plan errors corrected.** (1) `ANGLES` import in §12.4 code block corrected to `RAY_ANGLES`. (2) `LineString` intersection case added to §12.4 ray casting code (tangent rays). (3) §18 Phase 0 tests extended with `polar_iou_torch`, `polar_iou_pairwise_flat_torch`, and `angular_smoothness_loss_torch`. (4) §5.1 clarified: `decode_pred_xy` is a method of `PolygonDetectionLoss` only — not exported from `ops/`. (5) §10.1 Ultralytics API verification note added. |
 | v4.11 | **Phase 0 implementation fixes.** (1) `polygon_to_raycast` signature corrected — returns `np.ndarray\|None` (shape 35), added `fallback_counter`, removed `use_representative_point_fallback` flag, fixed `R_far` to `sqrt(bbox_w²+bbox_h²)×1.1`. (2) `polar_iou_pairwise_torch` renamed to `polar_iou_pairwise_flat_torch`; both flat variants now accept pre-expanded `[N_cand, N_gt, 32]` inputs per §7.1 shape contract. (3) `polar_iou_pairwise` (non-flat, not in spec) removed. (4) `decode_pred_xy` removed from `ops/loss.py`. (5) `smoothness.py` naming superseded — module is `loss.py` throughout; plan updated to match. (6) `loader/__init__.py` restored (was overwritten with project.md content). |
 | v4.10 | **4 specification gaps closed.** (1) §10.3 `decode_pred_xy` formula added — anchor grid decoding from grid-cell-relative to absolute normalised space. (2) §11.3 75th-percentile containment radius edge case specified — exclude zero rays; fallback to max non-zero ray when < 8 non-zero rays remain. (3) §14.1 `crop_size` source at inference specified — must be stored in model training config and read by `PolygonPredictor`. (4) §10.5 `update()` call timing clarified — lambda_smooth is still 0.001 during epoch 50's batches; reaches `smooth_end` after `update(50)` completes. |
 | v4.12 | **Jetson deployment added.** New Module H (§16) specifying ONNX export and TensorRT deployment on NVIDIA Jetson. Phase 9 added to execution order. Scope updated to include deployment target. Tech stack updated with ONNX/TensorRT dependencies. Testing checkpoints added for Phase 9. |
+| v4.13 | **Phase 4 implementation divergences documented.** (1) Model head implemented as `raycasted/model/` subclass package instead of in-place `ultralytics/` modification. (2) `register_polygon_head()` runtime patching for namespace injection. (3) Cell-size-aware bias initialisation (15px at 0.25 MPP). (4) `_inference()` uses YOLO decode convention `sigmoid*2-0.5`. (5) Loss stub in `raycasted/model/loss.py` (not `ultralytics/utils/loss.py`). (6) `one2many`/`one2one` confirmed as properties, not instance attributes. (7) Phase 4 testing checkpoints expanded with actual test coverage. |
 
 ---
 
@@ -169,7 +170,7 @@ Trained weights
 
 The ETL pipeline is designed to run **without PyTorch installed**. This is enforced by:
 
-1. **Lazy imports in `annotation_ops.py`:** PyTorch-specific functions use `import torch` inside function bodies, allowing the file to be imported in ETL-only environments.
+1. **Lazy imports in `ops/`:** PyTorch-specific functions in `ops/iou.py` and `ops/loss.py` use `import torch` inside function bodies, allowing the modules to be imported in ETL-only environments.
 
 2. **Separate requirement files:**
    ```
@@ -228,7 +229,7 @@ def transform_tiles(config: ETLConfig):
 
 ### 5.1 Single Source of Truth for Geometry
 
-Every piece of polygon/raycast geometry logic lives in **`raycasted/data/ops/`**.  
+Every piece of polygon/raycast geometry logic lives in **`raycasted/data/etl/ops/`**.  
 The modules are **imported** by every caller. They are **never duplicated**.
 
 **Module responsibilities:**
@@ -246,12 +247,12 @@ The modules are **imported** by every caller. They are **never duplicated**.
 **Callers:**
 - `raycasted/data/etl/ingestors/*.py` (NumPy, offline ETL)
 - `raycasted/data/etl/transform/spatialChunker.py` (NumPy, offline ETL)
-- `raycasted/data/loader/polygon_dataset.py` (NumPy, online DataLoader)
-- `ultralytics/utils/loss.py` (PyTorch, training)
-- `ultralytics/utils/tal.py` (PyTorch, assignment)
-- `ultralytics/models/yolo/detect/predict.py` (PyTorch, inference)
+- `raycasted/data/etl/loader/polygon_dataset.py` (NumPy, online DataLoader)
+- `raycasted/model/loss.py` (PyTorch, training)
+- `raycasted/model/tal.py` (PyTorch, assignment)
+- `raycasted/model/predict.py` (PyTorch, inference)
 
-**PyTorch variants** (`polar_iou_torch`, `angular_smoothness_loss_torch`, etc.) live in `ops/iou.py` and `ops/smoothness.py` with **lazy imports** (`import torch` inside the function body) so the ops modules are safe to import in ETL environments without PyTorch installed.
+**PyTorch variants** (`polar_iou_torch`, `angular_smoothness_loss_torch`, etc.) live in `ops/iou.py` and `ops/loss.py` with **lazy imports** (`import torch` inside the function body) so the ops modules are safe to import in ETL environments without PyTorch installed.
 
 ### 5.2 Coordinate Space is Always Explicit
 
@@ -273,7 +274,7 @@ No function silently converts between spaces. Every function signature that acce
 | `SpatialChunker` | Offline tiling geometry | Normalisation, tensors |
 | `NormalizerAndPadder` | Stain normalisation, padding, `content_h/w` output | Coordinate transforms |
 | `TransformOrchestrator` | Tiling + normalisation pipeline | Ingestion, model |
-| `AnnotationOps` | All polygon/ray geometry math | I/O, image processing |
+| `AnnotationOps` | All polygon/ray geometry math (via `ops/` modules) | I/O, image processing |
 | `PolygonTileDataset` | Online augmentation, tensor emission | Offline ETL, model |
 | `PolygonDetectionLoss` | Loss computation | Matching, assignment |
 | `PolygonAssigner` | Hungarian cost matrix | Loss terms |
@@ -290,7 +291,7 @@ Angles increase counter-clockwise.
 Angular spacing: 11.25° (= 2π / 32)
 ```
 
-Defined once in `raycasted/data/utils/constants.py`. Imported everywhere. Never recomputed inline. Any label generation script that uses a different convention will produce silently wrong training data.
+Defined once in `raycasted/data/etl/utils/constants.py`. Imported everywhere. Never recomputed inline. Any label generation script that uses a different convention will produce silently wrong training data.
 
 ---
 
@@ -377,19 +378,24 @@ raycasted/
 │   │   └── constants.py                 NEW — angular constants, permutation indices, format indices
 │   └── loader/
 │       └── polygon_dataset.py           NEW — PolygonTileDataset, collate_fn
+├── model/                               NEW — prediction head (subclass, not in-place ultralytics mod)
+│   ├── __init__.py                      NEW — re-exports PolygonDetect, RayRefinementBlock, register
+│   ├── head.py                          NEW — RayRefinementBlock + PolygonDetect(Detect)
+│   ├── register.py                      NEW — register_polygon_head() namespace injection
+│   └── loss.py                          NEW — PolygonDetectionLoss stub (full impl in Phase 6)
 
-ultralytics/
+ultralytics/                              # NOT modified in-place — subclass approach used
 ├── nn/modules/
-│   └── head.py                          MODIFY — RayRefinementBlock, 34-dim output
+│   └── head.py                          Referenced — Detect base class (no modification)
 ├── utils/
-│   ├── loss.py                          MODIFY — PolygonDetectionLoss, PolygonE2ELoss
-│   ├── tal.py                           MODIFY — PolygonAssigner
-│   └── metrics.py                       MODIFY — polygon IoU metrics
+│   ├── loss.py                          Referenced — v8DetectionLoss base class (no modification)
+│   ├── tal.py                           Referenced — TaskAlignedAssigner base class (no modification)
+│   └── metrics.py                       Referenced — metric utilities (no modification)
 └── models/yolo/detect/
-    ├── predict.py                        MODIFY — PolygonPredictor
-    ├── val.py                            MODIFY — PolygonValidator
-    ├── train.py                          MODIFY — use PolygonE2ELoss
-    └── plotting.py                       MODIFY — PolygonAnnotator
+    ├── predict.py                        Referenced — predictor base class (no modification)
+    ├── val.py                            Referenced — validator base class (no modification)
+    ├── train.py                          Referenced — training loop (no modification)
+    └── plotting.py                       Referenced — annotator base class (no modification)
 ```
 
 ### 7.1 Ops Module Structure
@@ -403,6 +409,7 @@ The `ops/` folder provides a clean, modular API for all geometry operations:
 | `iou.py` | `polar_iou`, `polar_iou_pairwise_flat`, `polar_iou_torch`, `polar_iou_pairwise_flat_torch` | Loss, Assigner |
 | `augment.py` | `flip_horizontal`, `flip_vertical`, `rotate_90` | DataLoader |
 | `loss.py` | `angular_smoothness_loss`, `angular_smoothness_loss_torch` | Loss |
+| `utils.py` | `count_zero_rays`, `validate_annotation_format` | Ingestors, diagnostics |
 
 **Function shape contracts for `iou.py` (naming is now fixed):**
 
@@ -418,11 +425,11 @@ The `ops/` folder provides a clean, modular API for all geometry operations:
 **Import convention:**
 ```python
 # Preferred: import from ops package
-from raycasted.data.ops import polygon_to_raycast, filter_and_clip_annotations
-from raycasted.data.ops.iou import polar_iou_pairwise_flat_torch
+from raycasted.data.etl.ops import polygon_to_raycast, filter_and_clip_annotations
+from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 
 # Or import specific module
-from raycasted.data.ops.convert import polygon_to_raycast
+from raycasted.data.etl.ops.convert import polygon_to_raycast
 ```
 
 ---
@@ -432,7 +439,7 @@ from raycasted.data.ops.convert import polygon_to_raycast
 Implement strictly in this order. Each phase depends only on phases above it.
 
 ```
-Phase 0   — constants.py + annotation_ops.py
+Phase 0   — constants.py + ops/ modules (convert, filter, iou, augment, loss, utils)
 Phase 0.5 — Unit-test `polygon_to_raycast` on manually constructed sample polygons; decode to vertices and render onto sample H&E crops to verify angular convention and boundary alignment before committing to full ETL ingestion
 Phase 1   — raycast implementation in GeoJSON, CSV, Parquet ingestors
 Phase 1.5 — IngestionOrchestrator
@@ -450,7 +457,16 @@ Phase 9   — ONNX export + TensorRT deployment (NVIDIA Jetson)
 
 ## 9. Module A — Prediction Head
 
-**File:** `ultralytics/nn/modules/head.py`
+**Files:**
+- `raycasted/model/head.py` — `RayRefinementBlock`, `PolygonDetect(Detect)` (subclass approach)
+- `raycasted/model/register.py` — `register_polygon_head()` namespace injection
+- `raycasted/model/__init__.py` — package re-exports
+
+**Implementation approach (diverges from v4.0–v4.12 plan):** The original plan specified in-place modification of `ultralytics/nn/modules/head.py`. The actual implementation subclasses `Detect` in a separate `raycasted/model/` package. This avoids forking ultralytics and keeps all RayCastED-specific code under `raycasted/`. Runtime registration via `register_polygon_head()` injects `PolygonDetect` into the ultralytics namespace so YAML configs can resolve it (full YAML integration deferred to Phase 7).
+
+**Ultralytics API notes (verified against installed version ≥8.3):**
+- `one2many` and `one2one` are **properties** returning `dict(box_head=self.cv2, cls_head=self.cv3)` — not instance attributes. Replacing `self.cv2` in `PolygonDetect.__init__` automatically updates what `one2many['box_head']` returns.
+- `parse_model()`'s module frozenset is a **local variable** — cannot be patched externally. Full YAML integration requires either monkey-patching `parse_model` or manual model construction (deferred to Phase 7).
 
 ### 9.1 RayRefinementBlock
 
@@ -486,11 +502,45 @@ self.use_dfl = False
 ```
 Any downstream code that reads `self.no` to slice prediction tensors will silently produce wrong shapes if this is not overridden. See BUG-02.
 
+### 9.5 Inference Decode Convention
+
+`PolygonDetect._inference()` decodes xy offsets using the YOLO convention:
+```python
+xy_abs = (xy_offset.sigmoid() * 2.0 - 0.5 + anchor_grid) * stride
+```
+
+The `* 2.0 - 0.5` transform maps the Sigmoid output from `[0, 1]` to `[-0.5, 1.5]` relative to the anchor grid cell, allowing predictions to extend slightly beyond cell boundaries — matching the standard YOLO decode behaviour inherited from `Detect`.
+
+This differs from the training-time `decode_pred_xy()` formula in §10.3 which operates in normalised space for loss computation. The two decodes serve different purposes and intentionally use different formulas.
+
+### 9.6 Bias Initialisation — Cell-Size-Aware
+
+Ray biases are initialised to produce ~15px rays at inference, calibrated for typical lymphocyte size at 0.25 MPP resolution (7–10 μm diameter → 28–40px → radius ~15px):
+
+```python
+target_ray_px = 15.0  # reasonable lymphocyte radius at 0.25 MPP
+bias[:2] = 2.0  # xy: sigmoid(2.0) ≈ 0.88
+bias[2:] = log(exp(target_ray_px / stride) - 1)  # inverse softplus → ~15px
+```
+
+Per-scale bias values:
+| Scale | Stride | Ray bias | Decoded ray |
+|-------|--------|----------|-------------|
+| P3 | 8 | 1.709 | 15.0px |
+| P4 | 16 | 0.441 | 15.0px |
+| P5 | 32 | -0.514 | 15.0px |
+
+XY biases remain at 2.0 (sigmoid → ~0.88, encouraging initial detections).
+
 ---
 
 ## 10. Module B — Loss Function
 
-**File:** `ultralytics/utils/loss.py`
+**Files:**
+- `raycasted/model/loss.py` — `PolygonDetectionLoss(v8DetectionLoss)` stub (Phase 4)
+- Full 5-term loss implementation deferred to Phase 6 (may remain in `raycasted/model/` or move alongside ultralytics integration)
+
+> **Note:** The original plan specified `ultralytics/utils/loss.py`. The Phase 4 stub lives in `raycasted/model/loss.py` alongside the head, following the subclass package approach. The full Phase 6 implementation will determine whether it stays here or requires deeper ultralytics integration.
 
 ### 10.1 Subclass Chain
 
@@ -664,7 +714,9 @@ new_lambda = max(self.smooth_end, self.smooth_start - delta * effective_epoch)
 
 ## 11. Module C — Bipartite Matcher / Assigner
 
-**File:** `ultralytics/utils/tal.py`
+**File:** `raycasted/model/tal.py` (planned — to be created in Phase 5)
+
+> **Note:** Following the subclass approach established in Phase 4, `PolygonAssigner` will subclass `TaskAlignedAssigner` in a separate file under `raycasted/model/`, not by modifying `ultralytics/utils/tal.py`.
 
 ### 11.1 `PolygonAssigner(TaskAlignedAssigner)`
 
@@ -748,7 +800,7 @@ containment_radius = radius * radius_scale
 
 ### 11.4 Pairwise IoU Helper
 
-`polar_iou_pairwise_flat_torch(d_pred, d_gt)` lives in `raycasted/data/ops/iou.py` and is shared with the loss function via `polar_iou_torch`. It accepts `[N_cand, N_gt, 32]` and returns `[N_cand, N_gt]`. It must not be reimplemented in `tal.py`.
+`polar_iou_pairwise_flat_torch(d_pred, d_gt)` lives in `raycasted/data/etl/ops/iou.py` and is shared with the loss function via `polar_iou_torch`. It accepts `[N_cand, N_gt, 32]` and returns `[N_cand, N_gt]`. It must not be reimplemented in `tal.py`. It accepts `[N_cand, N_gt, 32]` and returns `[N_cand, N_gt]`. It must not be reimplemented in `tal.py`.
 
 The `_flat` suffix is meaningful: it signals that the batch dimension has already been collapsed by the caller's per-batch loop. The function never sees the `B` dimension. See §7.1 for the full naming contract.
 
@@ -786,7 +838,7 @@ Output layout: `<output_dir>/<dataset_name>/<split>/<roi_id>.npz`
 
 ### 12.3 Raycast Annotation Extraction — Per-Ingestor Strategy
 
-All three ingestors must implement `_extract_raycast_annotations()`. The shared geometry logic lives in `AnnotationOps.polygon_to_raycast()`.
+All three ingestors must implement `_extract_raycast_annotations()`. The shared geometry logic lives in `ops/convert.py` → `polygon_to_raycast()`.
 
 **GeoJSON (PUMA):**
 - Source: polygon vertex coordinates in `features[].geometry.coordinates[0]`
@@ -803,7 +855,7 @@ All three ingestors must implement `_extract_raycast_annotations()`. The shared 
 - Centroid: OpenCV moments (`m10/m00`, `m01/m00`) — robust for non-convex masks
 - Use the largest contour only; ignore spurious noise contours
 
-### 12.4 `AnnotationOps.polygon_to_raycast`
+### 12.4 `polygon_to_raycast` (ops/convert.py)
 
 Core implementation requirements:
 
@@ -934,12 +986,12 @@ Log a diagnostic counter in each ingestor for how often the `representative_poin
 
 ### 12.5 SpatialChunker Patch
 
-Add `raycast` routing case to `_slice_annotations()`. Delegate entirely to `AnnotationOps.filter_and_clip_annotations()`. Do not reimplement clipping logic.
+Add `raycast` routing case to `_slice_annotations()`. Delegate entirely to `filter_and_clip_annotations()` from `ops/filter.py`. Do not reimplement clipping logic.
 
 **Current code** (`spatialChunker.py`) only handles `bbox` and `instance_mask`. Add:
 ```python
 elif self.annotation_type == 'raycast':
-    return AnnotationOps.filter_and_clip_annotations(
+    return filter_and_clip_annotations(
         annotations, x_start, y_start, chunk_w, chunk_h, min_rays_after_clip=0.5
     )
 ```
@@ -1361,8 +1413,9 @@ These targets are estimates based on published YOLO benchmarks on Jetson. Actual
 |-----------|-------|----------|-------|
 | N_RAYS | 32 | `constants.py` | Fixed. 64 only if cell morphology requires. |
 | Angular spacing | 11.25° | `constants.py` | Immutable |
-| Ray activation | Softplus | `head.py` | Never ReLU — see §8.3 |
+| Ray activation | Softplus | `head.py` | Never ReLU — see §9.3 |
 | Centroid activation | Sigmoid | `head.py` | Grid-cell-relative offset |
+| Ray bias target | 15px | `head.py` | Cell-size-aware init at 0.25 MPP — see §9.6 |
 | `self.no` | `nc + 34` | `loss.py` | Must override parent — see BUG-02 |
 | λ_cls | 0.5 | `loss.py` | |
 | λ_xy | 1.0 | `loss.py` | |
@@ -1374,8 +1427,8 @@ These targets are estimates based on published YOLO benchmarks on Jetson. Actual
 | radius_scale | 1.5 | `tal.py` | Monitor: target 1–4 positive assignments/GT |
 | Candidate radius | 75th-pct ray | `tal.py` | More robust than mean for non-circular cells |
 | GroupNorm groups | 8 | `head.py` | Reduce to 4 if channels < 64 |
-| Polar-IoU eps | 1e-7 | `annotation_ops.py` | Denominator guard |
-| Huber beta | 0.01 | `annotation_ops.py` | L2→L1 transition |
+| Polar-IoU eps | 1e-7 | `ops/iou.py` | Denominator guard |
+| Huber beta | 0.01 | `ops/loss.py` | L2→L1 transition |
 | Crop size | 640 | `dataset.py` | Square — single scalar normalises all spatial quantities |
 | `min_rays_after_clip` (ETL) | 0.5 | `spatialChunker.py` | Strict: permanent decision |
 | `min_rays_after_clip` (Loader) | 0.3 | `dataset.py` | Permissive: retried next epoch |
@@ -1399,7 +1452,7 @@ Every entry here must be addressed during implementation. Entries are classified
 ---
 
 #### BUG-01 — Bias introduced by `eps` in clipping denominators
-**File:** `raycasted/data/utils/annotation_ops.py` → `filter_and_clip_annotations()`
+**File:** `raycasted/data/etl/ops/filter.py` → `filter_and_clip_annotations()`
 
 The `where` condition gates out near-zero cosine/sine values before the division, so the denominators are already safe. Adding `eps` to them biases the boundary distance calculation.
 
@@ -1418,7 +1471,7 @@ Apply the same correction to all four directional distance calculations (`d_righ
 ---
 
 #### BUG-02 — `self.no` not overridden in `PolygonDetectionLoss`
-**File:** `ultralytics/utils/loss.py`
+**File:** `raycasted/model/loss.py`
 
 `v8DetectionLoss.__init__()` sets `self.no = m.nc + m.reg_max * 4`. The polygon head has no `reg_max`. Any code that reads `self.no` to slice prediction tensors (e.g. during `parse_output`) will produce tensors of the wrong shape without raising an error.
 
@@ -1431,7 +1484,7 @@ self.use_dfl = False
 ---
 
 #### BUG-03 — Target encoding mismatch: Sigmoid offsets vs absolute normalised coordinates
-**File:** `ultralytics/utils/loss.py`
+**File:** `raycasted/model/loss.py` (fix) — bug originates from `ultralytics/utils/loss.py` parent
 
 The head's xy output is a grid-cell-relative Sigmoid offset in `[0, 1]`. GT centroids from the DataLoader are absolute normalised coordinates in `[0, 1]`. These have the same numerical range but are in different spaces. Computing `L_xy` directly between them will not converge.
 
@@ -1440,7 +1493,7 @@ The head's xy output is a grid-cell-relative Sigmoid offset in `[0, 1]`. GT cent
 ---
 
 #### BUG-04 — `preprocess()` not overridden — applies box-specific transforms to polar targets
-**File:** `ultralytics/utils/loss.py`
+**File:** `raycasted/model/loss.py` (fix) — bug originates from `ultralytics/utils/loss.py` parent
 
 `v8DetectionLoss.preprocess()` calls `xywh2xyxy()` and scales coordinates by `imgsz[[1,0,1,0]]`. Both operations corrupt a 34-dim polar target tensor before it reaches the assigner.
 
@@ -1449,7 +1502,7 @@ The head's xy output is a grid-cell-relative Sigmoid offset in `[0, 1]`. GT cent
 ---
 
 #### BUG-05 — VRAM explosion in pairwise Polar-IoU
-**File:** `ultralytics/utils/tal.py`
+**File:** `raycasted/model/tal.py` (fix) — bug originates from `ultralytics/utils/tal.py` parent
 
 A naive `[B, N_anchors, N_gt, 32]` expansion for pairwise IoU occupies ~8.6 GB at standard training configuration (B=16, N_anchors=8400, N_gt=500). This causes an immediate OOM crash. For dense TIL fields, even the batch-loop fix (which reduces complexity to `[N_cand, N_gt, 32]` per image) can produce ~3.8 GB slices when `N_cand` approaches `N_anchors`.
 
@@ -1462,14 +1515,14 @@ Full implementation in §11.2. Memory budget must be profiled at three density l
 ---
 
 #### BUG-06 — TAL assigner patched in only one of three required methods
-**File:** `ultralytics/utils/tal.py`
+**File:** `raycasted/model/tal.py` (fix) — bug originates from `ultralytics/utils/tal.py` parent
 
 Overriding only `get_box_metrics()` leaves `select_candidates_in_gts()` performing box-containment checks on polar vectors (geometrically wrong) and `get_targets()` encoding 4-dim box targets (wrong shape). All three methods must be overridden together. See §10.1.
 
 ---
 
 #### BUG-07 — `PolygonAssigner` not wired into the E2ELoss framework
-**File:** `ultralytics/utils/loss.py`
+**File:** `raycasted/model/loss.py` (fix) — bug originates from `ultralytics/utils/loss.py` parent
 
 `E2ELoss` takes `loss_fn` as a constructor argument and instantiates it twice. `TaskAlignedAssigner` is instantiated inside `v8DetectionLoss.__init__()`. Subclassing only `TaskAlignedAssigner` does not affect which assigner `E2ELoss` uses — it still instantiates `v8DetectionLoss`, which instantiates `TaskAlignedAssigner`.
 
@@ -1540,9 +1593,9 @@ This is not a bug. It is documented here to prevent it from being re-raised as a
 ---
 
 #### GAP-04 — Flip/rotate function signatures: permutation indices are internal
-**File:** `raycasted/data/utils/annotation_ops.py`
+**File:** `raycasted/data/etl/ops/augment.py`
 
-Permutation index arrays (`FLIP_H_IDX`, `FLIP_V_IDX`, `ROT_INDICES`) must be imported from `constants.py` inside `annotation_ops.py` and used internally. They must **not** be passed as arguments by callers.
+Permutation index arrays (`FLIP_H_IDX`, `FLIP_V_IDX`, `ROT_INDICES`) must be imported from `constants.py` inside `ops/augment.py` and used internally. They must **not** be passed as arguments by callers.
 
 **Correct signatures:**
 ```python
@@ -1556,7 +1609,7 @@ rotate_90(annotations: np.ndarray, k: int, canvas_size: int) -> np.ndarray
 ---
 
 #### GAP-05 — Smoothness annealing and E2ELoss o2m decay are active simultaneously
-**File:** `ultralytics/utils/loss.py`
+**File:** `raycasted/model/loss.py` (monitoring) — inherited from `ultralytics/utils/loss.py`
 
 Both the inherited `o2m` decay (from `E2ELoss.update()`) and `lambda_smooth` annealing operate in the epoch 0–50 window. The absolute magnitude of `L_smooth` at λ=0.05 is small, so destructive interference is unlikely but not impossible.
 
@@ -1594,7 +1647,7 @@ When `num_workers > 1`, the orchestrator serialises `_process_dataset` as a boun
 ---
 
 #### NOTE-03 — Polar-IoU is a sector-area approximation, not exact 2D polygon IoU
-**File:** `raycasted/data/utils/annotation_ops.py`
+**File:** `raycasted/data/etl/ops/iou.py`
 
 `PolarIoU = Σ min(d,d')² / Σ max(d,d')²` approximates sector areas assuming uniform angular spacing. For near-circular TILs this is tight. For elongated or irregularly-shaped cells the approximation diverges from exact 2D polygon IoU.
 
@@ -1603,7 +1656,7 @@ When `num_workers > 1`, the orchestrator serialises `_process_dataset` as a boun
 ---
 
 #### NOTE-04 — Zero rays from `polygon_to_raycast` indicate geometry failures
-**File:** `raycasted/data/utils/annotation_ops.py`
+**File:** `raycasted/data/etl/ops/convert.py`
 
 Any ray that does not intersect the polygon boundary returns `d_i = 0.0`. These cells are not immediately dropped — they pass through ingestion and are filtered during `filter_and_clip_annotations()` based on the ray survival fraction threshold.
 
@@ -1677,11 +1730,18 @@ Add a diagnostic counter in each ingestor that logs the number of cells with mor
 
 ### Phase 4 — Model Head
 
-- [ ] Output shape: `[B, N_anchors, 34]`
-- [ ] `ray_outputs.min() > 0` (Softplus active)
-- [ ] `xy_outputs` in `[0, 1]` (Sigmoid active)
-- [ ] `self.no == nc + 34` in `PolygonDetectionLoss` (see BUG-02)
-- [ ] DFL decoder absent from computational graph
+- [x] Output shape: `[B, 34, N_anchors]` (note: channel-first layout matching ultralytics convention)
+- [x] `ray_outputs.min() > 0` (Softplus active)
+- [x] `xy_outputs` in `[0, 1]` (Sigmoid active)
+- [x] `self.no == nc + 34` in `PolygonDetectionLoss` (see BUG-02)
+- [x] DFL decoder absent from computational graph (`head.dfl` is `nn.Identity`)
+- [x] `RayRefinementBlock` preserves shape, has residual connection, GroupNorm config correct
+- [x] Inference path: decoded xy non-negative, rays positive, scores in [0, 1]
+- [x] Training forward returns raw logits (no activations applied)
+- [x] Decode round-trip: encode known polygons as logits → decode via `_inference` → verify xy/rays match across P3/P4/P5 scales
+- [x] Bias init: ray biases decode to ~15px at all scales (cell-size-aware for 0.25 MPP)
+- [x] Visual: activation sanity plots (sigmoid/softplus distributions, per-scale ray statistics)
+- [x] Visual: decoded polygon spread (8400 polygons from random logits, spatial coverage, ray distributions)
 
 ### Phase 5–6 — Loss + Assigner
 

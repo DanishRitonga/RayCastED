@@ -41,13 +41,17 @@ YAML config (main/dataset.yaml)
 Ingestors → .npz files  [image + raycast annotations, pixel space]
     ↓  TransformOrchestrator (SpatialChunker + NormalizerAndPadder)
 .npz tiles  [content_h, content_w preserved]
-    ↓  PolygonTileDataset  [NOT YET IMPLEMENTED]
+    ↓  PolygonTileDataset
 [B, 3, H, W] + [M, 36] labels (normalised)
-    ↓  RayCastED  [NOT YET IMPLEMENTED]
+    ↓  PolygonDetect head (raycasted/model/head.py) + PolygonDetectionLoss (Phase 6)
 Trained weights
+    ↓  PolygonPredictor (Phase 7)
+[N, 32, 2] polygon vertices  (pixel space)
 ```
 
 ### Key modules
+
+**`raycasted/model/`** — Prediction head package (Phase 4). Subclasses `ultralytics.nn.modules.head.Detect` rather than modifying ultralytics in-place. Contains `PolygonDetect`, `RayRefinementBlock`, `register_polygon_head()` for namespace injection, and `PolygonDetectionLoss` stub. Files: `head.py`, `register.py`, `loss.py`.
 
 **`raycasted/data/etl/ops/`** — Single source of truth for ALL geometry logic. Every caller imports from here; nothing is reimplemented elsewhere. PyTorch variants (`polar_iou_torch`, `angular_smoothness_loss_torch`) use **lazy imports** (`import torch` inside the function body) so this package is safe to import without PyTorch in ETL environments. `decode_pred_xy` is NOT here — it is a method of `PolygonDetectionLoss` only.
 
@@ -92,8 +96,14 @@ Phase 0   — ops/ + constants  ✓
 Phase 0.5 — visual round-trip tests  ✓
 Phase 1   — raycast extraction in all 3 ingestors  ✓
 Phase 1.5 — IngestionOrchestrator  ✓
-Phase 2   — SpatialChunker / NormalizerAndPadder / TransformOrchestrator patches
-Phase 3   — PolygonTileDataset + collate_fn
-Phase 4–8 — Model (YOLOv26 modifications in ultralytics/)
+Phase 2   — SpatialChunker / NormalizerAndPadder / TransformOrchestrator patches  ✓
+Phase 3   — PolygonTileDataset + collate_fn  ✓
+Phase 4   — Model head (RayRefinementBlock, PolygonDetect, 34-dim output)  ✓
+Phase 5   — PolygonAssigner (masked pairwise IoU)
+Phase 6   — PolygonDetectionLoss (5 terms) + PolygonE2ELoss
+Phase 7   — PolygonPredictor + PolygonAnnotator
+Phase 8   — PolygonValidator
 Phase 9   — ONNX export + TensorRT deployment (NVIDIA Jetson)
 ```
+
+**Phase 4 approach:** Subclasses `ultralytics Detect` in `raycasted/model/head.py` instead of modifying `ultralytics/` in-place. Registration via `register_polygon_head()` injects into the ultralytics namespace. Full YAML config integration deferred to Phase 7.
