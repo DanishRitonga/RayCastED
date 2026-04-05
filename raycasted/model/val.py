@@ -315,8 +315,9 @@ class RayCastValidator(DetectionValidator):
         iou_matrix = self._compute_polygon_iou_matrix(pred_coords, gt_coords)
 
         # Shapely true-positive matching (uses self.iouv thresholds)
+        # match_predictions expects iou shape [N_gt, N_pred] (parent convention: box_iou(gt, pred))
         tp_shapely = (
-            self.match_predictions(preds['cls'], batch['cls'], torch.from_numpy(iou_matrix).to(self.device))
+            self.match_predictions(preds['cls'], batch['cls'], torch.from_numpy(iou_matrix.T).to(self.device))
             .cpu()
             .numpy()
         )
@@ -384,21 +385,23 @@ class RayCastValidator(DetectionValidator):
         # Pairwise Euclidean distance matrix
         dists = np.sqrt(((pred_centroids[:, None, :] - gt_centroids[None, :, :]) ** 2).sum(axis=2))
 
-        # Class matching
-        correct_class = gt_cls[:, None] == pred_cls  # [M, N]
+        # Class matching — transpose to match dists shape [N_pred, N_gt]
+        correct_class = (gt_cls[:, None] == pred_cls).T  # [N_pred, N_gt]
+        if isinstance(correct_class, torch.Tensor):
+            correct_class = correct_class.cpu().numpy()
 
         for t_idx, threshold in enumerate(self.centroid_thresholds):
-            match_matrix = (dists <= threshold) * correct_class.cpu().numpy()  # [M, N]
+            match_matrix = (dists <= threshold) * correct_class  # [N_pred, N_gt]
 
             # Greedy matching: sort by distance ascending, unique per row and column
             matches = np.nonzero(match_matrix)
-            matches = np.array(matches).T  # [K, 2] (gt_idx, pred_idx)
+            matches = np.array(matches).T  # [K, 2] (pred_idx, gt_idx)
             if matches.shape[0]:
                 if matches.shape[0] > 1:
                     matches = matches[dists[matches[:, 0], matches[:, 1]].argsort()]
-                    matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
                     matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
-                correct[matches[:, 1].astype(int), t_idx] = True
+                    matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+                correct[matches[:, 0].astype(int), t_idx] = True
 
         return correct
 
