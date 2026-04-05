@@ -74,7 +74,7 @@ class RayCastTileDataset(Dataset):
         # 5. Convert image to tensor
         image_tensor = torch.from_numpy(image.transpose(2, 0, 1)).float() / 255.0
 
-        return image_tensor, annotations
+        return image_tensor, annotations, str(self.tile_paths[idx])
 
     def _random_crop(
         self, image: np.ndarray, annotations: np.ndarray, content_h: int, content_w: int
