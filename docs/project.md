@@ -1,7 +1,7 @@
 # RayCastED — RayCast-based End-to-end Detection
 ## Project Plan v4.12 — Architecture Reference & Bug Registry
 
-> **Status:** Pre-implementation. This document is the authoritative specification.  
+> **Status:** Implementation in progress (through Phase 11). This document is the authoritative specification.  
 > **Scope:** RayCastED ETL → RayCastED training → inference → NVIDIA Jetson deployment.  
 > **Dataset targets:** MoNuSAC (Parquet), PUMA (GeoJSON), PanopTILs (CSV polygons).  
 > **Deployment target:** NVIDIA Jetson (Orin/Xavier) via ONNX → TensorRT.
@@ -27,9 +27,10 @@
 15. [Module G — Validation Metrics](#15-module-g--validation-metrics)
 16. [Module H — Deployment (NVIDIA Jetson)](#16-module-h--deployment-nvidia-jetson)
 17. [Module I — Training Integration](#17-module-i--training-integration)
-18. [Hyperparameter Reference](#18-hyperparameter-reference)
-19. [Bug & Vulnerability Registry](#19-bug--vulnerability-registry)
-20. [Testing Checkpoints](#20-testing-checkpoints)
+18. [Module J — Pipeline Orchestrator & Config Format](#18-module-j--pipeline-orchestrator--config-format)
+19. [Hyperparameter Reference](#19-hyperparameter-reference)
+20. [Bug & Vulnerability Registry](#20-bug--vulnerability-registry)
+21. [Testing Checkpoints](#21-testing-checkpoints)
 
 ---
 
@@ -54,6 +55,7 @@
 | v4.13 | **Phase 4 implementation divergences documented.** (1) Model head implemented as `raycasted/model/` subclass package instead of in-place `ultralytics/` modification. (2) `register_raycast_head()` runtime patching for namespace injection. (3) Cell-size-aware bias initialisation (15px at 0.25 MPP). (4) `_inference()` uses YOLO decode convention `sigmoid*2-0.5`. (5) Loss stub in `raycasted/model/loss.py` (not `ultralytics/utils/loss.py`). (6) `one2many`/`one2one` confirmed as properties, not instance attributes. (7) Phase 4 testing checkpoints expanded with actual test coverage. |
 | v4.14 | **Prefect dropped.** Removed Prefect from core dependencies (§4.1), dependency diagram (§4.3), and §4.5 integration section. Not justified for single-developer research project with local data — retry logic handled by simple wrapper. Also: Phase 5 `RayCastAssigner` implemented in `raycasted/model/tal.py` — subclasses `TaskAlignedAssigner` with radius containment and VRAM-safe Polar-IoU. `get_targets` NOT overridden (parent is dimension-agnostic). |
 | v4.15 | **Training integration added.** New Module I (§17) specifying training pipeline that wires all model components into the Ultralytics training loop. Phase 10 added to execution order. `RayCastTrainer(DetectionTrainer)` with custom loss, data loader, and validator. YAML config integration for `RayCastDetect` head. Enables trained checkpoints for ONNX export validation (Phase 9). |
+| v4.16 | **Pipeline orchestrator + config format added.** New Module J (§18) specifying `RayCastPipeline` — end-to-end orchestrator that chains ingestion → transform → training from a single `dataset.yaml`. Auto-generates training data YAML from `global_cell_map`. CLI with `--stage` flag for individual stages. Reorganises flat transform output into `train/`/`val/` subdirectories. Config format reference (§18.2) documenting all `dataset.yaml` fields. Phase 11 added to execution order. Phase 10 testing checkpoints updated with real-data smoke test passing. |
 
 ---
 
@@ -67,11 +69,13 @@ Convert Ultralytics YOLOv26 (bounding-box detector) into a **multi-axis, raycast
 
 ```
 Raw datasets (Parquet / GeoJSON / CSV)
+        ↓  RayCastPipeline (or individual orchestrators)
         ↓  IngestionOrchestrator
 .npz files  [image + raycast annotations, pixel space]
         ↓  TransformOrchestrator  (SpatialChunker + NormalizerAndPadder)
-.npz tiles  [content_h, content_w preserved]
-        ↓  RayCastTileDataset
+.npz tiles  [content_h, content_w preserved] → reorganised into train/ val/
+        ↓  Auto-generated data.yaml (nc, names, paths from global_cell_map)
+        ↓  RayCastTrainer → RayCastTileDataset
 [B, 3, H, W] + [M, 36] labels  (normalised)
         ↓  RayCastED  (RayCastE2ELoss + RayCastAssigner)
 Trained weights
@@ -341,8 +345,13 @@ raycasted/
 │   ├── __init__.py                      NEW — re-exports RayCastDetect, RayRefinementBlock, register
 │   ├── head.py                          NEW — RayRefinementBlock + RayCastDetect(Detect)
 │   ├── register.py                      NEW — register_raycast_head() namespace injection
-│   ├── loss.py                          NEW — RayCastDetectionLoss stub (full impl in Phase 6)
-│   └── tal.py                           NEW — RayCastAssigner(TaskAlignedAssigner)
+│   ├── loss.py                          NEW — RayCastDetectionLoss + RayCastE2ELoss
+│   ├── tal.py                           NEW — RayCastAssigner(TaskAlignedAssigner)
+│   ├── predict.py                       NEW — RayCastPredictor
+│   ├── val.py                           NEW — RayCastValidator (Shapely polygon mAP)
+│   ├── train.py                          NEW — RayCastTrainer(DetectionTrainer)
+│   └── export.py                        NEW — ONNX export + TensorRT deploy
+├── pipeline.py                         NEW — end-to-end orchestrator (ingest → transform → train)
 
 ultralytics/                              # NOT modified in-place — subclass approach used
 ├── nn/modules/
@@ -412,6 +421,7 @@ Phase 7   — RayCastPredictor + RayCastAnnotator
 Phase 8   — RayCastValidator
 Phase 9   — ONNX export + TensorRT deployment (NVIDIA Jetson)
 Phase 10  — Training integration (RayCastTrainer + YAML config + MLflow)
+Phase 11  — Pipeline orchestrator (RayCastPipeline — end-to-end CLI)
 ```
 
 ---
@@ -1478,19 +1488,192 @@ Per-epoch metrics logged to MLflow:
 ### 17.9 CLI Usage
 
 ```bash
-# Train from scratch
-python -m raycasted.model.train \
-    --config raycasted/configs/raycast_yolo.yaml \
-    --data raycasted/configs/dataset.yaml \
+# End-to-end pipeline (ingest → transform → train)
+uv run python -m raycasted.pipeline \
+    --config main/dataset.yaml --output output/ \
     --epochs 100 --batch 16 --imgsz 640
 
-# Resume training
+# Individual stages
+uv run python -m raycasted.pipeline \
+    --config main/dataset.yaml --output output/ --stage ingest --dataset PUMA
+uv run python -m raycasted.pipeline \
+    --config main/dataset.yaml --output output/ --stage transform
+uv run python -m raycasted.pipeline \
+    --config main/dataset.yaml --output output/ --stage train --epochs 50
+
+# Resume training (standalone trainer)
 python -m raycasted.model.train --resume runs/detect/train/weights/last.pt
 ```
 
 ---
 
-## 18. Hyperparameter Reference
+## 18. Module J — Pipeline Orchestrator
+
+**File:** `raycasted/pipeline.py` — `RayCastPipeline`
+
+### 18.1 Overview
+
+End-to-end orchestrator that chains all stages — ingestion, transform, and training — from a single `dataset.yaml` config. Auto-generates the training data YAML (with `nc`, `names`, `train`/`val` paths) from the ETL config's `global_cell_map`. Supports running individual stages or the full pipeline.
+
+```
+dataset.yaml
+    ↓  ETLConfig (Pydantic)
+    ↓
+RayCastPipeline
+    ├─ Stage 1: IngestionOrchestrator  →  output/ingested/
+    ├─ Stage 2: TransformOrchestrator  →  output/transformed/
+    │   └─ _organize_by_split: flat tiles → train/ val/ subdirs
+    └─ Stage 3: RayCastTrainer
+        └─ _generate_training_yaml: global_cell_map → data.yaml
+```
+
+### 18.2 Config Format — `dataset.yaml`
+
+A single YAML file drives the entire pipeline. Structure:
+
+```yaml
+# ── Global settings (apply to ALL datasets) ──────────────────────────────
+global_settings:
+  root_dir: "/absolute/path/to/datasets"     # Base directory for all datasets
+  output_image_size: [1024, 1024]            # Target ROI size after ingestion
+  output_mpp: 0.25                           # Target microns-per-pixel
+  patching_overlap_pct: 10                   # Overlap between spatial chunks (%)
+  annotation_type: "raycast"                 # "raycast" | "bbox"
+
+  global_cell_map:                           # Standard name → integer ID
+    "Background": 0                          #   0 = background (included in nc)
+    "Lymphocyte": 1                          #   1..N = foreground classes
+    "Immune Cells": 2
+    "Epithelial": 3
+    "Stroma": 4
+    "Ignore": 255                            #   255 = ignore (excluded from nc)
+
+  global_tissue_map:                         # Tissue type → integer ID
+    "Breast": 0
+    "Melanoma": 4
+
+# ── Per-dataset configs ──────────────────────────────────────────────────
+datasets:
+  <DatasetName>:
+    root_dir: "relative/path/from/root_dir"  # Dataset-specific subdirectory
+    ingestion_method: <int>                  # 1=Parquet, 3=MatInstance, 4=GeoJSON, 5=CSV
+    native_mpp: 0.25                         # Source image resolution
+
+    # Split detection — choose ONE:
+    split_separation: "filename_regex"       #   "physical" | "filename_regex" | "none"
+    split_args:                              #   (only if filename_regex)
+      regex: "(train|test)"
+    split_dirs:                              #   (only if physical)
+      train_dir: "train/"
+      val_dir: "val/"
+
+    # Image/mask pairing — choose ONE:
+    modality_separation: "physical_parallel" #   "physical_parallel" | "physical_flat" | "bundled_archive"
+    modality_dirs:                           #   (only if physical_parallel)
+      image_dir: "images/"
+      mask_dir: "annotations/"
+    modality_pairing_rule:                   #   (optional, for file matching)
+      match_extension: ".geojson"
+      add_suffix: "_nuclei"                  #   e.g. image.tif ↔ image_nuclei.geojson
+
+    # Class mapping: raw dataset label → standard name (must exist in global_cell_map)
+    namespace_map:
+      "nuclei_tumor": "Epithelial"
+      "nuclei_lymphocyte": "Lymphocyte"
+      "nuclei_stroma": "Stroma"
+      "nuclei_apoptosis": "Ignore"
+
+    # Tissue mapping (optional)
+    tissue_type: "Melanoma"                  #   Single tissue type for entire dataset
+    tissue_map:                              #   OR per-id mapping
+      "0": "Breast"
+      "1": "Melanoma"
+
+    # CSV-specific (only if ingestion_method=5)
+    csv_column_map:
+      x_coords: "coords_x"
+      y_coords: "coords_y"
+      category: "group"
+```
+
+**Auto-generated training YAML** (`data.yaml`):
+
+The pipeline auto-generates this file from `global_cell_map` before training:
+
+```yaml
+train: /path/to/output/transformed/train
+val: /path/to/output/transformed/val
+nc: 5
+names:
+  0: Background
+  1: Lymphocyte
+  2: Immune Cells
+  3: Epithelial
+  4: Stroma
+```
+
+Classes with `Ignore(255)` are excluded. `nc = max(class_id) + 1` for all non-Ignore classes.
+
+### 18.3 Output Directory Structure
+
+```
+<output_dir>/
+├── ingested/                    # Stage 1 output
+│   ├── <DatasetName>/
+│   │   ├── train/
+│   │   │   └── <roi_id>.npz     # image, annotations, tissue
+│   │   └── val/
+│   │       └── <roi_id>.npz
+│   └── <AnotherDataset>/
+│       └── ...
+├── transformed/                 # Stage 2 output
+│   ├── train/
+│   │   └── <chunk_id>.npz       # image, annotations, tissue, content_h, content_w
+│   ├── val/
+│   │   └── <chunk_id>.npz
+│   ├── stain_profile.json       # Population-level Macenko profile
+│   └── data.yaml                # Auto-generated training config
+```
+
+### 18.4 CLI Reference
+
+```bash
+uv run python -m raycasted.pipeline [OPTIONS]
+
+Required:
+  --config PATH       Path to dataset.yaml ETL config
+  --output PATH       Base output directory
+
+Pipeline control:
+  --stage {all,ingest,transform,train}
+                      Pipeline stage to run (default: all)
+  --dataset NAME      Restrict ingestion to a single dataset
+
+Training overrides:
+  --model YAML        Model architecture (default: yolo11n.yaml)
+  --epochs N          Number of training epochs (default: 100)
+  --batch N           Batch size (default: 16)
+  --imgsz N           Input image size (default: 640)
+  --device DEVICE     Device: cpu, 0, 0,1 (default: auto)
+  --workers N         DataLoader workers (default: 8)
+  --lr0 FLOAT         Initial learning rate
+  --project PATH      Project directory for saves
+  --name NAME         Experiment name
+```
+
+### 18.5 Stage Dependencies
+
+| Stage | Requires | Produces |
+|-------|-----------|----------|
+| `ingest` | Raw data at `root_dir` | `ingested/*.npz` |
+| `transform` | `ingested/` from Stage 1 | `transformed/{train,val}/*.npz` + `data.yaml` |
+| `train` | `transformed/` from Stage 2 | Trained checkpoint in `runs/detect/` |
+
+Running `--stage train` without prior stages will fail if `transformed/` does not exist. Running `--stage transform` without prior ingestion will fail if `ingested/` does not exist.
+
+---
+
+## 19. Hyperparameter Reference
 
 | Parameter | Value | Location | Notes |
 |-----------|-------|----------|-------|
@@ -1524,7 +1707,7 @@ python -m raycasted.model.train --resume runs/detect/train/weights/last.pt
 
 ---
 
-## 19. Bug & Vulnerability Registry
+## 20. Bug & Vulnerability Registry
 
 Every entry here must be addressed during implementation. Entries are classified by the severity of the consequence if ignored.
 
@@ -1749,7 +1932,7 @@ Add a diagnostic counter in each ingestor that logs the number of cells with mor
 
 ---
 
-## 20. Testing Checkpoints
+## 21. Testing Checkpoints
 
 ### Phase 0 — Shared Utilities
 
@@ -1863,14 +2046,43 @@ Add a diagnostic counter in each ingestor that logs the number of cells with mor
 
 ### Phase 10 — Training Integration
 
-- [ ] Training runs for 2 epochs without errors (smoke test with synthetic data)
+- [x] Neck channel extraction returns correct per-scale channels (64, 128, 256)
+- [x] Head replacement: `Detect` → `RayCastDetect` with correct nc
+- [x] `init_criterion` returns `RayCastE2ELoss` (picklable via `_RayCastCriterionWrapper`)
+- [x] `model.end2end = True` after head replacement
+- [x] DFL replaced with `nn.Identity`
+- [x] Checkpoint metadata: `training_args` contains `crop_size`, `nc`, `n_rays`, `strides`
+- [x] Collate function: dict format with `img`, `batch_idx`, `cls`, `bboxes`, `ori_shape`, `ratio_pad`, `im_file`
+- [x] Collate handles empty and all-empty annotation batches
+- [x] Mosaic/mixup forced to 0.0 even when user passes 1.0
+- [x] Forward pass: 3-scale output with correct anchor count (84 for 64px input)
+- [x] Loss computation: all 5 terms finite and non-zero
+- [x] `preprocess_batch` moves tensors to device without /255 division
+- [x] `get_validator` returns `RayCastValidator` with 5 polygon loss_names
+- [x] `build_dataset` returns `RayCastTileDataset` with correct augment flag
+- [x] `get_dataloader` uses `_raycast_collate_fn` and returns valid batches
+- [x] Smoke train: 2 epochs complete without errors on CPU with synthetic data (1.7s)
+- [x] Real-data smoke train: 2 epochs with PUMA data (2602 annotations, 5 ROIs, 4 classes) in 19.5s on CPU
+- [x] Validation runs end-to-end: Shapely polygon IoU + centroid F1 matching
+- [ ] Training runs for 2 epochs with real GPU training (full smoke test with actual data loading)
 - [ ] All five loss sub-terms logged to MLflow and non-zero in first epoch
 - [ ] `lambda_smooth` decreases from 0.05 across epochs (reaches 0.0 after epoch 50)
-- [ ] Checkpoint saved with `training_args` containing `crop_size`, `nc`, `strides`
+- [ ] Checkpoint saved and loadable with `training_args` metadata
 - [ ] Mosaic/mixup assertions fire if accidentally enabled (GAP-06)
-- [ ] Validation uses `RayCastValidator` (Shapely polygon mAP, not box mAP)
 - [ ] ONNX export works with trained checkpoint (unblocks Phase 9 export tests)
 - [ ] Resumed training continues from correct epoch and loss state
+
+### Phase 11 — Pipeline Orchestrator
+
+- [x] `RayCastPipeline` imports and `--help` works
+- [x] `_generate_training_yaml()` produces valid YAML with correct `nc`, `names`, paths
+- [x] `_organize_by_split()` reorganises flat tiles into `train/`/`val/` subdirs
+- [x] CLI accepts `--stage` flag with choices `all|ingest|transform|train`
+- [x] CLI training overrides: `--model`, `--epochs`, `--batch`, `--imgsz`, `--device`, `--workers`, `--lr0`
+- [ ] End-to-end pipeline run: `ingest → transform → train` completes on real data
+- [ ] Individual stage re-runs work (e.g. `--stage train` after previous transform)
+- [ ] Ingestion stage produces correct `<output>/ingested/<dataset>/<split>/` layout
+- [ ] Transform stage produces correct `<output>/transformed/{train,val}/` layout with `data.yaml`
 ```
 
 ---
