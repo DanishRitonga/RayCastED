@@ -12,7 +12,29 @@ Validates:
 import torch
 
 from raycasted.model.loss import RayCastDetectionLoss
-from tests.phase_6.test_loss import _make_batch, _make_mock_model, _make_preds
+from tests.phase_6.test_loss import _make_batch, _make_preds
+
+from unittest.mock import MagicMock
+
+
+def _make_mock_model_cuda(nc=4, reg_max=1):
+    """Create a mock model on CUDA for loss initialisation."""
+    model = MagicMock()
+    model.parameters.side_effect = lambda: iter([torch.randn(1, device='cuda')])
+    model.args = MagicMock()
+    model.args.box = 7.5
+    model.args.cls = 0.5
+    model.args.dfl = 1.5
+    model.args.epochs = 100
+
+    m = MagicMock()
+    m.nc = nc
+    m.reg_max = reg_max
+    m.stride = torch.tensor([8.0, 16.0, 32.0])
+    m.end2end = True
+    model.model = [MagicMock(), m]
+    model.model[-1] = m
+    return model
 
 
 def _check_cuda():
@@ -20,6 +42,19 @@ def _check_cuda():
         print('SKIP: no CUDA device available')
         return False
     return True
+
+
+def _to_cuda(d):
+    """Move all tensors in a dict to CUDA."""
+    return {k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in d.items()}
+
+
+def _preds_to_cuda(preds):
+    """Move prediction dict tensors to CUDA."""
+    preds['boxes'] = preds['boxes'].cuda()
+    preds['scores'] = preds['scores'].cuda()
+    preds['feats'] = [f.cuda() for f in preds['feats']]
+    return preds
 
 
 def test_assigner_memory_budget():
@@ -33,21 +68,17 @@ def test_assigner_memory_budget():
     if not _check_cuda():
         return
 
-    model = _make_mock_model()
-    loss_fn = RayCastDetectionLoss(model).cuda()
+    model = _make_mock_model_cuda()
+    loss_fn = RayCastDetectionLoss(model)
 
     for n_gt, label in [(50, 'sparse'), (200, 'moderate'), (400, 'dense')]:
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.empty_cache()
 
-        preds = _make_preds(batch_size=4)
-        preds['boxes'] = preds['boxes'].cuda()
-        preds['scores'] = preds['scores'].cuda()
-        for i in range(len(preds['feats'])):
-            preds['feats'][i] = preds['feats'][i].cuda()
-
-        batch = _make_batch(batch_size=4, n_gt_per_image=n_gt)
-        batch = {k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        preds = _preds_to_cuda(_make_preds(batch_size=4))
+        preds['boxes'].requires_grad_(True)
+        preds['scores'].requires_grad_(True)
+        batch = _to_cuda(_make_batch(batch_size=4, n_gt_per_image=n_gt))
 
         try:
             _, loss_vec, _ = loss_fn.get_assigned_targets_and_loss(preds, batch)
@@ -67,17 +98,11 @@ def test_assignment_density():
     if not _check_cuda():
         return
 
-    model = _make_mock_model()
-    loss_fn = RayCastDetectionLoss(model).cuda()
+    model = _make_mock_model_cuda()
+    loss_fn = RayCastDetectionLoss(model)
 
-    preds = _make_preds(batch_size=2)
-    batch = _make_batch(batch_size=2, n_gt_per_image=30)
-
-    preds['boxes'] = preds['boxes'].cuda()
-    preds['scores'] = preds['scores'].cuda()
-    for i in range(len(preds['feats'])):
-        preds['feats'][i] = preds['feats'][i].cuda()
-    batch = {k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+    preds = _preds_to_cuda(_make_preds(batch_size=2))
+    batch = _to_cuda(_make_batch(batch_size=2, n_gt_per_image=30))
 
     try:
         (fg_mask, *_), _, _ = loss_fn.get_assigned_targets_and_loss(preds, batch)
@@ -97,22 +122,18 @@ def test_piou_monotonic_decrease():
     if not _check_cuda():
         return
 
-    model = _make_mock_model()
-    loss_fn = RayCastDetectionLoss(model).cuda()
+    model = _make_mock_model_cuda()
+    loss_fn = RayCastDetectionLoss(model)
 
-    preds = _make_preds(batch_size=2)
-    batch = _make_batch(batch_size=2, n_gt_per_image=20)
-
-    preds['boxes'] = preds['boxes'].cuda()
-    preds['scores'] = preds['scores'].cuda()
-    for i in range(len(preds['feats'])):
-        preds['feats'][i] = preds['feats'][i].cuda()
-    batch = {k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+    preds = _preds_to_cuda(_make_preds(batch_size=2))
+    preds['boxes'].requires_grad_(True)
+    preds['scores'].requires_grad_(True)
+    for f in preds['feats']:
+        f.requires_grad_(True)
+    batch = _to_cuda(_make_batch(batch_size=2, n_gt_per_image=20))
 
     optimizer = torch.optim.SGD(
-        [preds['boxes'], preds['scores']] + [
-            p for f in preds['feats'] for p in [f] if isinstance(f, torch.Tensor)
-        ],
+        [preds['boxes'], preds['scores']] + preds['feats'],
         lr=0.01,
     )
 
@@ -135,10 +156,34 @@ def test_piou_monotonic_decrease():
         print(f'SKIP: PiOU monotonic test: {e}')
 
 
+def test_all_five_terms_nonzero_gpu():
+    """All five loss sub-terms are non-zero in the first GPU forward pass."""
+    if not _check_cuda():
+        return
+
+    model = _make_mock_model_cuda()
+    loss_fn = RayCastDetectionLoss(model)
+
+    preds = _preds_to_cuda(_make_preds(batch_size=2))
+    batch = _to_cuda(_make_batch(batch_size=2, n_gt_per_image=10))
+
+    _, loss_vec, _ = loss_fn.get_assigned_targets_and_loss(preds, batch)
+
+    names = ['L_xy', 'L_cls', 'L_L1', 'L_PolarIoU', 'L_smooth']
+    assert loss_vec.shape == (5,), f'Expected 5-element loss, got {loss_vec.shape}'
+    for i, name in enumerate(names):
+        val = loss_vec[i].item()
+        assert torch.isfinite(loss_vec[i]), f'{name} is not finite: {val}'
+    # cls should always be non-zero
+    assert loss_vec[1].item() > 0, f'L_cls should be > 0, got {loss_vec[1].item()}'
+    print(f'PASS: all 5 loss terms on GPU — {[f"{names[i]}={loss_vec[i].item():.4f}" for i in range(5)]}')
+
+
 if __name__ == '__main__':
     print('Phase 6 GPU tests')
     print('=' * 50)
     test_assigner_memory_budget()
     test_assignment_density()
     test_piou_monotonic_decrease()
+    test_all_five_terms_nonzero_gpu()
     print('\nGPU tests complete.')

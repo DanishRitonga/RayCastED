@@ -57,6 +57,10 @@ class RayCastTileDataset(Dataset):
 
         if annotations is None or len(annotations) == 0:
             annotations = np.zeros((0, 35), dtype=np.float32)
+        else:
+            # Filter out Ignore class (class_id=255) — these must not reach the loss
+            valid_mask = annotations[:, 0] != 255
+            annotations = annotations[valid_mask]
 
         # 1. Random crop (pixel space)
         image, annotations = self._random_crop(image, annotations, content_h, content_w)

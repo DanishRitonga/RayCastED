@@ -128,7 +128,7 @@ class RayCastAssigner(TaskAlignedAssigner):
             containment = radii * self.radius_scale  # (N_valid,)
 
             # --- Distance check: (N_valid, N_anchors) ---
-            dist = torch.cdist(gt_xy, xy_centers)  # (N_valid, N_anchors)
+            dist = torch.cdist(gt_xy.float(), xy_centers.float())  # (N_valid, N_anchors)
             valid_mask = (dist <= containment[:, None]) & (containment[:, None] > 0)
 
             # Place in output
@@ -207,8 +207,11 @@ class RayCastAssigner(TaskAlignedAssigner):
 
             # Fill overlaps — only at positions where mask_gt is True.
             # iou is (N_cand, N_valid_gt), overlaps needs (N_valid_gt, N_cand).
+            # Cast to overlaps dtype to handle AMP half/float mismatch.
             pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]  # (N_valid_gt, N_cand)
-            overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = iou.T * pair_mask.to(overlaps.dtype)
+            overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = (
+                iou.T.to(overlaps.dtype) * pair_mask.to(overlaps.dtype)
+            )
 
         # Alignment metric: cls_score^alpha * iou^beta (same formula as parent)
         align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
