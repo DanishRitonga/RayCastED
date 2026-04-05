@@ -108,3 +108,29 @@ Phase 10  — Training integration (RayCastTrainer + YAML config + MLflow)
 ```
 
 **Phase 4 approach:** Subclasses `ultralytics Detect` in `raycasted/model/head.py` instead of modifying `ultralytics/` in-place. Registration via `register_raycast_head()` injects into the ultralytics namespace. Training integration via `RayCastTrainer` in Phase 10.
+
+### GPU-bounded tests
+
+These tests from `docs/project.md §21` require a GPU to run. All other unchecked tests are CPU-only or require only real data access.
+
+**Phase 5-6 — Loss + Assigner:**
+- GPU memory during assigner call ≤ 4 GB (BUG-05 VRAM budget)
+- Mean positive assignments per GT cell: 1–4 for first 100 batches
+- `L_PolarIoU` decreasing monotonically over first 10 epochs
+- All five loss sub-terms non-zero in first GPU batch
+
+**Phase 10 — Training Integration:**
+- Training runs for 2 epochs with real GPU training (full smoke test)
+- All five loss sub-terms logged to MLflow and non-zero in first epoch
+- `lambda_smooth` decreases from 0.05 across epochs (reaches 0.0 after epoch 50)
+- Checkpoint saved and loadable with `training_args` metadata
+- Resumed training continues from correct epoch and loss state
+
+**Phase 11 — Pipeline Orchestrator:**
+- End-to-end pipeline run: `ingest → transform → train` completes on real data (GPU train stage)
+
+**Phase 9 — ONNX/TensorRT (separate hardware):**
+- TensorRT engine builds on Jetson without errors
+- TensorRT FP16 output matches PyTorch FP32 within tolerance
+- Jetson inference end-to-end: image in → polygon vertices out
+- Throughput target: ≥ 30 tiles/sec on Jetson Orin

@@ -2083,6 +2083,34 @@ Add a diagnostic counter in each ingestor that logs the number of cells with mor
 - [ ] Individual stage re-runs work (e.g. `--stage train` after previous transform)
 - [ ] Ingestion stage produces correct `<output>/ingested/<dataset>/<split>/` layout
 - [ ] Transform stage produces correct `<output>/transformed/{train,val}/` layout with `data.yaml`
+
+### GPU-Bounded Tests
+
+The following unchecked tests require a GPU (or Jetson device) to run. All other unchecked items are CPU-only or require only real data access.
+
+**Phase 5–6 — Loss + Assigner (GPU required for forward/backward + memory profiling):**
+- [ ] GPU memory during assigner call ≤ 4 GB (see BUG-05)
+- [ ] Mean positive assignments per GT cell: 1–4 for first 100 batches
+- [ ] `L_PolarIoU` decreasing monotonically over first 10 epochs
+- [ ] All five loss sub-terms non-zero in first batch (GPU forward pass)
+
+**Phase 10 — Training Integration (GPU required for training loop):**
+- [ ] Training runs for 2 epochs with real GPU training (full smoke test with actual data loading)
+- [ ] All five loss sub-terms logged to MLflow and non-zero in first epoch
+- [ ] `lambda_smooth` decreases from 0.05 across epochs (reaches 0.0 after epoch 50)
+- [ ] Checkpoint saved and loadable with `training_args` metadata
+- [ ] Resumed training continues from correct epoch and loss state
+
+**Phase 11 — Pipeline Orchestrator (GPU required for train stage):**
+- [ ] End-to-end pipeline run: `ingest → transform → train` completes on real data
+
+**Phase 9 — ONNX/TensorRT Deployment (Jetson hardware required):**
+- [ ] TensorRT engine builds on Jetson without errors (`trtexec --fp16`)
+- [ ] TensorRT FP16 output matches PyTorch FP32 within FP16 tolerance (`atol=0.01`)
+- [ ] Jetson inference end-to-end: image in → polygon vertices out (pixel space)
+- [ ] Throughput target met: ≥ 30 tiles/sec on Jetson Orin (FP16, 640×640)
+
+> **Note:** ONNX export tests (export validation, shape checks, numerical agreement, metadata sidecar) are CPU-only — they do not require a GPU. They are listed under Phase 9 but only need PyTorch + onnxruntime on any machine.
 ```
 
 ---
