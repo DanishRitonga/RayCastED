@@ -26,9 +26,10 @@
 14. [Module F — Inference & Visualisation](#14-module-f--inference--visualisation)
 15. [Module G — Validation Metrics](#15-module-g--validation-metrics)
 16. [Module H — Deployment (NVIDIA Jetson)](#16-module-h--deployment-nvidia-jetson)
-17. [Hyperparameter Reference](#17-hyperparameter-reference)
-18. [Bug & Vulnerability Registry](#18-bug--vulnerability-registry)
-19. [Testing Checkpoints](#19-testing-checkpoints)
+17. [Module I — Training Integration](#17-module-i--training-integration)
+18. [Hyperparameter Reference](#18-hyperparameter-reference)
+19. [Bug & Vulnerability Registry](#19-bug--vulnerability-registry)
+20. [Testing Checkpoints](#20-testing-checkpoints)
 
 ---
 
@@ -52,6 +53,7 @@
 | v4.12 | **Jetson deployment added.** New Module H (§16) specifying ONNX export and TensorRT deployment on NVIDIA Jetson. Phase 9 added to execution order. Scope updated to include deployment target. Tech stack updated with ONNX/TensorRT dependencies. Testing checkpoints added for Phase 9. |
 | v4.13 | **Phase 4 implementation divergences documented.** (1) Model head implemented as `raycasted/model/` subclass package instead of in-place `ultralytics/` modification. (2) `register_raycast_head()` runtime patching for namespace injection. (3) Cell-size-aware bias initialisation (15px at 0.25 MPP). (4) `_inference()` uses YOLO decode convention `sigmoid*2-0.5`. (5) Loss stub in `raycasted/model/loss.py` (not `ultralytics/utils/loss.py`). (6) `one2many`/`one2one` confirmed as properties, not instance attributes. (7) Phase 4 testing checkpoints expanded with actual test coverage. |
 | v4.14 | **Prefect dropped.** Removed Prefect from core dependencies (§4.1), dependency diagram (§4.3), and §4.5 integration section. Not justified for single-developer research project with local data — retry logic handled by simple wrapper. Also: Phase 5 `RayCastAssigner` implemented in `raycasted/model/tal.py` — subclasses `TaskAlignedAssigner` with radius containment and VRAM-safe Polar-IoU. `get_targets` NOT overridden (parent is dimension-agnostic). |
+| v4.15 | **Training integration added.** New Module I (§17) specifying training pipeline that wires all model components into the Ultralytics training loop. Phase 10 added to execution order. `RayCastTrainer(DetectionTrainer)` with custom loss, data loader, and validator. YAML config integration for `RayCastDetect` head. Enables trained checkpoints for ONNX export validation (Phase 9). |
 
 ---
 
@@ -409,6 +411,7 @@ Phase 6   — RayCastDetectionLoss + RayCastE2ELoss
 Phase 7   — RayCastPredictor + RayCastAnnotator
 Phase 8   — RayCastValidator
 Phase 9   — ONNX export + TensorRT deployment (NVIDIA Jetson)
+Phase 10  — Training integration (RayCastTrainer + YAML config + MLflow)
 ```
 
 ---
@@ -1365,7 +1368,129 @@ These targets are estimates based on published YOLO benchmarks on Jetson. Actual
 
 ---
 
-## 17. Hyperparameter Reference
+## 17. Module I — Training Integration
+
+### 17.1 Overview
+
+Wires all model components (head, loss, assigner, predictor, validator) into a trainable pipeline using the Ultralytics training infrastructure. Produces trained checkpoints for ONNX export (Phase 9) and Jetson deployment.
+
+**File:** `raycasted/model/train.py` — `RayCastTrainer(DetectionTrainer)`
+
+### 17.2 RayCastTrainer
+
+Subclasses `DetectionTrainer` to integrate all custom components:
+
+| Method | Override | Purpose |
+|--------|----------|---------|
+| `get_model()` | Registers `RayCastDetect` head via `register_raycast_head()` | Head registration |
+| `get_validator()` | Returns `RayCastValidator` | Shapely polygon mAP |
+| `build_dataset()` | Returns `RayCastTileDataset` | Custom data loading |
+| Loss wiring | Uses `RayCastE2ELoss` via `loss_fn` parameter | 5-term polygon loss |
+| `_setup_train()` | Disables mosaic/mixup, asserts GAP-06 constraints | Safety checks |
+
+### 17.3 Model Construction
+
+Two approaches for building the training model:
+
+**Approach A — YAML config (preferred if `parse_model()` supports it):**
+
+```yaml
+# raycasted/configs/raycast_yolo.yaml
+# Standard YOLOv11 backbone/neck + RayCastDetect head
+head:
+  - [[17, 20, 23], 1, RayCastDetect, [nc, 32]]  # nc classes, 32 rays
+```
+
+**Approach B — Programmatic head replacement (fallback):**
+
+1. Load a pretrained YOLO model: `YOLO('yolo11n.pt')`
+2. Replace the `Detect` head with `RayCastDetect`, copying backbone/neck weights
+3. Reinitialise head with cell-size-aware biases (§9.6)
+
+The frozenset limitation in `parse_model()` (noted in §9) means `RayCastDetect` may not be resolvable from YAML alone. `register_raycast_head()` handles this, but if it fails, use Approach B.
+
+### 17.4 Loss Wiring
+
+The Ultralytics `E2ELoss.__init__` accepts a `loss_fn` parameter. `RayCastE2ELoss` passes `RayCastDetectionLoss` which internally swaps `TaskAlignedAssigner` for `RayCastAssigner`. The full chain:
+
+```
+RayCastE2ELoss(E2ELoss)
+    ├── one2many: RayCastDetectionLoss → RayCastAssigner
+    └── one2one:  RayCastDetectionLoss → RayCastAssigner
+```
+
+No manual wiring is needed beyond passing `loss_fn=RayCastDetectionLoss` to `super().__init__()`. See §10.1 for the subclass pattern.
+
+### 17.5 DataLoader Integration
+
+Override `build_dataset()` to use `RayCastTileDataset`:
+
+```python
+def build_dataset(self, img_path, mode='train', batch=None):
+    from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
+    return RayCastTileDataset(
+        npz_dir=img_path,
+        crop_size=self.args.imgsz,
+        augment=(mode == 'train'),
+    )
+```
+
+### 17.6 Safety Assertions
+
+Before the first training batch, assert:
+
+```python
+assert self.args.mosaic == 0.0, "Mosaic corrupts polygon targets (GAP-06)"
+assert self.args.mixup == 0.0, "Mixup corrupts polygon targets (GAP-06)"
+assert not self.model.model[-1].use_dfl, "DFL must be disabled for polygon head"
+```
+
+### 17.7 Checkpoint Metadata
+
+Trained checkpoints must store metadata required by inference and export:
+
+```python
+model.training_args = {
+    'crop_size': 640,
+    'imgsz': 640,
+    'nc': nc,
+    'n_rays': 32,
+    'strides': [8, 16, 32],
+}
+```
+
+Read by:
+- `RayCastPredictor` — ray denormalisation at inference
+- `export_polygon_yolo_onnx()` — ONNX export metadata sidecar
+
+### 17.8 MLflow Logging
+
+Per-epoch metrics logged to MLflow:
+
+| Metric | Source | Frequency |
+|--------|--------|-----------|
+| `L_cls`, `L_xy`, `L_L1`, `L_PolarIoU`, `L_smooth` | Loss | Per batch |
+| `lambda_smooth`, `o2m_weight` | Loss.update() | Per epoch |
+| `mAP50`, `mAP75`, `mAP50-95` | RayCastValidator | Per epoch |
+| `centroid_f1` (multiple thresholds) | RayCastValidator | Per epoch |
+| Learning rate | Optimizer | Per epoch |
+
+### 17.9 CLI Usage
+
+```bash
+# Train from scratch
+python -m raycasted.model.train \
+    --config raycasted/configs/raycast_yolo.yaml \
+    --data raycasted/configs/dataset.yaml \
+    --epochs 100 --batch 16 --imgsz 640
+
+# Resume training
+python -m raycasted.model.train --resume runs/detect/train/weights/last.pt
+```
+
+---
+
+## 18. Hyperparameter Reference
 
 | Parameter | Value | Location | Notes |
 |-----------|-------|----------|-------|
@@ -1399,7 +1524,7 @@ These targets are estimates based on published YOLO benchmarks on Jetson. Actual
 
 ---
 
-## 18. Bug & Vulnerability Registry
+## 19. Bug & Vulnerability Registry
 
 Every entry here must be addressed during implementation. Entries are classified by the severity of the consequence if ignored.
 
@@ -1624,7 +1749,7 @@ Add a diagnostic counter in each ingestor that logs the number of cells with mor
 
 ---
 
-## 19. Testing Checkpoints
+## 20. Testing Checkpoints
 
 ### Phase 0 — Shared Utilities
 
@@ -1735,6 +1860,17 @@ Add a diagnostic counter in each ingestor that logs the number of cells with mor
 - [ ] TensorRT FP16 output matches PyTorch FP32 within FP16 tolerance (`atol=0.01`)
 - [ ] Jetson inference end-to-end: image in → polygon vertices out (pixel space)
 - [ ] Throughput target met: ≥ 30 tiles/sec on Jetson Orin (FP16, 640×640)
+
+### Phase 10 — Training Integration
+
+- [ ] Training runs for 2 epochs without errors (smoke test with synthetic data)
+- [ ] All five loss sub-terms logged to MLflow and non-zero in first epoch
+- [ ] `lambda_smooth` decreases from 0.05 across epochs (reaches 0.0 after epoch 50)
+- [ ] Checkpoint saved with `training_args` containing `crop_size`, `nc`, `strides`
+- [ ] Mosaic/mixup assertions fire if accidentally enabled (GAP-06)
+- [ ] Validation uses `RayCastValidator` (Shapely polygon mAP, not box mAP)
+- [ ] ONNX export works with trained checkpoint (unblocks Phase 9 export tests)
+- [ ] Resumed training continues from correct epoch and loss state
 ```
 
 ---

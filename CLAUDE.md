@@ -43,7 +43,7 @@ Ingestors → .npz files  [image + raycast annotations, pixel space]
 .npz tiles  [content_h, content_w preserved]
     ↓  RayCastTileDataset
 [B, 3, H, W] + [M, 36] labels (normalised)
-    ↓  RayCastDetect head (raycasted/model/head.py) + RayCastDetectionLoss (Phase 6)
+    ↓  RayCastTrainer (Phase 10) wires RayCastDetect + RayCastE2ELoss + RayCastAssigner
 Trained weights
     ↓  RayCastPredictor (Phase 7)
 [N, 32, 2] polygon vertices  (pixel space)
@@ -51,7 +51,7 @@ Trained weights
 
 ### Key modules
 
-**`raycasted/model/`** — Prediction head package (Phase 4). Subclasses `ultralytics.nn.modules.head.Detect` rather than modifying ultralytics in-place. Contains `RayCastDetect`, `RayRefinementBlock`, `register_raycast_head()` for namespace injection, and `RayCastDetectionLoss` stub. Files: `head.py`, `register.py`, `loss.py`.
+**`raycasted/model/`** — Prediction head and training package (Phases 4–10). Subclasses `ultralytics.nn.modules.head.Detect` rather than modifying ultralytics in-place. Contains `RayCastDetect`, `RayRefinementBlock`, `register_raycast_head()` for namespace injection, `RayCastDetectionLoss`, `RayCastAssigner`, `RayCastE2ELoss`, `RayCastPredictor`, `RayCastValidator`, and `RayCastTrainer`. Files: `head.py`, `register.py`, `loss.py`, `tal.py`, `predict.py`, `val.py`, `train.py`.
 
 **`raycasted/data/etl/ops/`** — Single source of truth for ALL geometry logic. Every caller imports from here; nothing is reimplemented elsewhere. PyTorch variants (`polar_iou_torch`, `angular_smoothness_loss_torch`) use **lazy imports** (`import torch` inside the function body) so this package is safe to import without PyTorch in ETL environments. `decode_pred_xy` is NOT here — it is a method of `RayCastDetectionLoss` only.
 
@@ -104,6 +104,7 @@ Phase 6   — RayCastDetectionLoss (5 terms) + RayCastE2ELoss
 Phase 7   — RayCastPredictor + RayCastAnnotator
 Phase 8   — RayCastValidator
 Phase 9   — ONNX export + TensorRT deployment (NVIDIA Jetson)
+Phase 10  — Training integration (RayCastTrainer + YAML config + MLflow)
 ```
 
-**Phase 4 approach:** Subclasses `ultralytics Detect` in `raycasted/model/head.py` instead of modifying `ultralytics/` in-place. Registration via `register_raycast_head()` injects into the ultralytics namespace. Full YAML config integration deferred to Phase 7.
+**Phase 4 approach:** Subclasses `ultralytics Detect` in `raycasted/model/head.py` instead of modifying `ultralytics/` in-place. Registration via `register_raycast_head()` injects into the ultralytics namespace. Training integration via `RayCastTrainer` in Phase 10.
