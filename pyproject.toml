@@ -13,7 +13,6 @@ dependencies = [
     "pathlib>=1.0.1",
     "pillow>=11.0.0",
     "polars>=1.38.1",
-    "prefect>=3.6.21",
     "pyarrow>=23.0.1",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.2",

@@ -51,6 +51,7 @@
 | v4.10 | **4 specification gaps closed.** (1) §10.3 `decode_pred_xy` formula added — anchor grid decoding from grid-cell-relative to absolute normalised space. (2) §11.3 75th-percentile containment radius edge case specified — exclude zero rays; fallback to max non-zero ray when < 8 non-zero rays remain. (3) §14.1 `crop_size` source at inference specified — must be stored in model training config and read by `RayCastPredictor`. (4) §10.5 `update()` call timing clarified — lambda_smooth is still 0.001 during epoch 50's batches; reaches `smooth_end` after `update(50)` completes. |
 | v4.12 | **Jetson deployment added.** New Module H (§16) specifying ONNX export and TensorRT deployment on NVIDIA Jetson. Phase 9 added to execution order. Scope updated to include deployment target. Tech stack updated with ONNX/TensorRT dependencies. Testing checkpoints added for Phase 9. |
 | v4.13 | **Phase 4 implementation divergences documented.** (1) Model head implemented as `raycasted/model/` subclass package instead of in-place `ultralytics/` modification. (2) `register_raycast_head()` runtime patching for namespace injection. (3) Cell-size-aware bias initialisation (15px at 0.25 MPP). (4) `_inference()` uses YOLO decode convention `sigmoid*2-0.5`. (5) Loss stub in `raycasted/model/loss.py` (not `ultralytics/utils/loss.py`). (6) `one2many`/`one2one` confirmed as properties, not instance attributes. (7) Phase 4 testing checkpoints expanded with actual test coverage. |
+| v4.14 | **Prefect dropped.** Removed Prefect from core dependencies (§4.1), dependency diagram (§4.3), and §4.5 integration section. Not justified for single-developer research project with local data — retry logic handled by simple wrapper. Also: Phase 5 `RayCastAssigner` implemented in `raycasted/model/tal.py` — subclasses `TaskAlignedAssigner` with radius containment and VRAM-safe Polar-IoU. `get_targets` NOT overridden (parent is dimension-agnostic). |
 
 ---
 
@@ -107,7 +108,6 @@ Trained weights
 | **Shapely** | ≥2.0 | Geometry operations | Polygon manipulation, ray-casting, IoU computation |
 | **Pydantic** | ≥2.0 | Data validation | Configuration validation, schema enforcement |
 | **pathlib** | stdlib | File path handling | Cross-platform path operations, directory structure management |
-| **Prefect** | ≥2.14 | Pipeline orchestration | ETL workflow management, task scheduling, progress monitoring |
 
 ### 4.2 Secondary Dependencies
 
@@ -159,11 +159,6 @@ Trained weights
 │                      DEPLOYMENT (NVIDIA Jetson)                              │
 │  tensorrt • pycuda • numpy • opencv                                         │
 └─────────────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                      ORCHESTRATION (All Stages)                              │
-│  prefect • pydantic • pyyaml • pathlib                                      │
-└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 4.4 Environment Isolation
@@ -184,44 +179,6 @@ The ETL pipeline is designed to run **without PyTorch installed**. This is enfor
    raycasted-etl:latest        # Lightweight ETL-only image
    raycasted-train:latest      # Full training image with GPU support
    ```
-
-### 4.5 Prefect Integration
-
-Prefect orchestrates the ETL pipeline with the following task structure:
-
-```python
-from prefect import flow, task
-
-@flow(name="RayCastED ETL Pipeline")
-def etl_pipeline(config_path: str):
-    """Main ETL flow coordinating ingestion and transform stages."""
-    config = load_config(config_path)
-    
-    # Stage 1: Ingestion
-    for dataset_name in config.list_datasets():
-        ingest_dataset(dataset_name, config)
-    
-    # Stage 2: Transform
-    build_population_profile(config)  # Stain estimation
-    transform_tiles(config)            # Chunking, normalization, padding
-
-@task(retries=2, retry_delay_seconds=60)
-def ingest_dataset(dataset_name: str, config: ETLConfig):
-    """Ingest a single dataset with retry logic."""
-    ...
-
-@task
-def transform_tiles(config: ETLConfig):
-    """Apply spatial chunking and stain normalization."""
-    ...
-```
-
-**Prefect benefits for this project:**
-- Automatic retry on transient failures (network, file I/O)
-- Progress monitoring via Prefect UI
-- Task dependency visualisation
-- Parallel execution of independent dataset ingestion
-- Checkpoint-based resumption for long-running ETL jobs
 
 ---
 
@@ -382,7 +339,8 @@ raycasted/
 │   ├── __init__.py                      NEW — re-exports RayCastDetect, RayRefinementBlock, register
 │   ├── head.py                          NEW — RayRefinementBlock + RayCastDetect(Detect)
 │   ├── register.py                      NEW — register_raycast_head() namespace injection
-│   └── loss.py                          NEW — RayCastDetectionLoss stub (full impl in Phase 6)
+│   ├── loss.py                          NEW — RayCastDetectionLoss stub (full impl in Phase 6)
+│   └── tal.py                           NEW — RayCastAssigner(TaskAlignedAssigner)
 
 ultralytics/                              # NOT modified in-place — subclass approach used
 ├── nn/modules/
@@ -714,19 +672,19 @@ new_lambda = max(self.smooth_end, self.smooth_start - delta * effective_epoch)
 
 ## 11. Module C — Bipartite Matcher / Assigner
 
-**File:** `raycasted/model/tal.py` (planned — to be created in Phase 5)
+**File:** `raycasted/model/tal.py` — `RayCastAssigner(TaskAlignedAssigner)` (implemented in Phase 5)
 
-> **Note:** Following the subclass approach established in Phase 4, `RayCastAssigner` will subclass `TaskAlignedAssigner` in a separate file under `raycasted/model/`, not by modifying `ultralytics/utils/tal.py`.
+> **Note:** Following the subclass approach established in Phase 4, `RayCastAssigner` subclasses `TaskAlignedAssigner` in a separate file under `raycasted/model/`, not by modifying `ultralytics/utils/tal.py`.
 
 ### 11.1 `RayCastAssigner(TaskAlignedAssigner)`
 
-Three methods must be overridden together. Patching fewer than three produces degenerate assignment where all positive predictions collapse to 1–2 anchors.
+Two methods are overridden. A third (`get_targets`) is intentionally **not** overridden — the parent implementation is dimension-agnostic (uses `gt_bboxes.shape[-1]` dynamically) and produces 34-dim polygon targets correctly without modification.
 
 | Method | Override reason |
 |--------|----------------|
 | `get_box_metrics()` | Replace box IoU with Polar-IoU; apply VRAM-safe masked expansion (BUG-05) |
 | `select_candidates_in_gts()` | Replace box-containment check with polar-radius containment |
-| `get_targets()` | Encode 34-dim GT polar vector instead of 4-dim box |
+| `get_targets()` | **Not overridden** — parent is dimension-agnostic, works for 34-dim targets |
 
 See BUG-06.
 
@@ -1517,7 +1475,7 @@ Full implementation in §11.2. Memory budget must be profiled at three density l
 #### BUG-06 — TAL assigner patched in only one of three required methods
 **File:** `raycasted/model/tal.py` (fix) — bug originates from `ultralytics/utils/tal.py` parent
 
-Overriding only `get_box_metrics()` leaves `select_candidates_in_gts()` performing box-containment checks on polar vectors (geometrically wrong) and `get_targets()` encoding 4-dim box targets (wrong shape). All three methods must be overridden together. See §10.1.
+Overriding only `get_box_metrics()` leaves `select_candidates_in_gts()` performing box-containment checks on polar vectors (geometrically wrong). At least these two methods must be overridden together. `get_targets()` does NOT need overriding — the parent is dimension-agnostic (uses `gt_bboxes.shape[-1]` dynamically) and correctly handles 34-dim polygon targets. See §11.1.
 
 ---
 
