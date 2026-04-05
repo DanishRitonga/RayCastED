@@ -26,6 +26,7 @@ def _make_feats(batch=1, feat_size=FEAT_SIZE, ch=CH):
 
 def generate_polygon_spread_plots():
     import matplotlib
+
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from pathlib import Path
@@ -40,17 +41,17 @@ def generate_polygon_spread_plots():
         decoded = head._inference(preds)
 
     # decoded: [1, 38, 8400] — xy(2) + rays(32) + scores(4)
-    xy = decoded[0, :2, :].T.numpy()       # [8400, 2]
-    rays = decoded[0, 2:34, :].T.numpy()    # [8400, 32]
-    scores = decoded[0, 34:, :].T.numpy()   # [8400, 4]
+    xy = decoded[0, :2, :].T.numpy()  # [8400, 2]
+    rays = decoded[0, 2:34, :].T.numpy()  # [8400, 32]
+    scores = decoded[0, 34:, :].T.numpy()  # [8400, 4]
 
     # Decode all polygon vertices
     vertices = decode_to_vertices(rays, xy[:, 0], xy[:, 1])  # [8400, 32, 2]
 
     # Scale splits
-    n_p3 = 80 * 80   # 6400
-    n_p4 = 40 * 40   # 1600
-    n_p5 = 20 * 20   # 400
+    n_p3 = 80 * 80  # 6400
+    n_p4 = 40 * 40  # 1600
+    n_p5 = 20 * 20  # 400
 
     max_score = scores.max(axis=1)
 
@@ -62,8 +63,16 @@ def generate_polygon_spread_plots():
     ax = fig.add_subplot(gs[0, 0])
     ax.set_title('All 8400 Centroids (coloured by scale)', fontsize=10)
     ax.scatter(xy[:n_p3, 0], xy[:n_p3, 1], s=0.3, alpha=0.4, c='steelblue', label='P3', rasterized=True)
-    ax.scatter(xy[n_p3:n_p3 + n_p4, 0], xy[n_p3:n_p3 + n_p4, 1], s=1, alpha=0.5, c='darkorange', label='P4', rasterized=True)
-    ax.scatter(xy[n_p3 + n_p4:, 0], xy[n_p3 + n_p4:, 1], s=3, alpha=0.7, c='seagreen', label='P5', rasterized=True)
+    ax.scatter(
+        xy[n_p3 : n_p3 + n_p4, 0],
+        xy[n_p3 : n_p3 + n_p4, 1],
+        s=1,
+        alpha=0.5,
+        c='darkorange',
+        label='P4',
+        rasterized=True,
+    )
+    ax.scatter(xy[n_p3 + n_p4 :, 0], xy[n_p3 + n_p4 :, 1], s=3, alpha=0.7, c='seagreen', label='P5', rasterized=True)
     ax.set_xlim(0, IMG_SIZE)
     ax.set_ylim(IMG_SIZE, 0)
     ax.set_xlabel('X (px)')
@@ -122,8 +131,8 @@ def generate_polygon_spread_plots():
     ax = fig.add_subplot(gs[2, 0])
     ax.set_title('Ray Length Distribution per Scale', fontsize=10)
     ax.hist(rays[:n_p3].flatten(), bins=80, alpha=0.5, color='steelblue', label='P3', density=True)
-    ax.hist(rays[n_p3:n_p3 + n_p4].flatten(), bins=80, alpha=0.5, color='darkorange', label='P4', density=True)
-    ax.hist(rays[n_p3 + n_p4:].flatten(), bins=80, alpha=0.5, color='seagreen', label='P5', density=True)
+    ax.hist(rays[n_p3 : n_p3 + n_p4].flatten(), bins=80, alpha=0.5, color='darkorange', label='P4', density=True)
+    ax.hist(rays[n_p3 + n_p4 :].flatten(), bins=80, alpha=0.5, color='seagreen', label='P5', density=True)
     ax.set_xlabel('Ray length (px)')
     ax.set_ylabel('Density')
     ax.legend(fontsize=8)
@@ -139,8 +148,8 @@ def generate_polygon_spread_plots():
         areas[i] = 0.5 * np.abs(np.dot(x_coords, np.roll(y_coords, -1)) - np.dot(y_coords, np.roll(x_coords, -1)))
 
     ax.hist(areas[:n_p3], bins=60, alpha=0.5, color='steelblue', label='P3', density=True)
-    ax.hist(areas[n_p3:n_p3 + n_p4], bins=60, alpha=0.5, color='darkorange', label='P4', density=True)
-    ax.hist(areas[n_p3 + n_p4:], bins=60, alpha=0.5, color='seagreen', label='P5', density=True)
+    ax.hist(areas[n_p3 : n_p3 + n_p4], bins=60, alpha=0.5, color='darkorange', label='P4', density=True)
+    ax.hist(areas[n_p3 + n_p4 :], bins=60, alpha=0.5, color='seagreen', label='P5', density=True)
     ax.set_xlabel('Area (px²)')
     ax.set_ylabel('Density')
     ax.legend(fontsize=8)
@@ -155,16 +164,17 @@ def generate_polygon_spread_plots():
         f'  Image size: {IMG_SIZE}x{IMG_SIZE}\n\n'
         f'Ray Statistics:\n'
         f'  P3 mean={rays[:n_p3].mean():.1f} std={rays[:n_p3].std():.1f}\n'
-        f'  P4 mean={rays[n_p3:n_p3+n_p4].mean():.1f} std={rays[n_p3:n_p3+n_p4].std():.1f}\n'
-        f'  P5 mean={rays[n_p3+n_p4:].mean():.1f} std={rays[n_p3+n_p4:].std():.1f}\n'
-        f'  All min={rays.min():.2f} (>0 ✓)' if rays.min() > 0 else
-        f'  All min={rays.min():.2f} (ISSUE: ≤0!)'
+        f'  P4 mean={rays[n_p3 : n_p3 + n_p4].mean():.1f} std={rays[n_p3 : n_p3 + n_p4].std():.1f}\n'
+        f'  P5 mean={rays[n_p3 + n_p4 :].mean():.1f} std={rays[n_p3 + n_p4 :].std():.1f}\n'
+        f'  All min={rays.min():.2f} (>0 ✓)'
+        if rays.min() > 0
+        else f'  All min={rays.min():.2f} (ISSUE: ≤0!)'
     )
     stats_text += (
         f'\n\nArea Statistics:\n'
         f'  P3 mean={areas[:n_p3].mean():.0f} px²\n'
-        f'  P4 mean={areas[n_p3:n_p3+n_p4].mean():.0f} px²\n'
-        f'  P5 mean={areas[n_p3+n_p4:].mean():.0f} px²\n\n'
+        f'  P4 mean={areas[n_p3 : n_p3 + n_p4].mean():.0f} px²\n'
+        f'  P5 mean={areas[n_p3 + n_p4 :].mean():.0f} px²\n\n'
         f'Out-of-bounds check:\n'
         f'  Vertices outside [0, {IMG_SIZE}]:\n'
     )

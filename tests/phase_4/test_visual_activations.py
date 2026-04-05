@@ -23,6 +23,7 @@ def _make_feats(batch=2, feat_size=FEAT_SIZE, ch=CH):
 
 def generate_activation_plots():
     import matplotlib
+
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     from pathlib import Path
@@ -36,19 +37,19 @@ def generate_activation_plots():
         preds = head.forward_head(feats, box_head=head.cv2, cls_head=head.cv3)
 
     poly = preds['boxes']  # [1, 34, 8400]
-    xy_raw = poly[0, :2, :].flatten()      # all xy logits
-    ray_raw = poly[0, 2:, :].flatten()     # all ray logits
+    xy_raw = poly[0, :2, :].flatten()  # all xy logits
+    ray_raw = poly[0, 2:, :].flatten()  # all ray logits
     xy_act = xy_raw.sigmoid()
     ray_act = F.softplus(ray_raw)
 
     # Per-scale split
-    n_p3 = 80 * 80   # 6400
-    n_p4 = 40 * 40   # 1600
-    n_p5 = 20 * 20   # 400
+    n_p3 = 80 * 80  # 6400
+    n_p4 = 40 * 40  # 1600
+    n_p5 = 20 * 20  # 400
 
     ray_p3 = poly[0, 2:, :n_p3]
-    ray_p4 = poly[0, 2:, n_p3:n_p3 + n_p4]
-    ray_p5 = poly[0, 2:, n_p3 + n_p4:]
+    ray_p4 = poly[0, 2:, n_p3 : n_p3 + n_p4]
+    ray_p5 = poly[0, 2:, n_p3 + n_p4 :]
 
     ray_p3_act = F.softplus(ray_p3)
     ray_p4_act = F.softplus(ray_p4)
@@ -77,8 +78,16 @@ def generate_activation_plots():
     ax.axvspan(0.95, 1.0, color='red', alpha=0.1)
 
     ax = axes[0, 2]
-    ax.text(0.05, 0.95, 'XY Statistics', fontsize=12, fontweight='bold',
-            transform=ax.transAxes, va='top', family='monospace')
+    ax.text(
+        0.05,
+        0.95,
+        'XY Statistics',
+        fontsize=12,
+        fontweight='bold',
+        transform=ax.transAxes,
+        va='top',
+        family='monospace',
+    )
     stats_text = (
         f'Raw logits:\n'
         f'  mean={xy_raw.mean():.3f}  std={xy_raw.std():.3f}\n'
@@ -91,8 +100,7 @@ def generate_activation_plots():
         f'Near-centre (0.3 - 0.7):\n'
         f'  {((xy_act > 0.3) & (xy_act < 0.7)).float().mean() * 100:.1f}% of values'
     )
-    ax.text(0.05, 0.85, stats_text, fontsize=9, transform=ax.transAxes,
-            va='top', family='monospace')
+    ax.text(0.05, 0.85, stats_text, fontsize=9, transform=ax.transAxes, va='top', family='monospace')
     ax.axis('off')
 
     # --- Row 2: Ray channels ---
@@ -109,13 +117,22 @@ def generate_activation_plots():
     ax.set_xlabel('Softplus value')
     ax.set_ylabel('Count')
     # Mark minimum (ln(2) ≈ 0.693)
-    ax.axvline(torch.log(torch.tensor(2.0)).item(), color='red', linestyle='--',
-               linewidth=0.8, alpha=0.7, label='min=ln(2)')
+    ax.axvline(
+        torch.log(torch.tensor(2.0)).item(), color='red', linestyle='--', linewidth=0.8, alpha=0.7, label='min=ln(2)'
+    )
     ax.legend(fontsize=8)
 
     ax = axes[1, 2]
-    ax.text(0.05, 0.95, 'Ray Statistics', fontsize=12, fontweight='bold',
-            transform=ax.transAxes, va='top', family='monospace')
+    ax.text(
+        0.05,
+        0.95,
+        'Ray Statistics',
+        fontsize=12,
+        fontweight='bold',
+        transform=ax.transAxes,
+        va='top',
+        family='monospace',
+    )
     stats_text = (
         f'Raw logits:\n'
         f'  mean={ray_raw.mean():.3f}  std={ray_raw.std():.3f}\n'
@@ -131,8 +148,7 @@ def generate_activation_plots():
         f'Near-zero (< 0.5):\n'
         f'  {(ray_act < 0.5).float().mean() * 100:.1f}% of values'
     )
-    ax.text(0.05, 0.85, stats_text, fontsize=9, transform=ax.transAxes,
-            va='top', family='monospace')
+    ax.text(0.05, 0.85, stats_text, fontsize=9, transform=ax.transAxes, va='top', family='monospace')
     ax.axis('off')
 
     plt.tight_layout()

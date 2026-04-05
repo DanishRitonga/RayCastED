@@ -161,7 +161,7 @@ def test_inference_path():
     assert result.shape[2] == n_anchors
     # xy (decoded to pixel space) should be positive
     assert result[:, :2, :].min() >= 0, 'Decoded xy should be non-negative'
-    # rays (softplus * strides) should be positive
+    # rays (softplus * imgsz) should be positive
     assert result[:, 2:34, :].min() > 0, 'Decoded rays should be > 0'
     # scores (sigmoid) should be in [0, 1]
     scores = result[:, 34:, :]
@@ -260,13 +260,15 @@ def test_decode_round_trip():
     xy_logit = torch.tensor([math.log(0.8 / 0.2), math.log(0.7 / 0.3)])  # inverse sigmoid of (0.8, 0.7)
     expected_xy_offset = torch.sigmoid(xy_logit)  # (0.8, 0.7)
 
-    # Rays: all equal to 25px in pixel space → ray_logit = inverse_softplus(25 / stride)
+    # Rays: all equal to 25px → normalised by crop_size (matches training).
+    # During training, rays are normalised by crop_size (640). Inference multiplies
+    # by imgsz (feat_size * stride[0] = 80*8 = 640), so we set ray_norm = 25/640.
     ray_radius_px = 25.0
+    crop_size = 640.0  # feat_size_P3 * stride[0] = 80 * 8
 
     for scale_name, anchor_idx, row, col, stride in test_cases:
-        # Expected ray in normalised (grid) space
-        ray_grid = ray_radius_px / stride
-        ray_logit_val = math.log(math.exp(ray_grid) - 1)  # inverse softplus
+        ray_norm = ray_radius_px / crop_size
+        ray_logit_val = math.log(math.exp(ray_norm) - 1)  # inverse softplus
         ray_logit = torch.full((32,), ray_logit_val)
 
         # Place logits
@@ -334,16 +336,19 @@ def test_bias_init():
 
     target_ray_px = 15.0
     strides = [8.0, 16.0, 32.0]
+    imgsz = 640.0  # feat_size_P3 * stride[0] = 80 * 8
 
     for i, stride in enumerate(strides):
         bias = head.cv2[i][-1].bias.data  # [34]
         # XY biases should be 2.0
         assert bias[:2].tolist() == [2.0, 2.0], f'Scale {i}: xy bias should be [2.0, 2.0], got {bias[:2].tolist()}'
-        # Ray biases should decode to ~15px: softplus(bias) * stride ≈ 15
+        # Ray biases: bias = log(exp(15/stride) - 1), decoded as softplus(bias) * imgsz
+        # Result = (15/stride) * 640 — stride-relative init, training corrects to pixel-space
         ray_biases = bias[2:]
-        decoded_rays = F.softplus(ray_biases) * stride
-        assert torch.allclose(decoded_rays, torch.full_like(decoded_rays, target_ray_px), atol=0.1), (
-            f'Scale {i} (stride={stride}): decoded rays should be ~{target_ray_px}px, '
+        expected_decoded = target_ray_px / stride * imgsz
+        decoded_rays = F.softplus(ray_biases) * imgsz
+        assert torch.allclose(decoded_rays, torch.full_like(decoded_rays, expected_decoded), atol=0.1), (
+            f'Scale {i} (stride={stride}): decoded rays should be ~{expected_decoded:.1f}px, '
             f'got mean={decoded_rays.mean():.2f}'
         )
         print(

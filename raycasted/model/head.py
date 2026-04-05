@@ -109,7 +109,9 @@ class RayCastDetect(Detect):
         """Decode polygon predictions for inference.
 
         Applies Sigmoid to xy offsets and Softplus to ray distances.
-        Skips DFL entirely.
+        Skips DFL entirely. Rays are scaled to pixel space using the
+        training crop size (derived from feature map geometry), matching
+        the normalisation used by RayCastTileDataset.
         """
         shape = x['feats'][0].shape
         if self.dynamic or self.shape != shape:
@@ -120,12 +122,35 @@ class RayCastDetect(Detect):
         xy_offset = poly[:, :2, :].sigmoid()  # bounded [0, 1]
         rays = F.softplus(poly[:, 2:, :])  # strictly positive
 
-        # Decode xy from grid-relative to absolute coords
+        # Decode xy from grid-relative to absolute pixel coords
         xy_abs = (xy_offset * 2.0 - 0.5 + self.anchors) * self.strides
-        rays_abs = rays * self.strides
+
+        # Rays: scale to pixel space using training crop size.
+        # During training, rays are normalised by crop_size (from DataLoader),
+        # so softplus outputs are in [0, ~1]. Multiply by imgsz to get pixels.
+        imgsz = torch.tensor(shape[2:], device=poly.device, dtype=poly.dtype) * self.stride[0]
+        rays_abs = rays * imgsz[0]  # [B, 32, N] — pixel-space ray distances
 
         dbox = torch.cat([xy_abs, rays_abs], dim=1)
         return torch.cat((dbox, x['scores'].sigmoid()), 1)
+
+    def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
+        """Post-process end-to-end polygon predictions with top-k selection.
+
+        Overrides Detect.postprocess() to handle 34-dim polygon vectors
+        instead of 4-dim bboxes. Called by Detect.forward() when end2end=True.
+
+        Args:
+            preds: [B, N_anchors, 34+nc] — decoded polygon + class scores.
+
+        Returns:
+            [B, max_det, 34+2] — top-k predictions with format
+            [cx, cy, d_1..d_32, max_score, class_idx] per detection.
+        """
+        poly, scores = preds.split([RAYCAST_DIM, self.nc], dim=-1)
+        scores, conf, idx = self.get_topk_index(scores, self.max_det)
+        poly = poly.gather(dim=1, index=idx.repeat(1, 1, RAYCAST_DIM))
+        return torch.cat([poly, scores, conf], dim=-1)
 
     def bias_init(self):
         """Initialize polygon head biases.
