@@ -101,14 +101,23 @@ def polygon_to_raycast(
             )
             ix, iy = nearest[0], nearest[1]
         else:
-            # MultiPoint or GeometryCollection — iterate and find nearest
-            pts = (
-                list(intersection.geoms)
-                if hasattr(intersection, 'geoms')
-                else [intersection]
-            )
-            nearest = min(pts, key=lambda p: (p.x - cx) ** 2 + (p.y - cy) ** 2)
-            ix, iy = nearest.x, nearest.y
+            # MultiPoint or GeometryCollection — extract coordinate pairs
+            # from all sub-geometries (Points, LineStrings, etc.) and find nearest
+            pts = []
+            geoms = list(intersection.geoms) if hasattr(intersection, 'geoms') else [intersection]
+            for g in geoms:
+                if g.geom_type == 'Point':
+                    pts.append((g.x, g.y))
+                elif hasattr(g, 'coords'):
+                    # LineString or similar — take nearest endpoint
+                    pts.extend(g.coords)
+                else:
+                    continue
+            if not pts:
+                rays[i] = 0.0
+                continue
+            nearest = min(pts, key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2)
+            ix, iy = nearest[0], nearest[1]
 
         rays[i] = math.sqrt((ix - cx) ** 2 + (iy - cy) ** 2)
 
