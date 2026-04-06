@@ -115,6 +115,8 @@ class RayCastPipeline:
             print('WARNING: No registry from transform — skipping split reorganisation.')
             return
 
+        known_splits = {'train', 'val', 'test'}
+        orphaned = 0
         moved = 0
         for row in registry.iter_rows(named=True):
             # Registry path points to the (now-deleted) temp chunked file.
@@ -124,12 +126,20 @@ class RayCastPipeline:
             if not src.exists():
                 continue
             split = row['split']
+            if split not in known_splits:
+                orphaned += 1
+                continue
             dst_dir = self.transformed_dir / split
             dst_dir.mkdir(exist_ok=True)
             dst = dst_dir / tile_name
             shutil.move(str(src), str(dst))
             moved += 1
 
+        if orphaned:
+            print(
+                f'WARNING: {orphaned} tiles with unrecognized split names were NOT moved. '
+                f'Expected one of {known_splits}. Add a split_map or change split_separation.'
+            )
         print(f'Reorganised {moved} tiles into train/ and val/ subdirectories.')
 
     # ------------------------------------------------------------------
@@ -165,12 +175,21 @@ class RayCastPipeline:
         names = {v: k for k, v in cell_map.items() if v != 255}
         nc = max(names.keys()) + 1 if names else 1
 
-        train_dir = str(self.transformed_dir / 'train')
-        val_dir = str(self.transformed_dir / 'val')
+        train_dir = self.transformed_dir / 'train'
+        val_dir = self.transformed_dir / 'val'
+
+        # Validate that split directories exist and contain tiles
+        for label, d in [('train', train_dir), ('val', val_dir)]:
+            if not d.exists() or not any(d.glob('*.npz')):
+                raise RuntimeError(
+                    f'No {label} tiles found in {d}. '
+                    f'Check split_map or split_separation config — '
+                    f'all tiles may have been assigned to unrecognized split names.'
+                )
 
         yaml_data = {
-            'train': train_dir,
-            'val': val_dir,
+            'train': str(train_dir),
+            'val': str(val_dir),
             'nc': nc,
             'names': names,
         }
