@@ -174,6 +174,8 @@ class RayCastPipeline:
         # Filter out Ignore(255) only — Background(0) and all other valid IDs stay
         names = {v: k for k, v in cell_map.items() if v != 255}
         nc = max(names.keys()) + 1 if names else 1
+        # Fill gaps — Ultralytics expects contiguous 0-indexed names dict of length nc
+        names = {i: names.get(i, f'class_{i}') for i in range(nc)}
 
         train_dir = self.transformed_dir / 'train'
         val_dir = self.transformed_dir / 'val'
