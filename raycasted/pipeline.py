@@ -190,8 +190,8 @@ class RayCastPipeline:
                 )
 
         yaml_data = {
-            'train': str(train_dir),
-            'val': str(val_dir),
+            'train': str(train_dir.resolve()),
+            'val': str(val_dir.resolve()),
             'nc': nc,
             'names': names,
         }
