@@ -261,7 +261,7 @@ class RayCastValidator(DetectionValidator):
             dict with 'cls', 'bboxes' [N_gt, 34] in letterboxed pixel space.
         """
         idx = batch['batch_idx'] == si
-        cls = batch['cls'][idx].squeeze(-1)
+        cls = batch['cls'][idx].flatten()
         poly = batch['bboxes'][idx]  # [N_gt, 34] normalised
         imgsz = batch['img'].shape[2:]
 
