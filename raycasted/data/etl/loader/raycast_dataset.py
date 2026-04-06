@@ -42,9 +42,40 @@ class RayCastTileDataset(Dataset):
         if not self.tile_paths:
             raise FileNotFoundError(f'No .npz files found in {self.data_dir}')
 
+        # Compatibility: Ultralytics plot_training_labels reads dataset.labels
+        self.labels = self._build_labels()
+
     def __len__(self) -> int:
         """Return the number of tiles in the dataset."""
         return len(self.tile_paths)
+
+    def _build_labels(self) -> list[dict]:
+        """Build Ultralytics-compatible labels list for plot_training_labels.
+
+        Ultralytics' DetectionTrainer.plot_training_labels() reads
+        dataset.labels and expects a list of dicts with 'bboxes' and 'cls'
+        keys. We provide cx/cy as a pseudo-bbox so the plotting code
+        doesn't crash, even though we don't use bboxes for training.
+        """
+        labels = []
+        for path in self.tile_paths:
+            data = np.load(path)
+            anns = data.get('annotations', data.get('bboxes'))
+            if anns is None or len(anns) == 0:
+                labels.append({'bboxes': np.zeros((0, 4), dtype=np.float32), 'cls': np.zeros((0,), dtype=np.float32)})
+                continue
+            # Filter Ignore class
+            valid = anns[anns[:, 0] != 255]
+            if len(valid) == 0:
+                labels.append({'bboxes': np.zeros((0, 4), dtype=np.float32), 'cls': np.zeros((0,), dtype=np.float32)})
+                continue
+            # Use cx/cy as pseudo xyxy bbox for compatibility
+            cx = valid[:, 1]
+            cy = valid[:, 2]
+            bboxes = np.stack([cx, cy, cx, cy], axis=1).astype(np.float32)
+            cls = valid[:, 0].astype(np.float32)
+            labels.append({'bboxes': bboxes, 'cls': cls})
+        return labels
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, np.ndarray]:
         """Load, crop, augment, normalise, and return a single tile."""
