@@ -31,6 +31,7 @@
 19. [Hyperparameter Reference](#19-hyperparameter-reference)
 20. [Bug & Vulnerability Registry](#20-bug--vulnerability-registry)
 21. [Testing Checkpoints](#21-testing-checkpoints)
+22. [Optional Enhancements](#22-optional-enhancements)
 
 ---
 
@@ -2167,3 +2168,44 @@ The following unchecked tests require a GPU (or Jetson device) to run. All other
 
 ---
 
+## 22. Optional Enhancements
+
+Quality-of-life improvements that are not blocking but would improve the development experience or robustness. Listed by priority.
+
+### 22.1 Custom Polygon Label Plotting
+
+Override `RayCastTrainer.plot_training_labels()` to draw actual polygon overlays on training samples instead of Ultralytics' default bbox plotting. Currently set to no-op because Ultralytics' `plot_images()` expects 4-dim `xywh` bboxes and crashes on our 34-dim polygon data (see BUG-11). A proper implementation would decode ray annotations to polygon vertices and draw them using `RayCastAnnotator`.
+
+**Why deferred:** Purely cosmetic. Real metrics come from `RayCastValidator` polygon mAP curves. The phase 0.5 round-trip visual test already validates polygon geometry.
+
+### 22.2 Skip ETL for Train-Only Runs
+
+Add a `--stage train_only` option (or a `--skip-etl` flag) that loads an existing `data.yaml` and launches training directly without re-running ingestion and transform. Currently `--stage train` still re-runs all preceding stages, overwriting existing tiles.
+
+**Why deferred:** Workaround exists — let ETL re-run (it's fast if data is already present) or invoke `RayCastTrainer` directly from Python.
+
+### 22.3 MLflow Annealing Callback
+
+Log `lambda_smooth` and `o2m_weight` annealing values per epoch to MLflow. Per-term losses are auto-logged by Ultralytics' built-in MLflow integration, but the annealing schedule values need a custom `on_train_epoch_end` callback.
+
+**Why deferred:** Training works without it. Loss curves from Ultralytics' default logging are sufficient for monitoring.
+
+### 22.4 MatInstIngestor Contour Extraction
+
+`MatInstIngestor._extract_raycast_annotations()` is currently a stub (`NotImplementedError`). Implement contour extraction from instance segmentation masks (e.g., PanNuke, MoNuSAC) to enable polygon→raycast conversion for mask-based datasets.
+
+**Why deferred:** PanNuke ingestion works via the Parquet ingestor path (which reads pre-extracted polygons from the dataset's Parquet files). MatInstIngestor is only needed for raw mask-only datasets.
+
+### 22.5 Diagnostic Counters for Ingestors
+
+Wire `fallback_counter` from `BaseDataIngestor` to `polygon_to_raycast()` and log fallback rates per dataset. Also log the fraction of cells with > 5 zero rays (target < 1% per dataset). See §12.4 NOTE-04.
+
+**Why deferred:** Quality assurance metric. Doesn't affect training pipeline correctness.
+
+### 22.6 Zero-Ray and Edge Validation
+
+Validate that no ray distance exceeds the centroid's distance to the nearest image edge, and that the fraction of annotations with > 5 zero rays is < 1% per dataset. Listed as deferred Phase 0.5 tests (§21).
+
+**Why deferred:** Requires real dataset access. Can be added as a post-ingestion validation step.
+
+---
