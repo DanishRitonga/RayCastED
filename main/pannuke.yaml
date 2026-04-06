@@ -6,11 +6,11 @@ global_settings:
   annotation_type: "raycast"
 
   global_cell_map:
-    "Neoplastic": 1
-    "Inflammatory": 2
-    "Connective": 3
-    "Dead": 4
-    "Epithelial": 5
+    "Neoplastic": 0
+    "Inflammatory": 1
+    "Connective": 2
+    "Dead": 3
+    "Epithelial": 4
 
   global_tissue_map:
     "Adrenal Gland": 0

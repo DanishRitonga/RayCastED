@@ -240,6 +240,7 @@ def main():  # noqa: D103
     # Build training overrides from CLI args
     training_overrides = {
         'model': args.model,
+        'optimizer': 'MuSGD',
         'epochs': args.epochs,
         'batch': args.batch,
         'imgsz': args.imgsz,

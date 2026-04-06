@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 from shapely.geometry import LineString, Point, Polygon
+from shapely.ops import nearest_points
 
 from ..utils.constants import (
     CLASS_IDX,
@@ -91,33 +92,8 @@ def polygon_to_raycast(
             rays[i] = 0.0
             continue
 
-        if intersection.geom_type == 'Point':
-            ix, iy = intersection.x, intersection.y
-        elif intersection.geom_type == 'LineString':
-            # Ray is tangent to boundary — take nearest endpoint to centroid
-            nearest = min(
-                intersection.coords,
-                key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2,
-            )
-            ix, iy = nearest[0], nearest[1]
-        else:
-            # MultiPoint or GeometryCollection — extract coordinate pairs
-            # from all sub-geometries (Points, LineStrings, etc.) and find nearest
-            pts = []
-            geoms = list(intersection.geoms) if hasattr(intersection, 'geoms') else [intersection]
-            for g in geoms:
-                if g.geom_type == 'Point':
-                    pts.append((g.x, g.y))
-                elif hasattr(g, 'coords'):
-                    # LineString or similar — take nearest endpoint
-                    pts.extend(g.coords)
-                else:
-                    continue
-            if not pts:
-                rays[i] = 0.0
-                continue
-            nearest = min(pts, key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2)
-            ix, iy = nearest[0], nearest[1]
+        nearest = nearest_points(Point(cx, cy), intersection)[1]
+        ix, iy = nearest.x, nearest.y
 
         rays[i] = math.sqrt((ix - cx) ** 2 + (iy - cy) ** 2)
 
