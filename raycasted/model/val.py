@@ -265,7 +265,7 @@ class RayCastValidator(DetectionValidator):
         poly = batch['bboxes'][idx]  # [N_gt, 34] normalised
         imgsz = batch['img'].shape[2:]
 
-        if cls.shape[0]:
+        if cls.numel():
             # Denormalise: multiply by letterboxed size (crop_size)
             crop_size = imgsz[0]  # square image
             poly = poly.clone()
