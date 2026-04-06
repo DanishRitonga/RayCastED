@@ -115,6 +115,8 @@ class RayCastDetMetrics(DetMetrics):
         """Compute mAP from shapely and centroid true-positive stats."""
         stats = {k: np.concatenate(v, 0) for k, v in self.stats.items()}
         if len(stats.get('tp_shapely', [])) == 0:
+            self.nt_per_class = np.zeros(len(self.names), dtype=int)
+            self.nt_per_image = np.zeros(len(self.names), dtype=int)
             return stats
 
         # Shapely polygon mAP
