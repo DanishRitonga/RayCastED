@@ -1,0 +1,76 @@
+global_settings:
+  root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
+  output_image_size: [256, 256]
+  output_mpp: 0.25
+  patching_overlap_pct: 0
+  annotation_type: "raycast"
+
+  global_cell_map:
+    "Neoplastic": 1
+    "Inflammatory": 2
+    "Connective": 3
+    "Dead": 4
+    "Epithelial": 5
+
+  global_tissue_map:
+    "Adrenal Gland": 0
+    "Bile Duct": 1
+    "Bladder": 2
+    "Breast": 3
+    "Cervix": 4
+    "Colorectal": 5
+    "Esophagus": 6
+    "Head & Neck": 7
+    "Kidney": 8
+    "Liver": 9
+    "Lung": 10
+    "Ovarian": 11
+    "Pancreatic": 12
+    "Prostate": 13
+    "Skin": 14
+    "Stomach": 15
+    "Testis": 16
+    "Thyroid": 17
+    "Uterus": 18
+
+datasets:
+  PanNuke:
+    root_dir: "PanNuke/data"
+    ingestion_method: 1
+    native_mpp: 0.25
+
+    split_separation: "filename_regex"
+    split_args:
+      regex: "(fold[1-3])"
+      split_map:
+        "fold1": "train"
+        "fold2": "val"
+        "fold3": "test"
+    modality_separation: "bundled_archive"
+
+    namespace_map:
+      '0': "Neoplastic"
+      '1': "Inflammatory"
+      '2': "Connective"
+      '3': "Dead"
+      '4': "Epithelial"
+    tissue_map:
+      '0': "Adrenal Gland"
+      '1': "Bile Duct"
+      '2': "Bladder"
+      '3': "Breast"
+      '4': "Cervix"
+      '5': "Colorectal"
+      '6': "Esophagus"
+      '7': "Head & Neck"
+      '8': "Kidney"
+      '9': "Liver"
+      '10': "Lung"
+      '11': "Ovarian"
+      '12': "Pancreatic"
+      '13': "Prostate"
+      '14': "Skin"
+      '15': "Stomach"
+      '16': "Testis"
+      '17': "Thyroid"
+      '18': "Uterus"
