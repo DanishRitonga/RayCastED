@@ -84,8 +84,22 @@ class BaseDataIngestor(ABC):
 
             # Polars native regex extraction
             df = df.with_columns(pl.col('image_path').str.extract(regex_pattern, 1).alias('split'))
+
+            # Apply split_map if provided (e.g., fold1→train, fold2→val, fold3→test)
+            split_map = self.config.get('split_args', {}).get('split_map')
+            if split_map:
+                df = df.with_columns(
+                    pl.col('split').replace(split_map).alias('split')
+                )
+
         elif split_sep == 'none':
-            df = df.with_columns(pl.lit('unassigned').alias('split'))
+            # Stratified random sampling by tissue type
+            split_args = self.config.get('split_args', {}) or {}
+            train_ratio = split_args.get('train_ratio', 0.8)
+            val_ratio = split_args.get('val_ratio', 0.1)
+            test_ratio = split_args.get('test_ratio', 0.1)
+            seed = split_args.get('seed', 42)
+            df = self._assign_stratified_splits(df, train_ratio, val_ratio, test_ratio, seed)
 
         # Drop any rows where split couldn't be determined or file pairing failed
         self.file_registry = df.drop_nulls()
@@ -147,6 +161,59 @@ class BaseDataIngestor(ABC):
                     print(f'Warning: Missing mask for {img_path.name}. Skipping.')
 
         return records
+
+    def _assign_stratified_splits(
+        self, df: pl.DataFrame, train_ratio: float, val_ratio: float, test_ratio: float, seed: int  # noqa: ARG002 test_ratio
+    ) -> pl.DataFrame:
+        """Assign train/val/test splits via stratified random sampling.
+
+        Stratifies by tissue type when tissue_type is set (single tissue → uniform
+        stratum → effectively plain random). Falls back to plain random when no
+        tissue info is available.
+
+        Args:
+            df: Registry DataFrame with columns roi_id, image_path, mask_path, split.
+            train_ratio: Fraction for training (default 0.8).
+            val_ratio: Fraction for validation (default 0.1).
+            test_ratio: Fraction for testing (default 0.1).
+            seed: Random seed for deterministic splits.
+
+        Returns:
+            DataFrame with 'split' column set to 'train', 'val', or 'test'.
+        """
+        n = len(df)
+        if n == 0:
+            return df.with_columns(pl.lit('train').alias('split'))
+
+        rng = np.random.default_rng(seed)
+
+        # Determine tissue stratum per ROI
+        tissue_type = self.config.get('tissue_type')
+        tissue_col = pl.lit(str(tissue_type)) if tissue_type else pl.lit('all')
+
+        df = df.with_columns(tissue_col.alias('_tissue'))
+
+        # Per-stratum assignment
+        split_arr = np.array(['test'] * n, dtype=object)
+        for tissue_val in df['_tissue'].unique().to_list():
+            mask = df['_tissue'] == tissue_val
+            indices = np.where(mask.to_numpy())[0]
+            if len(indices) == 0:
+                continue
+
+            rng.shuffle(indices)
+            n_train = max(1, int(len(indices) * train_ratio))
+            n_val = max(1, int(len(indices) * val_ratio))
+            # Clamp n_val so train + val doesn't exceed total
+            n_val = min(n_val, len(indices) - n_train)
+
+            labels = np.array(['test'] * len(indices), dtype=object)
+            labels[:n_train] = 'train'
+            labels[n_train:n_train + n_val] = 'val'
+            split_arr[indices] = labels
+
+        df = df.drop('_tissue')
+        return df.with_columns(pl.Series('split', split_arr))
 
     def get_registry(self, split: str = None) -> pl.DataFrame:
         """Returns the registry, optionally filtered by split (train, val, test)."""

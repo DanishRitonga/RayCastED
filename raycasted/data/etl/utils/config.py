@@ -8,6 +8,11 @@ from pydantic import BaseModel, Field, model_validator
 # === NESTED MODELS FOR COMPLEX OBJECTS ===
 class SplitArgs(BaseModel):
     regex: str | None = None
+    split_map: dict[str, str] | None = None
+    train_ratio: float = 0.8
+    val_ratio: float = 0.1
+    test_ratio: float = 0.1
+    seed: int = 42
 
 
 class ModalityDirs(BaseModel):
@@ -71,6 +76,24 @@ class DatasetConfig(BaseModel):
         elif self.split_separation == 'filename_regex':
             if not self.split_args or not self.split_args.regex:
                 raise ValueError("split_args.regex required for split_separation='filename_regex'")
+            if self.split_args.split_map:
+                valid_splits = {'train', 'val', 'test'}
+                for mapped in self.split_args.split_map.values():
+                    if mapped not in valid_splits:
+                        raise ValueError(
+                            f"split_map value '{mapped}' is not a recognized split name. "
+                            f'Must be one of: {valid_splits}'
+                        )
+
+        elif self.split_separation == 'none':
+            if self.split_args:
+                ratio_sum = self.split_args.train_ratio + self.split_args.val_ratio + self.split_args.test_ratio
+                if abs(ratio_sum - 1.0) > 0.01:
+                    raise ValueError(
+                        f'split ratios must sum to ~1.0, got {ratio_sum:.3f} '
+                        f'(train={self.split_args.train_ratio}, val={self.split_args.val_ratio}, '
+                        f'test={self.split_args.test_ratio})'
+                    )
         return self
 
     @model_validator(mode='after')
