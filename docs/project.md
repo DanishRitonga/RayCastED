@@ -1,5 +1,5 @@
 # RayCastED — RayCast-based End-to-end Detection
-## Project Plan v4.12 — Architecture Reference & Bug Registry
+## Project Plan v4.17 — Architecture Reference & Bug Registry
 
 > **Status:** Implementation in progress (through Phase 11). This document is the authoritative specification.  
 > **Scope:** RayCastED ETL → RayCastED training → inference → NVIDIA Jetson deployment.  
@@ -56,6 +56,7 @@
 | v4.14 | **Prefect dropped.** Removed Prefect from core dependencies (§4.1), dependency diagram (§4.3), and §4.5 integration section. Not justified for single-developer research project with local data — retry logic handled by simple wrapper. Also: Phase 5 `RayCastAssigner` implemented in `raycasted/model/tal.py` — subclasses `TaskAlignedAssigner` with radius containment and VRAM-safe Polar-IoU. `get_targets` NOT overridden (parent is dimension-agnostic). |
 | v4.15 | **Training integration added.** New Module I (§17) specifying training pipeline that wires all model components into the Ultralytics training loop. Phase 10 added to execution order. `RayCastTrainer(DetectionTrainer)` with custom loss, data loader, and validator. YAML config integration for `RayCastDetect` head. Enables trained checkpoints for ONNX export validation (Phase 9). |
 | v4.16 | **Pipeline orchestrator + config format added.** New Module J (§18) specifying `RayCastPipeline` — end-to-end orchestrator that chains ingestion → transform → training from a single `dataset.yaml`. Auto-generates training data YAML from `global_cell_map`. CLI with `--stage` flag for individual stages. Reorganises flat transform output into `train/`/`val/` subdirectories. Config format reference (§18.2) documenting all `dataset.yaml` fields. Phase 11 added to execution order. Phase 10 testing checkpoints updated with real-data smoke test passing. |
+| v4.17 | **Split mapping + stratified random sampling.** `split_map` field added to `SplitArgs` for mapping extracted regex values to canonical split names (e.g., `fold1→train`, `fold2→val`, `fold3→test`). `split_separation: "none"` now defaults to tissue-stratified random sampling with configurable ratios (default 80/10/10) and deterministic seed. Pipeline validates that `train/` and `val/` directories contain tiles before training. Warns on orphaned tiles with unrecognized split names. |
 
 ---
 
@@ -70,10 +71,11 @@ Convert Ultralytics YOLOv26 (bounding-box detector) into a **multi-axis, raycast
 ```
 Raw datasets (Parquet / GeoJSON / CSV)
         ↓  RayCastPipeline (or individual orchestrators)
-        ↓  IngestionOrchestrator
+        ↓  IngestionOrchestrator — dispatches to dataset-specific ingestors
+        ↓  Split assignment: physical | filename_regex + split_map | stratified random
 .npz files  [image + raycast annotations, pixel space]
         ↓  TransformOrchestrator  (SpatialChunker + NormalizerAndPadder)
-.npz tiles  [content_h, content_w preserved] → reorganised into train/ val/
+.npz tiles  [content_h, content_w preserved] → reorganised into train/ val/ test/
         ↓  Auto-generated data.yaml (nc, names, paths from global_cell_map)
         ↓  RayCastTrainer → RayCastTileDataset
 [B, 3, H, W] + [M, 36] labels  (normalised)
@@ -317,41 +319,42 @@ raycasted/
 ├── data/
 │   ├── etl/
 │   │   ├── ingestors/
-│   │   │   ├── _base.py                 EXISTS — BaseDataIngestor (add raycast handling)
-│   │   │   ├── ingestion_orchestrator.py  EXISTS — drives ingestors from YAML config
-│   │   │   ├── geojson_ingestor.py      MODIFY — implement _extract_raycast_annotations()
-│   │   │   ├── csv_poly_ingestor.py     MODIFY — implement _extract_raycast_annotations()
-│   │   │   ├── parquet_ingestor.py      MODIFY — implement _extract_raycast_annotations()
-│   │   │   └── mat_inst_ingestor.py     EXISTS — method 3 (no raycast needed yet)
+│   │   │   ├── _base.py                 IMPLEMENTED — BaseDataIngestor with raycast MPP scaling, split assignment
+│   │   │   ├── ingestion_orchestrator.py  IMPLEMENTED — dispatch map, generator/return handling, split_map
+│   │   │   ├── geojson_ingestor.py      IMPLEMENTED — _extract_raycast_annotations() with Shapely centroids
+│   │   │   ├── csv_poly_ingestor.py     IMPLEMENTED — _extract_raycast_annotations() for PanopTILs
+│   │   │   ├── parquet_ingestor.py      IMPLEMENTED — _extract_raycast_annotations() via contour extraction
+│   │   │   └── mat_inst_ingestor.py     EXISTS — method 3 registered (raycast stub deferred)
 │   │   └── transform/
-│   │       ├── spatialChunker.py        MODIFY — add _slice_raycast()
-│   │       ├── normalizer.py            MODIFY — return content_h, content_w
-│   │       ├── stainEstimator.py        EXISTS — no changes needed
-│   │       └── transform_orchestrator.py  MODIFY — save content dims to .npz, use 'annotations' key
-│   ├── ops/                             NEW — modular geometry operations
-│   │   ├── __init__.py                  NEW — re-exports all ops
-│   │   ├── convert.py                   NEW — polygon_to_raycast, raycast_to_annotation, decode_to_vertices
-│   │   ├── filter.py                    NEW — filter_and_clip_annotations
-│   │   ├── iou.py                       NEW — polar_iou, polar_iou_pairwise_flat, torch variants
-│   │   ├── augment.py                   NEW — flip_horizontal, flip_vertical, rotate_90
-│   │   └── loss.py                      NEW — angular_smoothness_loss
+│   │       ├── spatialChunker.py        IMPLEMENTED — raycast routing via filter_and_clip_annotations
+│   │       ├── normalizer.py            IMPLEMENTED — returns (image, annotations, content_h, content_w)
+│   │       ├── stainEstimator.py        EXISTS — Macenko stain estimation (no changes needed)
+│   │       └── transform_orchestrator.py  IMPLEMENTED — saves content_h/w, uses 'annotations' key
+│   ├── ops/                             IMPLEMENTED — modular geometry operations
+│   │   ├── __init__.py                  IMPLEMENTED — re-exports all ops
+│   │   ├── convert.py                   IMPLEMENTED — polygon_to_raycast, decode_to_vertices, raycast_to_polygon
+│   │   ├── filter.py                    IMPLEMENTED — filter_and_clip_annotations
+│   │   ├── iou.py                       IMPLEMENTED — polar_iou, polar_iou_pairwise_flat, torch variants
+│   │   ├── augment.py                   IMPLEMENTED — flip_horizontal, flip_vertical, rotate_90
+│   │   ├── loss.py                      IMPLEMENTED — angular_smoothness_loss
+│   │   └── utils.py                     IMPLEMENTED — count_zero_rays, validate_annotation_format
 │   ├── utils/
-│   │   ├── __init__.py                  NEW
-│   │   ├── config.py                    MOVED from etl/ — Pydantic ETL config
-│   │   └── constants.py                 NEW — angular constants, permutation indices, format indices
+│   │   ├── __init__.py                  IMPLEMENTED
+│   │   ├── config.py                    IMPLEMENTED — Pydantic ETL config with SplitArgs, DatasetConfig validation
+│   │   └── constants.py                 IMPLEMENTED — angular constants, permutation indices, format indices
 │   └── loader/
-│       └── raycast_dataset.py           NEW — RayCastTileDataset, collate_fn
-├── model/                               NEW — prediction head (subclass, not in-place ultralytics mod)
-│   ├── __init__.py                      NEW — re-exports RayCastDetect, RayRefinementBlock, register
-│   ├── head.py                          NEW — RayRefinementBlock + RayCastDetect(Detect)
-│   ├── register.py                      NEW — register_raycast_head() namespace injection
-│   ├── loss.py                          NEW — RayCastDetectionLoss + RayCastE2ELoss
-│   ├── tal.py                           NEW — RayCastAssigner(TaskAlignedAssigner)
-│   ├── predict.py                       NEW — RayCastPredictor
-│   ├── val.py                           NEW — RayCastValidator (Shapely polygon mAP)
-│   ├── train.py                          NEW — RayCastTrainer(DetectionTrainer)
-│   └── export.py                        NEW — ONNX export + TensorRT deploy
-├── pipeline.py                         NEW — end-to-end orchestrator (ingest → transform → train)
+│       └── raycast_dataset.py           IMPLEMENTED — RayCastTileDataset, collate_fn, crop/augment/normalise
+├── model/                               IMPLEMENTED — prediction head (subclass, not in-place ultralytics mod)
+│   ├── __init__.py                      IMPLEMENTED — re-exports RayCastDetect, RayRefinementBlock, register
+│   ├── head.py                          IMPLEMENTED — RayRefinementBlock + RayCastDetect(Detect)
+│   ├── register.py                      IMPLEMENTED — register_raycast_head() namespace injection
+│   ├── loss.py                          IMPLEMENTED — RayCastDetectionLoss + RayCastE2ELoss
+│   ├── tal.py                           IMPLEMENTED — RayCastAssigner(TaskAlignedAssigner)
+│   ├── predict.py                       IMPLEMENTED — RayCastPredictor
+│   ├── val.py                           IMPLEMENTED — RayCastValidator (Shapely polygon mAP)
+│   ├── train.py                         IMPLEMENTED — RayCastTrainer(DetectionTrainer)
+│   └── export.py                        PENDING — ONNX export + TensorRT deploy (Phase 9)
+├── pipeline.py                         IMPLEMENTED — end-to-end orchestrator (ingest → transform → train)
 
 ultralytics/                              # NOT modified in-place — subclass approach used
 ├── nn/modules/
@@ -792,24 +795,71 @@ Both stages write `.npz` files. Ingestion produces full-ROI `.npz`. Transform pr
 
 **File:** `raycasted/data/etl/ingestors/ingestion_orchestrator.py`
 
+**Status:** Implemented.
+
 **Ingestor dispatch map:**
 
 | `ingestion_method` | Ingestor class | Dataset |
 |--------------------|---------------|---------|
 | 1 | `ParquetIngestor` | MoNuSAC |
-| 3 | `MatInstIngestor` | CoNSeP (currently commented out in YAML — must still be registered; see GAP-01) |
+| 3 | `MatInstIngestor` | CoNSeP (registered; raycast stub deferred) |
 | 4 | `GeoJSONIngestor` | PUMA |
 | 5 | `CSVPolygonIngestor` | PanopTILs |
 
 Output layout: `<output_dir>/<dataset_name>/<split>/<roi_id>.npz`
 
-**Generator vs return handling:** `ParquetIngestor.process_item()` is a generator (yields one tuple per ROI inside the Parquet file). `GeoJSONIngestor` and `CSVPolygonIngestor` use `return`. The orchestrator must detect both uniformly and iterate them the same way.
+**Generator vs return handling:** `ParquetIngestor.process_item()` is a generator (yields one tuple per ROI inside the Parquet file). `GeoJSONIngestor` and `CSVPolygonIngestor` use `return`. The orchestrator detects both uniformly and iterates them the same way.
 
 **`split` column:** The split label is read from `row['split']` — this is the column name produced by `BaseDataIngestor._build_registry()` (verified in existing code).
 
+### 12.2.1 Split Assignment Strategies
+
+Split assignment happens during `BaseDataIngestor._build_registry()` — a single point that all ingestors share. Three strategies are supported via `split_separation`:
+
+| Strategy | `split_separation` | How splits are determined |
+|----------|-------------------|--------------------------|
+| **Physical directories** | `physical` | ROIs discovered inside `split_dirs` (e.g., `train_dir`, `val_dir`). Split label comes from directory name. |
+| **Filename regex** | `filename_regex` | Regex with one capture group applied to `image_path`. Extracted value becomes split label. Optional `split_map` maps raw values to canonical names. |
+| **Stratified random** | `none` | Tissue-stratified random sampling with configurable ratios (default 80/10/10) and deterministic seed. |
+
+**Filename regex with `split_map`** (e.g., PanNuke folds):
+
+```yaml
+split_separation: "filename_regex"
+split_args:
+  regex: "(fold[1-3])"
+  split_map:
+    "fold1": "train"
+    "fold2": "val"
+    "fold3": "test"
+```
+
+The regex extracts `fold1`, `fold2`, or `fold3` from the filename. The `split_map` (Polars `replace()`) maps these to canonical names. Unmapped values are preserved as-is — the pipeline warns about orphaned tiles during `_organize_by_split()`.
+
+**Stratified random sampling** (`split_separation: "none"`):
+
+When no pre-defined splits exist, `BaseDataIngestor._assign_stratified_splits()` assigns train/val/test labels via random sampling. Stratification is by tissue type when `tissue_type` is set (uniform stratum → effectively plain random for single-tissue datasets). Falls back to plain random when no tissue info is available.
+
+Key properties:
+- Deterministic with configurable `seed` (default 42)
+- Ratios validated to sum to ~1.0 (Pydantic model validator)
+- `max(1, ...)` ensures at least one sample in train and val
+- All remaining ROIs default to `test`
+
+**Config validation** (in `DatasetConfig` Pydantic model):
+- `physical`: requires `split_dirs` with keys ending in `_dir`
+- `filename_regex`: requires `split_args.regex`; if `split_map` provided, values must be in `{train, val, test}`
+- `none`: if `split_args` provided, ratios must sum to ~1.0
+
+**Downstream split validation** (in `RayCastPipeline`):
+- `_organize_by_split()`: moves tiles into `train/`, `val/`, `test/` subdirectories; warns about tiles with unrecognized split names
+- `_generate_training_yaml()`: raises `RuntimeError` if `train/` or `val/` directories are empty or missing
+
 ### 12.3 Raycast Annotation Extraction — Per-Ingestor Strategy
 
-All three ingestors must implement `_extract_raycast_annotations()`. The shared geometry logic lives in `ops/convert.py` → `polygon_to_raycast()`.
+**Status:** Implemented for GeoJSON, CSV, and Parquet ingestors.
+
+All three ingestors implement `_extract_raycast_annotations()`. The shared geometry logic lives in `ops/convert.py` → `polygon_to_raycast()`.
 
 **GeoJSON (PUMA):**
 - Source: polygon vertex coordinates in `features[].geometry.coordinates[0]`
@@ -957,7 +1007,9 @@ Log a diagnostic counter in each ingestor for how often the `representative_poin
 
 ### 12.5 SpatialChunker Patch
 
-Add `raycast` routing case to `_slice_annotations()`. Delegate entirely to `filter_and_clip_annotations()` from `ops/filter.py`. Do not reimplement clipping logic.
+**Status:** Implemented. `raycast` routing case added to `_slice_annotations()`.
+
+The `raycast` branch delegates entirely to `filter_and_clip_annotations()` from `ops/filter.py`.
 
 **Current code** (`spatialChunker.py`) only handles `bbox` and `instance_mask`. Add:
 ```python
@@ -1023,14 +1075,9 @@ The `filter_and_clip_annotations()` function must apply operations in the follow
 
 ### 12.6 NormalizerAndPadder Patch
 
-**Current return signature** (`normalizer.py`, line 28):
-```python
-def process_roi(self, image: np.ndarray, annotations: Any) -> tuple[np.ndarray, Any]:
-    ...
-    return image, annotations  # Only 2 values — MUST BE UPDATED
-```
+**Status:** Implemented. Returns `(image, annotations, content_h, content_w)`.
 
-**Required change:**
+**Current signature** (`normalizer.py`):
 ```python
 def process_roi(self, image: np.ndarray, annotations: Any) -> tuple[np.ndarray, Any, int, int]:
     """Executes the Stage 3 transformation sequentially in memory.
@@ -1052,18 +1099,9 @@ def process_roi(self, image: np.ndarray, annotations: Any) -> tuple[np.ndarray, 
 
 ### 12.7 TransformOrchestrator Patch
 
-**Current code** (`transform_orchestrator.py`, lines 42-48):
-```python
-# Run the memory-only Stage 3 transformer
-final_img, final_annotations = self.normalizer.process_roi(img, annotations)
+**Status:** Implemented. Unpacks 4-tuple, saves `content_h/w` to `.npz`, uses `'annotations'` key.
 
-# Save to the Final PyTorch-Ready Directory
-save_path = self.final_output_dir / npz_path.name
-np.savez_compressed(save_path, image=final_img, bboxes=final_annotations, tissue=tissue)
-# Missing: content_h, content_w; uses 'bboxes' instead of 'annotations'
-```
-
-**Required change:**
+**Current code** (`transform_orchestrator.py`):
 ```python
 # Load with backward compatibility
 annotations = data.get('annotations', data.get('bboxes'))
@@ -1088,6 +1126,8 @@ np.savez_compressed(
 ## 13. Module E — DataLoader
 
 **File:** `raycasted/data/loader/raycast_dataset.py`
+
+**Status:** Implemented.
 
 ### 13.1 RayCastTileDataset
 
@@ -1148,7 +1188,9 @@ def collate_fn(batch: list[tuple[torch.Tensor, np.ndarray]]) -> tuple[torch.Tens
 
 ## 14. Module F — Inference & Visualisation
 
-**File:** `ultralytics/models/yolo/detect/predict.py`
+**File:** `raycasted/model/predict.py`
+
+**Status:** Implemented.
 
 ### 14.1 RayCastPredictor
 
@@ -1184,7 +1226,9 @@ Visualises decoded polygons on images. Draws:
 
 ## 15. Module G — Validation Metrics
 
-**File:** `ultralytics/models/yolo/detect/val.py`
+**File:** `raycasted/model/val.py`
+
+**Status:** Implemented.
 
 ### 15.1 RayCastValidator
 
@@ -1561,8 +1605,16 @@ datasets:
 
     # Split detection — choose ONE:
     split_separation: "filename_regex"       #   "physical" | "filename_regex" | "none"
-    split_args:                              #   (only if filename_regex)
-      regex: "(train|test)"
+    split_args:                              #   (only if filename_regex or none)
+      regex: "(train|test)"                  #   regex with one capture group (filename_regex)
+      split_map:                             #   optional: map extracted values to canonical names
+        "fold1": "train"                     #     any unmapped value is kept as-is
+        "fold2": "val"                       #     valid targets: "train", "val", "test"
+        "fold3": "test"
+      train_ratio: 0.8                       #   (only if none) fraction for training
+      val_ratio: 0.1                         #   (only if none) fraction for validation
+      test_ratio: 0.1                        #   (only if none) fraction for testing (must sum to ~1.0)
+      seed: 42                               #   (only if none) deterministic split seed
     split_dirs:                              #   (only if physical)
       train_dir: "train/"
       val_dir: "val/"

@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "gradio>=6.11.0",
     "matplotlib>=3.9.3",
     "numcodecs<0.13.0",
     "numpy>=1.26.4",
@@ -75,3 +76,8 @@ convention = "google"
 
 [tool.setuptools.packages.find]
 include = ["raycasted*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

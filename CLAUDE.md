@@ -86,7 +86,6 @@ Post-`TransformOrchestrator` tiles contain: `image` (uint8, HWC), `annotations` 
 - `MatInstIngestor._extract_raycast_annotations()` is a stub (`NotImplementedError`) — deferred, requires contour extraction from instance maps.
 - Phase 0.5 deferred items (require real datasets): H&E overlay, `d_i` ≤ centroid-to-edge check, zero-ray fraction < 1%.
 - Ingestor diagnostic counters not yet wired: `fallback_counter` not passed to `polygon_to_raycast()`, zero-ray logging not implemented. Must be added before first real-data run (see §12.4, NOTE-04).
-- `RayCastPipeline._organize_by_split()` creates subdirectories named by the captured regex group (e.g. `training_set/`), but `_generate_training_yaml()` hardcodes `train/` and `val/` paths. Datasets with a single split (like PUMA) require manual reorganisation before training. Needs a mapping from regex capture groups to canonical `train`/`val` directory names.
 - MLflow logging of `lambda_smooth` and `o2m_weight` annealing values requires a custom callback (per-term losses are logged automatically via Ultralytics' built-in MLflow integration when MLflow is installed).
 - `GeoJSONIngestor` fails on 4 PUMA ROIs with `'LineString' object has no attribute 'x'` — degenerate geometries not handled.
 
