@@ -146,6 +146,9 @@ class RayCastTrainer(DetectionTrainer):
         self.args.mosaic = 0.0
         self.args.mixup = 0.0
 
+    def plot_training_labels(self):
+        """Skip standard bbox label plotting — incompatible with 34-dim polygon data."""
+
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Create YOLO model with RayCastDetect head and RayCastE2ELoss.
 
@@ -232,7 +235,7 @@ class RayCastTrainer(DetectionTrainer):
             dataset,
             batch_size=batch_size,
             shuffle=(mode == 'train'),
-            num_workers=self.args.workers if mode == 'train' else self.args.workers * 2,
+            num_workers=self.args.workers,
             collate_fn=_raycast_collate_fn,
             drop_last=self.args.compile and mode == 'train',
         )
