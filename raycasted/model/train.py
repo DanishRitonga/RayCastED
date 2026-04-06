@@ -10,7 +10,7 @@ Usage:
     from raycasted.model.train import RayCastTrainer
 
     trainer = RayCastTrainer(overrides={
-        'model': 'yolo11n.yaml',
+        'model': 'yolo26s.yaml',
         'data': 'configs/dataset.yaml',
         'epochs': 100,
         'batch': 16,

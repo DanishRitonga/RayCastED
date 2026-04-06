@@ -223,7 +223,7 @@ def main():  # noqa: D103
     parser.add_argument('--dataset', default=None, help='Restrict ingestion to a single dataset')
 
     # Training overrides
-    parser.add_argument('--model', default='yolo11n.yaml', help='Model architecture YAML')
+    parser.add_argument('--model', default='yolo26s.yaml', help='Model architecture YAML')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch', type=int, default=16, help='Batch size')
     parser.add_argument('--imgsz', type=int, default=640, help='Input image size')
