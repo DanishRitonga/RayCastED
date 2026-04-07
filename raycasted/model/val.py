@@ -166,6 +166,9 @@ class RayCastValidator(DetectionValidator):
         self.metrics = RayCastDetMetrics(names=model.names)
         self.confusion_matrix = None  # skip — incompatible with polygon format
 
+    def finalize_metrics(self, *args, **kwargs):
+        """Skip confusion matrix plotting — incompatible with 34-dim polygon data."""
+
     def postprocess(self, preds):
         """Extract polygon predictions from end-to-end model output (no NMS).
 
