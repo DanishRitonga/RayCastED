@@ -806,7 +806,7 @@ Both stages write `.npz` files. Ingestion produces full-ROI `.npz`. Transform pr
 
 | `ingestion_method` | Ingestor class | Dataset |
 |--------------------|---------------|---------|
-| 1 | `ParquetIngestor` | MoNuSAC |
+| 1 | `ParquetIngestor` | MoNuSAC, PanNuke |
 | 3 | `MatInstIngestor` | CoNSeP (registered; raycast stub deferred) |
 | 4 | `GeoJSONIngestor` | PUMA |
 | 5 | `CSVPolygonIngestor` | PanopTILs |
@@ -814,6 +814,12 @@ Both stages write `.npz` files. Ingestion produces full-ROI `.npz`. Transform pr
 Output layout: `<output_dir>/<dataset_name>/<split>/<roi_id>.npz`
 
 **Generator vs return handling:** `ParquetIngestor.process_item()` is a generator (yields one tuple per ROI inside the Parquet file). `GeoJSONIngestor` and `CSVPolygonIngestor` use `return`. The orchestrator detects both uniformly and iterates them the same way.
+
+**Parallelism strategy:**
+- Default workers: `os.cpu_count() - 1` (configurable via `--ingest-workers`)
+- **ParquetIngestor (method 1):** Rows (parquet files / folds) processed sequentially by the orchestrator. Each `ParquetIngestor` handles internal ROI-level parallelism — reads the parquet into memory in the main process, then dispatches per-ROI decode+annotate tasks to a `ProcessPoolExecutor` with `spawn` start method. This avoids nested process pools and ensures all cores are utilized even for datasets with few parquet files (e.g., PanNuke with 3 folds).
+- **Other ingestors (methods 3, 4, 5):** Rows processed in parallel by the orchestrator via `ProcessPoolExecutor` with `spawn` start method. Each row is a single ROI, so no internal parallelism is needed.
+- **Why `spawn`:** The default `fork` start method deadlocks with OpenMP-backed libraries (`cv2`, `polars`). `spawn` creates fresh processes that initialize thread pools cleanly.
 
 **`split` column:** The split label is read from `row['split']` — this is the column name produced by `BaseDataIngestor._build_registry()` (verified in existing code).
 
@@ -1237,7 +1243,7 @@ Visualises decoded polygons on images. Draws:
 
 ### 15.1 RayCastValidator
 
-Computes polygon-level mAP using Shapely polygon IoU.
+Computes polygon-level mAP using GPU-accelerated Polar IoU (same metric as training loss). Also reports centroid F1 for LSP-DETR comparability.
 
 **Key metrics:**
 - mAP@0.50: IoU threshold = 0.5
@@ -1250,7 +1256,7 @@ Computes polygon-level mAP using Shapely polygon IoU.
 LSP-DETR evaluates F1 based on *centroid proximity* (Euclidean distance threshold µ), not Shapely polygon IoU. Computing your model's F1 based purely on Shapely polygon IoU ≥ 0.5 will produce scores that are not directly comparable to LSP-DETR's reported numbers and may appear artificially lower.
 
 `RayCastValidator` must implement both metrics:
-- `shapely_f1(iou_threshold)` — exact 2D polygon intersection, publishable standard
+- `shapely_f1(iou_threshold)` — GPU Polar IoU (sector-area approximation, same metric as training loss), publishable standard
 - `centroid_f1(distance_threshold_px)` — match predictions to GT by centroid Euclidean distance; use the same threshold µ as LSP-DETR for apples-to-apples comparison
 
 Report both in all evaluation runs. Use `shapely_f1` as the primary metric for your own published results; use `centroid_f1` only for direct LSP-DETR comparisons.
@@ -1442,7 +1448,7 @@ Subclasses `DetectionTrainer` to integrate all custom components:
 | Method | Override | Purpose |
 |--------|----------|---------|
 | `get_model()` | Registers `RayCastDetect` head via `register_raycast_head()` | Head registration |
-| `get_validator()` | Returns `RayCastValidator` | Shapely polygon mAP |
+| `get_validator()` | Returns `RayCastValidator` | GPU Polar IoU mAP |
 | `build_dataset()` | Returns `RayCastTileDataset` | Custom data loading |
 | Loss wiring | Uses `RayCastE2ELoss` via `loss_fn` parameter | 5-term polygon loss |
 | `_setup_train()` | Disables mosaic/mixup, asserts GAP-06 constraints | Safety checks |
