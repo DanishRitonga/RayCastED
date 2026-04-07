@@ -344,3 +344,6 @@ class RayCastValidator(DetectionValidator):
         self.metrics.process(save_dir=self.save_dir, plot=self.args.plots, on_plot=self.on_plot)
         self.metrics.clear_stats()
         return self.metrics.results_dict
+
+    def plot_predictions(self, batch, preds, ni):
+        """Skip standard bbox prediction plotting — incompatible with 34-dim polygon data."""

@@ -324,7 +324,7 @@ raycasted/
 │   │   │   ├── ingestion_orchestrator.py  IMPLEMENTED — dispatch map, generator/return handling, split_map
 │   │   │   ├── geojson_ingestor.py      IMPLEMENTED — _extract_raycast_annotations() with Shapely centroids
 │   │   │   ├── csv_poly_ingestor.py     IMPLEMENTED — _extract_raycast_annotations() for PanopTILs
-│   │   │   ├── parquet_ingestor.py      IMPLEMENTED — _extract_raycast_annotations() via contour extraction
+│   │   │   ├── parquet_ingestor.py      IMPLEMENTED — internal ROI-level parallelism, contour extraction
 │   │   │   └── mat_inst_ingestor.py     EXISTS — method 3 registered (raycast stub deferred)
 │   │   └── transform/
 │   │       ├── spatialChunker.py        IMPLEMENTED — raycast routing via filter_and_clip_annotations
@@ -352,7 +352,7 @@ raycasted/
 │   ├── loss.py                          IMPLEMENTED — RayCastDetectionLoss + RayCastE2ELoss
 │   ├── tal.py                           IMPLEMENTED — RayCastAssigner(TaskAlignedAssigner)
 │   ├── predict.py                       IMPLEMENTED — RayCastPredictor
-│   ├── val.py                           IMPLEMENTED — RayCastValidator (Shapely polygon mAP)
+│   ├── val.py                           IMPLEMENTED — RayCastValidator (GPU Polar IoU mAP)
 │   ├── train.py                         IMPLEMENTED — RayCastTrainer(DetectionTrainer)
 │   └── export.py                        PENDING — ONNX export + TensorRT deploy (Phase 9)
 ├── pipeline.py                         IMPLEMENTED — end-to-end orchestrator (ingest → transform → train)
