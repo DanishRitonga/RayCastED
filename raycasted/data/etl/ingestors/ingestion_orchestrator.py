@@ -12,6 +12,7 @@ Each .npz contains:
 """
 
 import collections
+import multiprocessing
 import os
 import re
 from collections.abc import Generator
@@ -194,7 +195,7 @@ class IngestionOrchestrator:
         stats = collections.Counter()
         n_workers = min(self.workers, len(rows))
 
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        with ProcessPoolExecutor(max_workers=n_workers, mp_context=multiprocessing.get_context('spawn')) as pool:
             futures = {}
             for idx, row in enumerate(rows):
                 future = pool.submit(
