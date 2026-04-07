@@ -1,89 +1,22 @@
 """RayCastED — Polygon Validation Metrics (Phase 8).
 
 RayCastValidator subclasses DetectionValidator, replacing bounding-box IoU
-with Shapely polygon IoU. Reports both shapely_f1 (primary) and
+with GPU-accelerated Polar IoU. Reports both shapely_f1 (primary) and
 centroid_f1 (LSP-DETR comparison).
 
 Spec reference: docs/project.md section 15
 """
 
-from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
 import torch
-from shapely.errors import GEOSException, TopologicalError
-from shapely.geometry import Polygon
 from ultralytics.models.yolo.detect.val import DetectionValidator
 from ultralytics.utils.metrics import DetMetrics, Metric, ap_per_class
 
-from raycasted.data.etl.utils.constants import RAY_COS, RAY_SIN
+from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 
 RAYCAST_DIM = 34  # xy(2) + rays(32)
-
-
-# ---------------------------------------------------------------------------
-# Module-level IoU function (multiprocessing-compatible)
-# ---------------------------------------------------------------------------
-
-
-def _polygon_iou_row(args):
-    """Compute IoU of one predicted polygon against all GT polygons.
-
-    Module-level for multiprocessing.Pool pickle compatibility.
-
-    Args:
-        args: tuple of (pred_coords, gt_coords_array)
-            pred_coords: np.ndarray shape (32, 2) — single polygon vertices.
-            gt_coords_array: np.ndarray shape (M, 32, 2) — GT polygon vertices.
-
-    Returns:
-        np.ndarray shape (M,) of IoU values.
-    """
-    pred_coords, gt_coords = args
-    try:
-        pred_poly = Polygon(pred_coords)
-        if pred_poly.is_empty or pred_poly.area == 0:
-            return np.zeros(len(gt_coords), dtype=np.float64)
-    except (TopologicalError, GEOSException):
-        return np.zeros(len(gt_coords), dtype=np.float64)
-
-    iou = np.zeros(len(gt_coords), dtype=np.float64)
-    for j in range(len(gt_coords)):
-        try:
-            gt_poly = Polygon(gt_coords[j])
-            if gt_poly.is_empty or gt_poly.area == 0:
-                continue
-            inter = pred_poly.intersection(gt_poly)
-            if inter.is_empty or inter.area == 0:
-                continue
-            union_area = pred_poly.area + gt_poly.area - inter.area
-            if union_area > 0:
-                iou[j] = inter.area / union_area
-        except (TopologicalError, GEOSException, Exception):
-            continue
-
-    return iou
-
-
-def _build_polygon_coords(poly_34):
-    """Convert [N, 34] polygon data to [N, 32, 2] vertex coordinates.
-
-    Uses the same RAY_COS/RAY_SIN as decode_to_vertices but vectorised numpy.
-
-    Args:
-        poly_34: np.ndarray shape (N, 34) — [cx, cy, d_1..d_32] pixel space.
-
-    Returns:
-        np.ndarray shape (N, 32, 2) — vertex (x, y) coordinates.
-    """
-    cx = poly_34[:, 0]
-    cy = poly_34[:, 1]
-    rays = poly_34[:, 2:]
-
-    vx = cx[:, None] + rays * RAY_COS[None, :]
-    vy = cy[:, None] + rays * RAY_SIN[None, :]
-    return np.stack([vx, vy], axis=2)
 
 
 # ---------------------------------------------------------------------------
@@ -92,14 +25,14 @@ def _build_polygon_coords(poly_34):
 
 
 class RayCastDetMetrics(DetMetrics):
-    """Polygon detection metrics: shapely mAP + centroid F1.
+    """Polygon detection metrics: polar mAP + centroid F1.
 
     Extends DetMetrics with two additional metric tracks:
-      - shapely: mAP computed using exact Shapely polygon IoU (primary)
+      - shapely: mAP computed using Polar IoU (primary, same metric as training loss)
       - centroid: F1 computed using centroid Euclidean distance (LSP-DETR comparison)
 
     Stats dict keys:
-      - tp_shapely: Shapely polygon IoU true-positive matrix
+      - tp_shapely: Polar IoU true-positive matrix
       - tp_centroid: centroid distance matching true-positive matrix
       - conf, pred_cls, target_cls, target_img: shared across all tracks
     """
@@ -199,10 +132,10 @@ class RayCastDetMetrics(DetMetrics):
 
 
 class RayCastValidator(DetectionValidator):
-    """Polygon detection validator with Shapely IoU and centroid F1.
+    """Polygon detection validator with GPU Polar IoU and centroid F1.
 
-    Subclasses DetectionValidator, replacing bounding-box IoU with exact
-    Shapely polygon intersection. Reports both shapely mAP (primary)
+    Subclasses DetectionValidator, replacing bounding-box IoU with GPU-accelerated
+    Polar IoU (same metric used in training loss). Reports both polar mAP (primary)
     and centroid F1 (for LSP-DETR comparability).
 
     No NMS — the end-to-end model already does top-k selection via
@@ -291,7 +224,10 @@ class RayCastValidator(DetectionValidator):
         return pred
 
     def _process_batch(self, preds, batch):
-        """Compute Shapely polygon IoU and centroid distance matches.
+        """Compute GPU Polar IoU and centroid distance matches.
+
+        Uses the same polar IoU as training loss (consistent metric) computed
+        entirely on GPU. Only the final TP matrix transfers to CPU.
 
         Args:
             preds: dict with 'bboxes' [N_pred, 34], 'conf', 'cls'.
@@ -309,22 +245,22 @@ class RayCastValidator(DetectionValidator):
                 'tp_centroid': np.zeros((n_pred, self.n_centroid), dtype=bool),
             }
 
-        # Build vertex coordinates for Shapely
-        pred_coords = _build_polygon_coords(preds['bboxes'].cpu().numpy())  # [N, 32, 2]
-        gt_coords = _build_polygon_coords(batch['bboxes'].cpu().numpy())  # [M, 32, 2]
+        # Extract rays from polygon tensors (keep on GPU)
+        pred_rays = preds['bboxes'][:, 2:]  # [N_pred, 32]
+        gt_rays = batch['bboxes'][:, 2:]  # [N_gt, 32]
 
-        # Compute Shapely IoU matrix
-        iou_matrix = self._compute_polygon_iou_matrix(pred_coords, gt_coords)
+        # Expand to pairwise shape for polar IoU on GPU
+        pred_exp = pred_rays[:, None, :].expand(n_pred, n_gt, 32)
+        gt_exp = gt_rays[None, :, :].expand(n_pred, n_gt, 32)
+        iou_matrix = polar_iou_pairwise_flat_torch(pred_exp, gt_exp)  # [N_pred, N_gt]
 
-        # Shapely true-positive matching (uses self.iouv thresholds)
-        # match_predictions expects iou shape [N_gt, N_pred] (parent convention: box_iou(gt, pred))
+        # Polar IoU true-positive matching (same metric as training loss)
+        # match_predictions expects iou shape [N_gt, N_pred] (parent convention)
         tp_shapely = (
-            self.match_predictions(preds['cls'], batch['cls'], torch.from_numpy(iou_matrix.T).to(self.device))
-            .cpu()
-            .numpy()
+            self.match_predictions(preds['cls'], batch['cls'], iou_matrix.T).cpu().numpy()
         )
 
-        # Centroid distance matching
+        # Centroid distance matching (CPU — small matrices, fast)
         tp_centroid = self._compute_centroid_matches(
             preds['bboxes'][:, :2].cpu().numpy(),
             batch['bboxes'][:, :2].cpu().numpy(),
@@ -333,37 +269,6 @@ class RayCastValidator(DetectionValidator):
         )
 
         return {'tp_shapely': tp_shapely, 'tp_centroid': tp_centroid}
-
-    def _compute_polygon_iou_matrix(self, pred_coords, gt_coords):
-        """Compute NxM Shapely polygon IoU matrix.
-
-        Uses multiprocessing for large matrices, sequential for small ones.
-
-        Args:
-            pred_coords: [N, 32, 2] predicted polygon vertices.
-            gt_coords: [M, 32, 2] ground truth polygon vertices.
-
-        Returns:
-            np.ndarray [N, M] of IoU values.
-        """
-        n_pred, n_gt = len(pred_coords), len(gt_coords)
-        if n_pred == 0 or n_gt == 0:
-            return np.zeros((n_pred, n_gt), dtype=np.float64)
-
-        # Parallel for large matrices, sequential for small
-        if n_pred * n_gt > 1000:
-            n_workers = min(8, n_pred)
-            with Pool(n_workers) as pool:
-                rows = pool.map(
-                    _polygon_iou_row,
-                    [(pred_coords[i], gt_coords) for i in range(n_pred)],
-                )
-            return np.array(rows)
-        else:
-            iou = np.zeros((n_pred, n_gt), dtype=np.float64)
-            for i in range(n_pred):
-                iou[i] = _polygon_iou_row((pred_coords[i], gt_coords))
-            return iou
 
     def _compute_centroid_matches(self, pred_centroids, gt_centroids, pred_cls, gt_cls):
         """Match predictions to GT by centroid Euclidean distance.
