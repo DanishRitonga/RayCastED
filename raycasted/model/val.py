@@ -47,9 +47,16 @@ class RayCastDetMetrics(DetMetrics):
     def process(self, save_dir=Path('.'), plot=False, on_plot=None):
         """Compute mAP from shapely and centroid true-positive stats."""
         stats = {k: np.concatenate(v, 0) for k, v in self.stats.items()}
-        if len(stats.get('tp_shapely', [])) == 0:
+
+        # Always compute GT counts — needed even when all predictions are filtered
+        if len(stats.get('target_cls', [])) > 0:
+            self.nt_per_class = np.bincount(stats['target_cls'].astype(int), minlength=len(self.names))
+            self.nt_per_image = np.bincount(stats['target_img'].astype(int), minlength=len(self.names))
+        else:
             self.nt_per_class = np.zeros(len(self.names), dtype=int)
             self.nt_per_image = np.zeros(len(self.names), dtype=int)
+
+        if len(stats.get('tp_shapely', [])) == 0:
             return stats
 
         # Shapely polygon mAP
@@ -82,8 +89,6 @@ class RayCastDetMetrics(DetMetrics):
         self.centroid.nc = len(self.names)
         self.centroid.update(results_centroid)
 
-        self.nt_per_class = np.bincount(stats['target_cls'].astype(int), minlength=len(self.names))
-        self.nt_per_image = np.bincount(stats['target_img'].astype(int), minlength=len(self.names))
         return stats
 
     @property
