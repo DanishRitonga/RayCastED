@@ -35,13 +35,22 @@ class CSVColumnMap(BaseModel):
 # === GLOBAL SETTINGS ===
 class GlobalSettings(BaseModel):
     root_dir: str
-    output_image_size: list[int]
+    max_size: int = 1024
+    crop_size: int = 640
     output_mpp: float
     patching_overlap_pct: float
     annotation_type: str = 'bbox'
 
     global_cell_map: dict[str, int] = Field(default_factory=dict)
     global_tissue_map: dict[str, int] = Field(default_factory=dict)
+
+    @model_validator(mode='after')
+    def validate_sizes(self):
+        if self.crop_size < 1:
+            raise ValueError(f'crop_size must be >= 1, got {self.crop_size}')
+        if self.max_size < 1:
+            raise ValueError(f'max_size must be >= 1, got {self.max_size}')
+        return self
 
 
 # === DATASET CONFIG ===

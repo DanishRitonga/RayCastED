@@ -152,23 +152,29 @@ class RayCastDetect(Detect):
         poly = poly.gather(dim=1, index=idx.repeat(1, 1, RAYCAST_DIM))
         return torch.cat([poly, scores, conf], dim=-1)
 
-    def bias_init(self):
+    def bias_init(self, crop_size: int = 640):
         """Initialize polygon head biases.
 
         XY channels (0-1): bias=2.0 → sigmoid(2.0)≈0.88, encourages initial detections.
         Ray channels (2-33): calibrated for ~15px radius cells at 0.25 MPP
             (lymphocytes 7-10μm → 28-40px diameter → radius ≈15px).
-            Inverse softplus: bias = log(exp(target_px / stride) - 1).
+            During training, GT rays are normalized by crop_size, so
+            softplus(bias) must equal target_px / crop_size.
+
+        Args:
+            crop_size: Training crop size used for ray normalisation.
         """
         target_ray_px = 15.0  # reasonable lymphocyte radius at 0.25 MPP
+        target_ray_norm = target_ray_px / crop_size
+        ray_bias = math.log(math.exp(target_ray_norm) - 1)  # inverse softplus
         for i, (a, b) in enumerate(zip(self.one2many['box_head'], self.one2many['cls_head'])):
             bias = a[-1].bias.data
             bias[:2] = 2.0  # xy: sigmoid → ~0.88
-            bias[2:] = math.log(math.exp(target_ray_px / self.stride[i]) - 1)  # rays → ~15px
-            b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)
+            bias[2:] = ray_bias  # rays: softplus → target_px / crop_size
+            b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (crop_size / self.stride[i]) ** 2)
         if self.end2end:
             for i, (a, b) in enumerate(zip(self.one2one['box_head'], self.one2one['cls_head'])):
                 bias = a[-1].bias.data
                 bias[:2] = 2.0
-                bias[2:] = math.log(math.exp(target_ray_px / self.stride[i]) - 1)
-                b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (640 / self.stride[i]) ** 2)
+                bias[2:] = ray_bias
+                b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (crop_size / self.stride[i]) ** 2)

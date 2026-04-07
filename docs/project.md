@@ -490,20 +490,24 @@ This differs from the training-time `decode_pred_xy()` formula in §10.3 which o
 
 ### 9.6 Bias Initialisation — Cell-Size-Aware
 
-Ray biases are initialised to produce ~15px rays at inference, calibrated for typical lymphocyte size at 0.25 MPP resolution (7–10 μm diameter → 28–40px → radius ~15px):
+Ray biases are initialised to produce ~15px rays (normalised by `crop_size`), calibrated for typical lymphocyte size at 0.25 MPP resolution (7–10 μm diameter → 28–40px → radius ~15px):
 
 ```python
 target_ray_px = 15.0  # reasonable lymphocyte radius at 0.25 MPP
+target_ray_norm = target_ray_px / crop_size  # ~0.023 for crop_size=640
+ray_bias = log(exp(target_ray_norm) - 1)  # inverse softplus → ~-3.77
+
 bias[:2] = 2.0  # xy: sigmoid(2.0) ≈ 0.88
-bias[2:] = log(exp(target_ray_px / stride) - 1)  # inverse softplus → ~15px
+bias[2:] = ray_bias  # rays: softplus(bias) = target_ray_norm → ~0.023
 ```
 
-Per-scale bias values:
-| Scale | Stride | Ray bias | Decoded ray |
-|-------|--------|----------|-------------|
-| P3 | 8 | 1.709 | 15.0px |
-| P4 | 16 | 0.441 | 15.0px |
-| P5 | 32 | -0.514 | 15.0px |
+All scales share the same ray bias (not stride-dependent) because training targets are normalised by `crop_size`. The trainer re-calls `bias_init(crop_size=self.args.imgsz)` in `set_model_attributes()` to use the configured crop size.
+
+Bias values (crop_size=640):
+| Channel | Bias | Activation | Decoded |
+|---------|------|------------|---------|
+| xy (0-1) | 2.0 | sigmoid(2.0) ≈ 0.88 | grid-relative offset |
+| rays (2-33) | -3.77 | softplus(-3.77) ≈ 0.023 | 0.023 × 640 ≈ 15px |
 
 XY biases remain at 2.0 (sigmoid → ~0.88, encouraging initial detections).
 
@@ -1387,7 +1391,7 @@ The inference runtime on Jetson:
    - Distance-based deduplication (same logic as `RayCastPredictor`)
    - Build polygon vertices: `(cx + d_i × cos θ_i, cy + d_i × sin θ_i)`
 
-**`crop_size` source:** Read from a sidecar metadata file exported alongside the ONNX model (e.g., `polygon_yolo_meta.json` containing `{"crop_size": 640, "nc": 5, "n_rays": 32, "ray_angles": [...]}`). Never hardcode.
+**`crop_size` source:** Read from a sidecar metadata file exported alongside the ONNX model (e.g., `polygon_yolo_meta.json` containing `{"crop_size": 640, ...}`). The value comes from the ETL config's `crop_size` field and is stored in `model.training_args` during training. Never hardcode.
 
 **Anchor grid:** The anchor grid positions depend on `imgsz` and stride set. Pre-compute during engine load and cache — it does not change between inference calls at the same resolution.
 
@@ -1506,8 +1510,8 @@ Trained checkpoints must store metadata required by inference and export:
 
 ```python
 model.training_args = {
-    'crop_size': 640,
-    'imgsz': 640,
+    'crop_size': self.args.imgsz,  # from config crop_size (default 640)
+    'imgsz': self.args.imgsz,
     'nc': nc,
     'n_rays': 32,
     'strides': [8, 16, 32],
@@ -1580,7 +1584,8 @@ A single YAML file drives the entire pipeline. Structure:
 # ── Global settings (apply to ALL datasets) ──────────────────────────────
 global_settings:
   root_dir: "/absolute/path/to/datasets"     # Base directory for all datasets
-  output_image_size: [1024, 1024]            # Target ROI size after ingestion
+  max_size: 1024                             # Max tile size (SpatialChunker + Normalizer)
+  crop_size: 640                             # Model input size (random crop in dataloader)
   output_mpp: 0.25                           # Target microns-per-pixel
   patching_overlap_pct: 10                   # Overlap between spatial chunks (%)
   annotation_type: "raycast"                 # "raycast" | "bbox"

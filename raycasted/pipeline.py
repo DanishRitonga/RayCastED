@@ -51,6 +51,9 @@ class RayCastPipeline:
         self.ingested_dir = self.output_dir / 'ingested'
         self.transformed_dir = self.output_dir / 'transformed'
         self.training_overrides = training_overrides or {}
+        # Default imgsz to crop_size from ETL config unless explicitly overridden
+        if 'imgsz' not in self.training_overrides:
+            self.training_overrides['imgsz'] = self.config.global_settings.get('crop_size', 640)
 
     def run(self, stage: str = 'all', dataset: str | None = None) -> None:
         """Run pipeline stages up to and including the specified one.
@@ -228,7 +231,7 @@ def main():  # noqa: D103
     parser.add_argument('--model', default='yolo26s.yaml', help='Model architecture YAML')
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch', type=int, default=16, help='Batch size')
-    parser.add_argument('--imgsz', type=int, default=640, help='Input image size')
+    parser.add_argument('--imgsz', type=int, default=None, help='Input image size (default: from config crop_size)')
     parser.add_argument('--device', default='', help='Device (cpu, 0, 0,1)')
     parser.add_argument('--workers', type=int, default=8, help='DataLoader workers')
     parser.add_argument('--lr0', type=float, default=None, help='Initial learning rate')
@@ -243,11 +246,12 @@ def main():  # noqa: D103
         'optimizer': 'MuSGD',
         'epochs': args.epochs,
         'batch': args.batch,
-        'imgsz': args.imgsz,
         'workers': args.workers,
         'pretrained': False,
         'cache': False,
     }
+    if args.imgsz is not None:
+        training_overrides['imgsz'] = args.imgsz
     if args.device:
         training_overrides['device'] = args.device
     if args.lr0 is not None:

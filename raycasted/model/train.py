@@ -273,6 +273,11 @@ class RayCastTrainer(DetectionTrainer):
             'strides': strides,
         }
 
+        # Re-initialise biases with correct crop_size (Ultralytics calls bias_init
+        # during model construction with no access to training config)
+        if hasattr(head, 'bias_init'):
+            head.bias_init(crop_size=self.args.imgsz)
+
 
 def train(**kwargs):
     """Train a RayCastED polygon detection model.

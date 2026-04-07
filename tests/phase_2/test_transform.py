@@ -45,7 +45,7 @@ def _make_image(h: int, w: int) -> np.ndarray:
 
 
 def test_normalizer_returns_4_values():
-    config = {'output_image_size': [256, 256]}
+    config = {'max_size': 256}
     norm = NormalizerAndPadder(config, profile_path=None)
 
     img = _make_image(200, 200)
@@ -67,7 +67,7 @@ def test_normalizer_returns_4_values():
 
 
 def test_content_dims_before_padding():
-    config = {'output_image_size': [512, 512]}
+    config = {'max_size': 512}
     norm = NormalizerAndPadder(config, profile_path=None)
 
     # Image smaller than target → will be padded
@@ -88,7 +88,7 @@ def test_content_dims_before_padding():
 
 
 def test_unpadded_content_dims():
-    config = {'output_image_size': [256, 256]}
+    config = {'max_size': 256}
     norm = NormalizerAndPadder(config, profile_path=None)
 
     # Image already at target size → no padding
@@ -215,7 +215,6 @@ def test_transform_orchestrator_e2e():
                     'max_size': 256,
                     'annotation_type': 'raycast',
                     'patching_overlap_pct': 0.10,
-                    'output_image_size': [256, 256],
                 }
 
         orchestrator = TransformOrchestrator(MockConfig(), str(ingested_dir), str(output_dir))

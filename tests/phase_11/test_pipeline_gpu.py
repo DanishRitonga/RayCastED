@@ -41,7 +41,8 @@ def _write_puma_only_config(tmp_dir: str) -> str:
     config = {
         'global_settings': {
             'root_dir': PUMA_DATA_ROOT,
-            'output_image_size': [1024, 1024],
+            'max_size': 1024,
+            'crop_size': 640,
             'output_mpp': 0.25,
             'patching_overlap_pct': 10,
             'annotation_type': 'raycast',

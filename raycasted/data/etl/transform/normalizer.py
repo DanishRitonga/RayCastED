@@ -13,7 +13,7 @@ class NormalizerAndPadder:
     """
 
     def __init__(self, config: dict[str, Any], profile_path: str | None = None):
-        self.target_size = config.get('output_image_size', [256, 256])[0]
+        self.target_size = config.get('max_size', 1024)
 
         # Load the Population Profile
         self.use_normalization = False

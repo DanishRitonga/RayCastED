@@ -75,7 +75,7 @@ All stages share a single array format — no conversion between ETL and model:
 
 Collated batch format adds a leading `batch_idx` column: shape `(sum_M, 36)`.
 
-Normalisation (divide by `crop_size=640`) happens **only** in `RayCastTileDataset._normalise()`. Denormalisation at inference must use `crop_size` read from `model.training_args['crop_size']` — never hardcoded.
+Normalisation (divide by `crop_size`, default 640, configured in ETL YAML `global_settings.crop_size`) happens **only** in `RayCastTileDataset._normalise()`. Denormalisation at inference must use `crop_size` read from `model.training_args['crop_size']` — never hardcoded.
 
 ### .npz schema
 
@@ -143,3 +143,9 @@ These tests from `docs/project.md §21` require a GPU to run. All other unchecke
 - **AMP dtype mismatch in `RayCastAssigner.select_candidates_in_gts`**: `torch.cdist` fails when `gt_xy` is float16 (AMP autocast) and `xy_centers` is float32. Fix: cast both to `.float()` before `cdist`. (`raycasted/model/tal.py:131`)
 - **AMP dtype mismatch in `RayCastAssigner.get_box_metrics`**: IoU tensor is float16 under AMP but `overlaps` output is float32. Fix: `.to(overlaps.dtype)` before assignment. (`raycasted/model/tal.py:210-212`)
 - **Ignore class reaching loss**: `RayCastTileDataset` did not filter `class_id=255` (Ignore) annotations, causing index-out-of-bounds when the assigner used 255 as a class index into `pd_scores` (nc=5). Fix: filter `annotations[:, 0] != 255` in `__getitem__`. (`raycasted/data/etl/loader/raycast_dataset.py:60-62`)
+- **`plot_images` thread crash**: Ultralytics' `plot_images()` expects 4-dim bboxes but but converts via `xywh2xyxy()`, which fails on 34-dim polygon data. Non-fatal background thread errors. Override `plot_training_labels()` as no-op in `RayCastTrainer`. (`raycasted/model/train.py:149`)
+- **`nt_per_class` NoneType on epoch 1**: `RayCastDetMetrics.process()` early-return path did not setting `nt_per_class` when there are no valid predictions (untrained model). Fix: set `nt_per_class`/`nt_per_image` to zeros in early return. (`raycasted/model/val.py:117-120`)
+- **`cls.shape[0]` IndexError**: `.squeeze(-1)` on single-element `cls` tensor produces 0-dim scalar. Fix: `.flatten()` instead. (`raycasted/model/val.py:264`)
+- **`no labels found` warning on epoch 1**: Ultralytics' `DetectionValidator.print_results()` warns when `nt_per_class.sum() == 0` (untrained model, all-zero metrics). Harmless — resolves after a few epochs. Not a bug. (`ultralytics/models/yolo/detect/val.py:258-259`)
+- **Bias init in stride-space instead of normalised space**: `RayCastDetect.bias_init()` computed ray biases as `log(exp(target_px / stride) - 1)`, producing predictions ~94× too large in normalised space (softplus output ~2.17 vs target ~0.023). This caused near-zero regression and classification losses at training start. Fix: compute as `log(exp(target_px / crop_size) - 1)`. `bias_init` now accepts `crop_size` parameter; trainer re-calls it in `set_model_attributes()` with the actual `imgsz`. (`raycasted/model/head.py:155`, `raycasted/model/train.py:277`)
+- **`output_image_size` / `max_size` unification**: ETL config had two independent size fields (`output_image_size` for NormalizerAndPadder, `max_size` for SpatialChunker) plus a third hardcoded `crop_size` in the trainer. Replaced with two validated Pydantic fields: `max_size` (ETL tile size) and `crop_size` (model input size). Pipeline defaults `imgsz` from config's `crop_size`. (`raycasted/data/etl/utils/config.py:36-53`)

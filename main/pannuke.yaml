@@ -1,6 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
-  output_image_size: [256, 256]
+  max_size: 256
+  crop_size: 640
   output_mpp: 0.25
   patching_overlap_pct: 0
   annotation_type: "raycast"
