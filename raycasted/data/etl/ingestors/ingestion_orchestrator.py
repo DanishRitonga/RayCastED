@@ -132,6 +132,10 @@ class IngestionOrchestrator:
 
         Datasets are processed sequentially, but rows within a dataset
         are processed in parallel when workers > 1.
+
+        ParquetIngestor (method 1) handles its own internal parallelism
+        across ROIs within each parquet file, so rows (folds) are always
+        processed sequentially to avoid nested process pools.
         """
         merged_config = self.config.get_dataset_config(dataset_name)
 
@@ -143,7 +147,9 @@ class IngestionOrchestrator:
             )
 
         ingestor_cls = DISPATCH_MAP[method]
-        ingestor = ingestor_cls(merged_config)
+
+        # ParquetIngestor accepts workers for internal ROI-level parallelism
+        ingestor = ingestor_cls(merged_config, workers=self.workers) if method == 1 else ingestor_cls(merged_config)
 
         registry = ingestor.get_registry()
         if registry.is_empty():
@@ -155,7 +161,9 @@ class IngestionOrchestrator:
 
         rows = list(registry.iter_rows(named=True))
 
-        if self.workers == 1:
+        # ParquetIngestor parallelizes internally — always process its rows sequentially.
+        # Other ingestors: each row is a single ROI, parallelize at the row level.
+        if method == 1 or self.workers == 1:
             stats = self._process_rows_sequential(dataset_name, ingestor, rows, total)
         else:
             stats = self._process_rows_parallel(dataset_name, merged_config, method, rows, total)
