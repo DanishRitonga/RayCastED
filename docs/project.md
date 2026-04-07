@@ -1488,7 +1488,7 @@ No manual wiring is needed beyond passing `loss_fn=RayCastDetectionLoss` to `sup
 
 ### 17.5 DataLoader Integration
 
-Override `build_dataset()` to use `RayCastTileDataset`:
+Override `build_dataset()` to use `RayCastTileDataset`. `get_dataloader()` returns `InfiniteDataLoader` (not plain `torch.utils.data.DataLoader`) — Ultralytics' `_do_train` calls `self.train_loader.reset()` after training, which requires `InfiniteDataLoader`:
 
 ```python
 def build_dataset(self, img_path, mode='train', batch=None):
@@ -1712,6 +1712,7 @@ Pipeline control:
   --stage {all,ingest,transform,train}
                       Pipeline stage to run (default: all)
   --dataset NAME      Restrict ingestion to a single dataset
+  --ingest-workers N  Parallel ingestion workers per dataset (default: os.cpu_count()-1)
 
 Training overrides:
   --model YAML        Model architecture (default: yolo11n.yaml)
