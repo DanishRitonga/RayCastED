@@ -12,6 +12,7 @@ Each .npz contains:
 """
 
 import collections
+import os
 import re
 from collections.abc import Generator
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -106,12 +107,12 @@ class IngestionOrchestrator:
         orchestrator.run()
     """
 
-    def __init__(self, config_path: str, output_dir: str | None = None, workers: int = 1):
+    def __init__(self, config_path: str, output_dir: str | None = None, workers: int | None = None):
         self.config = ETLConfig(config_path)
         if output_dir is None:
             raise ValueError('output_dir is required — specify where .npz files should be written.')
         self.output_dir = Path(output_dir)
-        self.workers = max(1, workers)
+        self.workers = max(1, workers if workers is not None else (os.cpu_count() or 1) - 1)
 
     def run(self, dataset_name: str | None = None) -> None:
         """Run ingestion for one or all datasets.

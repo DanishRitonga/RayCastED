@@ -50,7 +50,7 @@ class RayCastPipeline:
         config_path: str,
         output_dir: str,
         training_overrides: dict | None = None,
-        ingest_workers: int = 1,
+        ingest_workers: int | None = None,
     ):
         self.config = ETLConfig(config_path)
         self.output_dir = Path(output_dir)
@@ -235,7 +235,10 @@ def main():  # noqa: D103
     )
     parser.add_argument('--dataset', default=None, help='Restrict ingestion to a single dataset')
     parser.add_argument(
-        '--ingest-workers', type=int, default=1, help='Parallel ingestion workers per dataset (default: 1)'
+        '--ingest-workers',
+        type=int,
+        default=None,
+        help='Parallel ingestion workers per dataset (default: os.cpu_count()-1)',
     )
 
     # Training overrides
