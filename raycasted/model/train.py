@@ -23,7 +23,7 @@ import copy
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from ultralytics.data.build import InfiniteDataLoader
 from ultralytics.models.yolo.detect.train import DetectionTrainer
 from ultralytics.utils import DEFAULT_CFG
 
@@ -231,7 +231,7 @@ class RayCastTrainer(DetectionTrainer):
         """
         assert mode in {'train', 'val'}, f"Mode must be 'train' or 'val', not {mode}"
         dataset = self.build_dataset(dataset_path, mode, batch_size)
-        return DataLoader(
+        return InfiniteDataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=(mode == 'train'),
