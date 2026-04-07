@@ -45,12 +45,19 @@ class RayCastPipeline:
         transformed_dir: Stage 2 output (tiles organised by train/val split).
     """
 
-    def __init__(self, config_path: str, output_dir: str, training_overrides: dict | None = None):
+    def __init__(
+        self,
+        config_path: str,
+        output_dir: str,
+        training_overrides: dict | None = None,
+        ingest_workers: int = 1,
+    ):
         self.config = ETLConfig(config_path)
         self.output_dir = Path(output_dir)
         self.ingested_dir = self.output_dir / 'ingested'
         self.transformed_dir = self.output_dir / 'transformed'
         self.training_overrides = training_overrides or {}
+        self.ingest_workers = ingest_workers
         # Default imgsz to crop_size from ETL config unless explicitly overridden
         if 'imgsz' not in self.training_overrides:
             self.training_overrides['imgsz'] = self.config.global_settings.get('crop_size', 640)
@@ -81,6 +88,7 @@ class RayCastPipeline:
         orch = IngestionOrchestrator(
             config_path=str(self.config.config_path),
             output_dir=str(self.ingested_dir),
+            workers=self.ingest_workers,
         )
         orch.run(dataset)
         print(f'Ingestion output: {self.ingested_dir}')
@@ -226,6 +234,9 @@ def main():  # noqa: D103
         help='Pipeline stage to run (default: all)',
     )
     parser.add_argument('--dataset', default=None, help='Restrict ingestion to a single dataset')
+    parser.add_argument(
+        '--ingest-workers', type=int, default=1, help='Parallel ingestion workers per dataset (default: 1)'
+    )
 
     # Training overrides
     parser.add_argument('--model', default='yolo26s.yaml', help='Model architecture YAML')
@@ -265,6 +276,7 @@ def main():  # noqa: D103
         config_path=args.config,
         output_dir=args.output,
         training_overrides=training_overrides,
+        ingest_workers=args.ingest_workers,
     )
     pipeline.run(stage=args.stage, dataset=args.dataset)
 
