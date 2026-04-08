@@ -156,6 +156,19 @@ class RayCastValidator(DetectionValidator):
         self.centroid_thresholds = [6.0, 8.0, 10.0]  # px, LSP-DETR comparability
         self.n_centroid = len(self.centroid_thresholds)
 
+    def preprocess(self, batch):
+        """Move batch to device without /255 — images already normalised by RayCastTileDataset.
+
+        Parent DetectionValidator.preprocess divides by 255, but our dataset
+        already returns float32 images in [0, 1]. Double-normalising produces
+        near-zero inputs that kill all predictions, causing mAP collapse.
+        """
+        for k, v in batch.items():
+            if isinstance(v, torch.Tensor):
+                batch[k] = v.to(self.device, non_blocking=self.device.type == 'cuda')
+        batch['img'] = batch['img'].half() if self.args.half else batch['img'].float()
+        return batch
+
     def init_metrics(self, model):
         """Initialize validation metrics for polygon detection."""
         self.names = model.names
