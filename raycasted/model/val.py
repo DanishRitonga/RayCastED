@@ -363,3 +363,6 @@ class RayCastValidator(DetectionValidator):
 
     def plot_predictions(self, batch, preds, ni):
         """Skip standard bbox prediction plotting — incompatible with 34-dim polygon data."""
+
+    def plot_val_samples(self, batch, ni):
+        """Skip standard bbox val sample plotting — incompatible with 34-dim polygon data."""

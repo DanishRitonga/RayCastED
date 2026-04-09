@@ -87,6 +87,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
     def decode_pred_xy(xy_raw, anchor_points, stride_tensor, imgsz):
         """Decode grid-cell-relative Sigmoid offsets to absolute normalised coordinates.
 
+        Must match the inference decode in RayCastDetect._inference:
+            xy_abs = (xy_offset * 2.0 - 0.5 + anchors) * strides
+
         Args:
             xy_raw:        [B, N_anchors, 2] — raw head output (pre-sigmoid)
             anchor_points: [N_anchors, 2] — grid cell positions (from make_anchors)
@@ -94,10 +97,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
             imgsz:         [H, W] — image size in pixels
 
         Returns:
-            xy_norm: [B, N_anchors, 2] — absolute normalised coords in [0, 1]
+            xy_norm: [B, N_anchors, 2] — absolute normalised coords
         """
         xy_offset = xy_raw.sigmoid()  # cell-relative offset in [0, 1]
-        xy_pixel = (anchor_points + xy_offset) * stride_tensor  # pixel space
+        xy_pixel = (xy_offset * 2.0 - 0.5 + anchor_points) * stride_tensor  # pixel space
         return xy_pixel / imgsz[[1, 0]]  # normalise
 
     def get_assigned_targets_and_loss(self, preds, batch):

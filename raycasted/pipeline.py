@@ -62,6 +62,10 @@ class RayCastPipeline:
         if 'imgsz' not in self.training_overrides:
             self.training_overrides['imgsz'] = self.config.global_settings.get('crop_size', 640)
 
+        # Default project to output_dir so training results land under --output, not runs/
+        if 'project' not in self.training_overrides:
+            self.training_overrides['project'] = str(self.output_dir.resolve())
+
     def run(self, stage: str = 'all', dataset: str | None = None) -> None:
         """Run pipeline stages up to and including the specified one.
 
