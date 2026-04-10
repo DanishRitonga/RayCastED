@@ -149,7 +149,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         target_scores_sum = max(target_scores.sum(), 1)
 
         # --- L_cls (term 1) ---
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum
+        # Cast to float32 for numerical stability under AMP/FP16 validation
+        loss[1] = self.bce(pred_scores.float(), target_scores.float()).sum() / target_scores_sum
 
         # --- Polygon regression losses (foreground only) ---
         if fg_mask.sum():
@@ -160,6 +161,13 @@ class RayCastDetectionLoss(v8DetectionLoss):
             fg_target_xy = target_bboxes[fg_mask][:, :2]  # [N_fg, 2]
             fg_target_rays = target_bboxes[fg_mask][:, 2:]  # [N_fg, 32]
 
+            # Cast to float32 for numerical stability under AMP/FP16 validation
+            fg_pred_xy = fg_pred_xy.float()
+            fg_target_xy = fg_target_xy.float()
+            fg_pred_rays = fg_pred_rays.float()
+            fg_target_rays = fg_target_rays.float()
+            weight = weight.float()
+
             # L_xy: Huber on decoded centroid
             loss_xy = F.huber_loss(fg_pred_xy, fg_target_xy, reduction='none', delta=0.01).mean(-1)
             loss[0] = (loss_xy.unsqueeze(-1) * weight).sum() / target_scores_sum
@@ -169,12 +177,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[2] = (loss_l1.unsqueeze(-1) * weight).sum() / target_scores_sum
 
             # L_PolarIoU: 1 - PolarIoU
-            fg_piou = polar_iou_torch(fg_pred_rays, fg_target_rays)  # [N_fg]
+            fg_piou = polar_iou_torch(fg_pred_rays, fg_target_rays)  # [N_fg] (already float32)
             loss_piou = 1.0 - fg_piou
             loss[3] = (loss_piou * weight.squeeze(-1)).sum() / target_scores_sum
 
             # L_smooth: Angular smoothness on predicted rays
-            fg_smooth = angular_smoothness_loss_torch(fg_pred_rays)  # [N_fg]
+            fg_smooth = angular_smoothness_loss_torch(fg_pred_rays)  # [N_fg] (already float32)
             loss[4] = (fg_smooth * weight.squeeze(-1)).sum() / target_scores_sum
         else:
             # DDP safety — touch all prediction tensors to avoid unused-gradient errors
