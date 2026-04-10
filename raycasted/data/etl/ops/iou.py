@@ -102,6 +102,11 @@ def polar_iou_torch(d_pred, d_gt, eps=POLAR_IOU_EPS):
     """
     import torch
 
+    # Cast to float32 — POLAR_IOU_EPS (1e-7) underflows to 0 in float16,
+    # causing NaN during AMP validation where model runs in half precision.
+    d_pred = d_pred.float()
+    d_gt = d_gt.float()
+
     pred_sq = d_pred ** 2
     gt_sq = d_gt ** 2
 
@@ -127,6 +132,10 @@ def polar_iou_pairwise_flat_torch(d_pred, d_gt, eps=POLAR_IOU_EPS):
         iou_matrix: Tensor of shape (N_cand, N_gt)
     """
     import torch
+
+    # Cast to float32 — same reason as polar_iou_torch.
+    d_pred = d_pred.float()
+    d_gt = d_gt.float()
 
     pred_sq = d_pred ** 2  # (N_cand, N_gt, 32)
     gt_sq = d_gt ** 2      # (N_cand, N_gt, 32)
