@@ -162,11 +162,12 @@ class RayCastAssigner(TaskAlignedAssigner):
         """
         na = pd_bboxes.shape[-2]
         mask_gt_bool = mask_gt.bool()  # (B, N_gt, N_anchors)
-        # Force float32 — under AMP/FP16 validation, overlaps must stay float32
-        # because the parent TaskAlignedAssigner._forward normalisation uses
-        # self.eps=1e-9 which underflows to 0 in float16, causing NaN.
+        # Force overlaps to float32 — under AMP/FP16 validation, the parent
+        # TaskAlignedAssigner._forward normalisation uses self.eps=1e-9 which
+        # underflows to 0 in float16, causing NaN. bbox_scores can stay as-is
+        # (PyTorch upcasts automatically in align_metric = scores^α * overlaps^β).
         overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=torch.float32, device=pd_bboxes.device)
-        bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=torch.float32, device=pd_scores.device)
+        bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
 
         # --- Classification scores (same logic as parent, not memory-intensive) ---
         ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)
