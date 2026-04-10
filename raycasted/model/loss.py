@@ -205,6 +205,25 @@ class RayCastDetectionLoss(v8DetectionLoss):
         )
 
 
+# Temporary NaN debug — remove after fixing
+import sys as _sys
+_orig_get_assigned = RayCastDetectionLoss.get_assigned_targets_and_loss
+
+
+def _debug_get_assigned(self, preds, batch):
+    result = _orig_get_assigned(self, preds, batch)
+    loss_detach = result[2]
+    if loss_detach.isnan().any():
+        print(f"[NaN-DEBUG] loss_detach has NaN: {loss_detach.tolist()}", file=_sys.stderr)
+        print(f"[NaN-DEBUG] loss (before detach): {result[1].tolist()}", file=_sys.stderr)
+    else:
+        print(f"[NaN-DEBUG] loss_detach OK: {[f'{v:.6f}' for v in loss_detach.tolist()]}", file=_sys.stderr)
+    return result
+
+
+RayCastDetectionLoss.get_assigned_targets_and_loss = _debug_get_assigned
+
+
 class RayCastE2ELoss(E2ELoss):
     """E2E dual-assignment loss with smoothness annealing.
 
