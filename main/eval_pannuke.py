@@ -63,23 +63,15 @@ def run_inference(model, dataloader, device, conf_threshold=0.25):
     results = []
     training_args = getattr(model, 'training_args', {})
     crop_size = training_args.get('crop_size', 640)
-    head = model.model[-1]
 
     with torch.no_grad():
         for _batch_idx, batch in enumerate(dataloader):
             images = batch['img'].to(device)
 
-            # Forward pass
+            # Forward pass — model(images) returns (decoded_preds, training_dict)
+            # decoded_preds is already [B, max_det, 36] with [cx, cy, d1..d32, score, cls]
             raw_out = model(images)
-
-            # Get training dict from model output
-            training_preds = raw_out[1] if isinstance(raw_out, tuple) else raw_out
-
-            # Run inference decode via head
-            o2o_preds = training_preds.get('one2one', training_preds)
-            decoded = head._inference(o2o_preds)
-            if head.end2end:
-                decoded = head.postprocess(decoded.permute(0, 2, 1))
+            decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
 
             batch_size = images.shape[0]
 
