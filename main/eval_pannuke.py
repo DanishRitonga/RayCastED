@@ -33,6 +33,7 @@ from raycasted.model.metrics import (
     compute_aji,
     compute_pq,
     polygons_to_masks,
+    resolve_mask_overlaps,
 )
 from raycasted.model.register import register_raycast_head
 
@@ -326,7 +327,7 @@ def main():
     parser.add_argument('--output', default=None, help='Output dir (required with --config)')
     parser.add_argument('--batch', type=int, default=16, help='Batch size')
     parser.add_argument('--device', default='0', help='Device (cpu, 0, 0,1)')
-    parser.add_argument('--conf', type=float, default=0.25, help='Confidence threshold')
+    parser.add_argument('--conf', type=float, default=0.001, help='Confidence threshold')
     parser.add_argument('--workers', type=int, default=8, help='DataLoader workers')
     parser.add_argument('--debug', action='store_true', help='Print diagnostic info for first 10 images')
     args = parser.parse_args()
@@ -404,6 +405,9 @@ def main():
         gt_masks = polygons_to_masks(r['gt_polys'], imgsz, imgsz) if r['gt_polys'].shape[0] > 0 else []
         # Predicted masks
         pred_masks = polygons_to_masks(r['pred_polys'], imgsz, imgsz) if r['pred_polys'].shape[0] > 0 else []
+        # Resolve overlaps (largest-first priority, matching LSP-DETR)
+        if pred_masks:
+            pred_masks = resolve_mask_overlaps(pred_masks)
 
         if args.debug and len(debug_printed) < 10 and len(gt_masks) > 0 and len(pred_masks) > 0:
             debug_printed.append(True)

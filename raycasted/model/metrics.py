@@ -176,6 +176,38 @@ def compute_pq(
     return float(pq), float(sq), float(dq)
 
 
+def resolve_mask_overlaps(masks: list[np.ndarray]) -> list[np.ndarray]:
+    """Resolve overlapping masks using largest-first priority.
+
+    Processes masks from largest area to smallest. Each pixel is assigned to
+    the largest mask that covers it, removing it from smaller overlapping masks.
+    This matches LSP-DETR's post-processing for fair comparison.
+
+    Args:
+        masks: List of [H, W] uint8 binary masks.
+
+    Returns:
+        List of [H, W] uint8 binary masks with overlaps resolved.
+    """
+    if len(masks) == 0:
+        return masks
+
+    n = len(masks)
+    h, w = masks[0].shape
+    stack = np.stack(masks)  # (N, H, W)
+    areas = stack.sum(axis=(1, 2))
+    sorted_indices = np.argsort(-areas)  # largest first
+
+    occupied = np.zeros((h, w), dtype=bool)
+    resolved = [np.zeros((h, w), dtype=np.uint8) for _ in range(n)]
+
+    for idx in sorted_indices:
+        resolved[idx] = stack[idx] & ~occupied
+        occupied |= resolved[idx].astype(bool)
+
+    return resolved
+
+
 def polygons_to_masks(
     detections: np.ndarray,
     img_h: int,
