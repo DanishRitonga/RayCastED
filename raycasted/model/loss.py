@@ -52,7 +52,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # Loss weights
         self.lambda_cls = 0.5
-        self.lambda_xy = 1.0
+        self.lambda_xy = 50.0  # Huber on normalised coords produces small gradients.
+        # Without high lambda, the optimizer ignores centroid accuracy in favor of
+        # shape losses (PIoU ~100x larger). Was 1.0 — caused centroid collapse.
         self.lambda_l1 = 1.0
         self.lambda_piou = 2.0
         self.lambda_smooth = 0.05  # annealed by RayCastE2ELoss
@@ -169,7 +171,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
             weight = weight.float()
 
             # L_xy: Huber on decoded centroid
-            loss_xy = F.huber_loss(fg_pred_xy, fg_target_xy, reduction='none', delta=0.01).mean(-1)
+            # delta=1.0 so that errors up to 1.0 (full image width) use L2 (quadratic)
+            # and larger errors use L1 (linear). Previous delta=0.01 was far too small
+            # for normalised coordinates, producing near-zero gradients.
+            loss_xy = F.huber_loss(fg_pred_xy, fg_target_xy, reduction='none', delta=1.0).mean(-1)
             loss[0] = (loss_xy.unsqueeze(-1) * weight).sum() / target_scores_sum
 
             # L_L1: Uniform MAE on 32 rays
