@@ -37,9 +37,10 @@ from raycasted.model.register import register_raycast_head
 def load_model(weights_path: str, device: torch.device):
     """Load trained RayCastED model from checkpoint."""
     register_raycast_head()
-    model = torch.load(weights_path, map_location=device, weights_only=False)
-    if hasattr(model, 'float'):
-        model = model.float()
+    ckpt = torch.load(weights_path, map_location=device, weights_only=False)
+    # Ultralytics saves a dict with 'model', 'train_args', etc.
+    model = ckpt['model'] if isinstance(ckpt, dict) else ckpt
+    model = model.float().to(device)
     model.eval()
     return model
 
