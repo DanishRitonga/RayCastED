@@ -460,21 +460,9 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     params_m = n_params / 1e6
 
-    # FLOPs from model_info
+    # GFLOPs — model_info returns (n_layers, n_params, n_grads, gflops)
     try:
-        import io
-        import sys
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        model_info(model, imgsz=crop_size, verbose=True)
-        info_str = sys.stdout.getvalue()
-        sys.stdout = old_stdout
-        # Extract GFLOPs from output
-        gflops = 0.0
-        for line in info_str.split('\n'):
-            if 'GFLOPs' in line:
-                gflops = float(line.split('GFLOPs')[0].strip().split()[-1])
-                break
+        _, _, _, gflops = model_info(model, imgsz=crop_size, verbose=False)
     except Exception:
         gflops = 0.0
 
