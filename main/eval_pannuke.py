@@ -309,6 +309,7 @@ def main():
     parser.add_argument('--device', default='0', help='Device (cpu, 0, 0,1)')
     parser.add_argument('--conf', type=float, default=0.25, help='Confidence threshold')
     parser.add_argument('--workers', type=int, default=8, help='DataLoader workers')
+    parser.add_argument('--debug', action='store_true', help='Print diagnostic info for first 10 images')
     args = parser.parse_args()
 
     # Resolve data directory
@@ -376,6 +377,7 @@ def main():
     pq_scores = []
     sq_scores = []
     dq_scores = []
+    debug_printed = []
 
     for r in results:
         imgsz = r['imgsz']
@@ -383,6 +385,25 @@ def main():
         gt_masks = polygons_to_masks(r['gt_polys'], imgsz, imgsz) if r['gt_polys'].shape[0] > 0 else []
         # Predicted masks
         pred_masks = polygons_to_masks(r['pred_polys'], imgsz, imgsz) if r['pred_polys'].shape[0] > 0 else []
+
+        if args.debug and len(debug_printed) < 10 and len(gt_masks) > 0 and len(pred_masks) > 0:
+            debug_printed.append(True)
+            gt_areas = [m.sum() for m in gt_masks[:3]]
+            pred_areas = [m.sum() for m in pred_masks[:3]]
+            n_gt = r['gt_polys'].shape[0]
+            n_pred = r['pred_polys'].shape[0]
+            print(f'  Image {len(debug_printed)}: GT={n_gt}, pred={n_pred}')
+            gt0 = r['gt_polys'][0]
+            gt_ray_min = gt0[2:].min()
+            gt_ray_max = gt0[2:].max()
+            print(f'    GT[0] cx,cy={gt0[:2]}, rays=[{gt_ray_min:.1f}, {gt_ray_max:.1f}]')
+            print(f'    GT mask areas (first 3): {gt_areas}')
+            if len(pred_masks) > 0:
+                p0 = r['pred_polys'][0]
+                p_ray_min = p0[2:].min()
+                p_ray_max = p0[2:].max()
+                print(f'    Pred[0] cx,cy={p0[:2]}, rays=[{p_ray_min:.1f}, {p_ray_max:.1f}]')
+                print(f'    Pred mask areas (first 3): {pred_areas}')
 
         aji_scores.append(compute_aji(pred_masks, gt_masks))
         pq, sq, dq = compute_pq(pred_masks, gt_masks)
