@@ -246,7 +246,13 @@ def main():  # noqa: D103
     )
 
     # Training overrides
-    parser.add_argument('--model', default='yolo26s.yaml', help='Model architecture YAML')
+    parser.add_argument('--model', default=None, help='Model architecture YAML (overrides --variant)')
+    parser.add_argument(
+        '--variant',
+        default='s',
+        choices=['n', 's', 'm', 'l', 'x'],
+        help='YOLO26 variant: n=2.6M, s=10M, m=22M, l=26M, x=59M params (default: s)',
+    )
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch', type=int, default=16, help='Batch size')
     parser.add_argument('--imgsz', type=int, default=None, help='Input image size (default: from config crop_size)')
@@ -258,9 +264,22 @@ def main():  # noqa: D103
 
     args = parser.parse_args()
 
+    # Read variant from config if not overridden by CLI
+    variant = args.variant
+    if args.model is None:
+        try:
+            import yaml as _yaml
+
+            with open(args.config) as f:
+                cfg = _yaml.safe_load(f)
+            variant = cfg.get('global_settings', {}).get('variant', args.variant)
+        except Exception:
+            pass
+
     # Build training overrides from CLI args
+    model_yaml = args.model if args.model else f'yolo26{variant}.yaml'
     training_overrides = {
-        'model': args.model,
+        'model': model_yaml,
         'optimizer': 'MuSGD',
         'epochs': args.epochs,
         'batch': args.batch,
