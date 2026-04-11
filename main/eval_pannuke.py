@@ -29,8 +29,11 @@ from torch.utils.data import DataLoader
 from ultralytics.utils.torch_utils import model_info
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
-from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
-from raycasted.model.metrics import compute_aji, compute_pq, polygons_to_masks
+from raycasted.model.metrics import (
+    compute_aji,
+    compute_pq,
+    polygons_to_masks,
+)
 from raycasted.model.register import register_raycast_head
 
 
@@ -63,7 +66,7 @@ def run_inference(model, dataloader, device, conf_threshold=0.25):
     head = model.model[-1]
 
     with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
+        for _batch_idx, batch in enumerate(dataloader):
             images = batch['img'].to(device)
 
             # Forward pass
@@ -118,8 +121,36 @@ def run_inference(model, dataloader, device, conf_threshold=0.25):
     return results
 
 
+def _mask_iou_matrix(pred_masks: list[np.ndarray], gt_masks: list[np.ndarray]) -> np.ndarray:
+    """Compute pairwise mask IoU between predictions and GT.
+
+    Args:
+        pred_masks: List of [H, W] uint8 binary masks.
+        gt_masks: List of [H, W] uint8 binary masks.
+
+    Returns:
+        IoU matrix of shape (N_pred, N_gt).
+    """
+    n_pred = len(pred_masks)
+    n_gt = len(gt_masks)
+    if n_pred == 0 or n_gt == 0:
+        return np.zeros((n_pred, n_gt), dtype=np.float64)
+
+    pred_stack = np.stack(pred_masks).reshape(n_pred, -1).astype(np.float64)
+    gt_stack = np.stack(gt_masks).reshape(n_gt, -1).astype(np.float64)
+
+    intersection = pred_stack @ gt_stack.T
+    pred_area = pred_stack.sum(axis=1, keepdims=True)
+    gt_area = gt_stack.sum(axis=1, keepdims=True)
+    union = pred_area + gt_area.T - intersection
+
+    return np.where(union > 0, intersection / union, 0.0)
+
+
 def compute_map_metrics(results, iou_thresholds=None):
-    """Compute mAP at specified IoU thresholds using polar IoU.
+    """Compute mAP at specified IoU thresholds using mask IoU.
+
+    Uses rasterized polygon masks so both centroid and shape contribute to IoU.
 
     Returns:
         dict with mAP, precision, recall at each threshold.
@@ -127,7 +158,6 @@ def compute_map_metrics(results, iou_thresholds=None):
     if iou_thresholds is None:
         iou_thresholds = [0.5, 0.75] + [round(x, 2) for x in np.arange(0.5, 1.0, 0.05)]
 
-    # Collect all predictions and GT per class
     # Collect all predictions and GT per class
     class_set = set()
     for r in results:
@@ -144,7 +174,6 @@ def compute_map_metrics(results, iou_thresholds=None):
             pred_polys = r['pred_polys'][pred_mask]
             pred_confs = r.get('pred_confs', np.ones(len(pred_polys)))
 
-            # Need confidence scores
             n_pred = len(pred_polys)
             n_gt = len(gt_polys)
 
@@ -155,19 +184,17 @@ def compute_map_metrics(results, iou_thresholds=None):
                 per_class_stats[cls_id][t]['n_gt'] += n_gt
 
             if n_pred == 0 or n_gt == 0:
-                # No matches possible
                 for t in iou_thresholds:
-                    per_class_stats[cls_id][t]['conf'].extend([0.0] * n_pred)  # dummy
+                    per_class_stats[cls_id][t]['conf'].extend([0.0] * n_pred)
                     per_class_stats[cls_id][t]['tp'].extend([False] * n_pred)
                     per_class_stats[cls_id][t]['fp'].extend([True] * n_pred)
                 continue
 
-            # Compute pairwise polar IoU
-            pred_rays = torch.from_numpy(pred_polys[:, 2:]).float()
-            gt_rays = torch.from_numpy(gt_polys[:, 2:]).float()
-            pred_exp = pred_rays[:, None, :].expand(n_pred, n_gt, 32)
-            gt_exp = gt_rays[None, :, :].expand(n_pred, n_gt, 32)
-            iou_matrix = polar_iou_pairwise_flat_torch(pred_exp, gt_exp).numpy()
+            # Compute pairwise mask IoU
+            imgsz = r['imgsz']
+            gt_masks = polygons_to_masks(gt_polys, imgsz, imgsz)
+            pred_masks = polygons_to_masks(pred_polys, imgsz, imgsz)
+            iou_matrix = _mask_iou_matrix(pred_masks, gt_masks)
 
             # Greedy matching per threshold
             for t in iou_thresholds:
