@@ -40,6 +40,7 @@ class GlobalSettings(BaseModel):
     output_mpp: float
     patching_overlap_pct: float
     annotation_type: str = 'bbox'
+    n_rays: int = 32
 
     global_cell_map: dict[str, int] = Field(default_factory=dict)
     global_tissue_map: dict[str, int] = Field(default_factory=dict)

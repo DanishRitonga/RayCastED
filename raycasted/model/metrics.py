@@ -216,7 +216,8 @@ def polygons_to_masks(
     """Convert raycast polygon detections to binary masks.
 
     Args:
-        detections: [N, 36] array where each row is [cx, cy, d_1..d_32, score, cls].
+        detections: [N, 2+n_rays] array where each row is [cx, cy, d_1..d_n].
+            Or [N, 4+n_rays] with trailing score/cls columns (ignored).
         img_h: Image height.
         img_w: Image width.
 
@@ -226,6 +227,6 @@ def polygons_to_masks(
     masks = []
     for det in detections:
         cx, cy = det[0], det[1]
-        rays = det[2:34]
+        rays = det[2:]  # all remaining columns are ray distances
         masks.append(polygon_to_mask(cx, cy, rays, img_h, img_w))
     return masks

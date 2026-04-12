@@ -1,6 +1,39 @@
 # RayCastED — Current Status
 
-> Last updated: 2026-04-09
+> Last updated: 2026-04-12
+
+## Evaluation Metrics
+
+PanNuke fold3 evaluation uses `main/eval_pannuke.py`, which computes comprehensive pixel-level and detection metrics using **mask IoU** (not polar IoU):
+
+| Metric | Description | Method |
+|--------|-------------|--------|
+| **AJI** | Aggregated Jaccard Index | Hungarian matching at IoU≥0.5, sums intersection/union over all matched+unmatched |
+| **mAP@0.5** | Mean Average Precision at IoU=0.5 | Mask IoU with greedy matching, per-class AP via all-point interpolation |
+| **mAP@0.75** | Mean Average Precision at IoU=0.75 | Same as above at stricter threshold |
+| **mAP@0.5:0.95** | Mean AP over IoU thresholds 0.50–0.95 (step 0.05) | COCO-style averaged mAP |
+| **PQ** | Panoptic Quality = SQ × DQ | Hungarian matching at IoU≥0.5 |
+| **SQ** | Segmentation Quality | Mean IoU of matched pairs (shape accuracy) |
+| **DQ** | Detection Quality | TP / (TP + 0.5×FP + 0.5×FN), equivalent to F1 |
+| **Precision** | Per-pixel precision at IoU=0.5 | TP / (TP + FP) aggregated across all classes |
+| **Recall** | Per-pixel recall at IoU=0.5 | TP / (TP + FN) aggregated across all classes |
+| **F1** | Harmonic mean of Precision and Recall | 2×P×R / (P+R) |
+| **Params** | Model parameters (M) | Total parameter count |
+| **GFLOPs** | Giga floating-point operations | Via `model_info()` at crop_size resolution |
+| **Inference Time** | ms per image (batch=1) | Warmup 10 batches, then average |
+
+Key differences from training-time metrics:
+- **Training validator** (`RayCastValidator`): uses GPU **Polar IoU** (shape-only, no centroid)
+- **PanNuke eval** (`eval_pannuke.py`): uses **Mask IoU** (rasterized polygons, accounts for centroid + shape)
+- Predicted masks use **overlap resolution** (largest-first priority), matching LSP-DETR's post-processing
+
+```bash
+# Run evaluation
+uv run python main/eval_pannuke.py \
+    --weights train4/weights/best.pt \
+    --data-dir output/pannuke/transformed/test \
+    --batch 16 --device 0 --conf 0.25
+```
 
 ## Training Results
 

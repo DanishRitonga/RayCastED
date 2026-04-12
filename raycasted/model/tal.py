@@ -105,14 +105,15 @@ class RayCastAssigner(TaskAlignedAssigner):
             gt_rays = gt_bboxes[b, valid_idx, 2:]  # (N_valid, 32)
             # --- Compute containment radius per GT (vectorised) ---
             # Sort rays ascending (zeros first)
-            sorted_rays, _ = gt_rays.sort(dim=1)  # (N_valid, 32)
+            sorted_rays, _ = gt_rays.sort(dim=1)  # (N_valid, n_rays)
 
             n_non_zero = (gt_rays > 0).sum(dim=1)  # (N_valid,)
-            n_zero = 32 - n_non_zero
+            n_rays = gt_rays.shape[-1]
+            n_zero = n_rays - n_non_zero
 
             # 75th-percentile index among non-zero rays
             pct75_idx = (n_non_zero.float() * 0.75).long().clamp(min=0)
-            pct75_flat_idx = (n_zero + pct75_idx).clamp(max=31)
+            pct75_flat_idx = (n_zero + pct75_idx).clamp(max=n_rays - 1)
             pct75_radii = sorted_rays.gather(1, pct75_flat_idx.unsqueeze(1)).squeeze(1)
 
             # Fallback: max non-zero ray when < 8 non-zero rays

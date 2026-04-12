@@ -13,7 +13,7 @@ from torch.utils.data import Dataset
 
 from ..ops.augment import flip_horizontal, flip_vertical, rotate_90
 from ..ops.filter import filter_and_clip_annotations
-from ..utils.constants import CX_IDX, CY_IDX, RAY_END_IDX, RAY_START_IDX
+from ..utils import constants as _const
 
 
 class RayCastTileDataset(Dataset):
@@ -87,7 +87,7 @@ class RayCastTileDataset(Dataset):
         content_w = int(data['content_w'])
 
         if annotations is None or len(annotations) == 0:
-            annotations = np.zeros((0, 35), dtype=np.float32)
+            annotations = np.zeros((0, 3 + _const.N_RAYS), dtype=np.float32)
         else:
             # Filter out Ignore class (class_id=255) — these must not reach the loss
             valid_mask = annotations[:, 0] != 255
@@ -182,9 +182,9 @@ class RayCastTileDataset(Dataset):
             return annotations
 
         annotations = annotations.copy()
-        annotations[:, CX_IDX] /= self.crop_size
-        annotations[:, CY_IDX] /= self.crop_size
-        annotations[:, RAY_START_IDX:RAY_END_IDX] /= self.crop_size
+        annotations[:, _const.CX_IDX] /= self.crop_size
+        annotations[:, _const.CY_IDX] /= self.crop_size
+        annotations[:, _const.RAY_START_IDX:_const.RAY_END_IDX] /= self.crop_size
         return annotations
 
     def _validate_batch(self, labels: np.ndarray) -> None:
@@ -195,10 +195,10 @@ class RayCastTileDataset(Dataset):
         if len(labels) == 0:
             return
 
-        rays = labels[:, RAY_START_IDX:RAY_END_IDX]
+        rays = labels[:, _const.RAY_START_IDX:_const.RAY_END_IDX]
         assert rays.max() <= 1.0, f'Ray > 1.0: clipping or normalisation bug (max={rays.max()})'
 
-        cx_cy = labels[:, CX_IDX : CY_IDX + 1]
+        cx_cy = labels[:, _const.CX_IDX : _const.CY_IDX + 1]
         assert cx_cy.min() >= 0.0, f'Centroid < 0: {cx_cy.min()}'
         assert cx_cy.max() <= 1.0, f'Centroid > 1.0: {cx_cy.max()}'
 
@@ -225,6 +225,6 @@ def collate_fn(
         batch_col = torch.full((labels.shape[0], 1), batch_idx, dtype=torch.float32)
         target_list.append(torch.cat([batch_col, torch.from_numpy(labels)], dim=1))
 
-    targets = torch.cat(target_list, dim=0) if target_list else torch.zeros((0, 36), dtype=torch.float32)
+    targets = torch.cat(target_list, dim=0) if target_list else torch.zeros((0, 4 + _const.N_RAYS), dtype=torch.float32)
 
     return images, targets

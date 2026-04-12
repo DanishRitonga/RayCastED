@@ -11,7 +11,7 @@ Uses OpenCV (cv2) for all drawing operations.
 import numpy as np
 
 from raycasted.data.etl.ops.convert import decode_to_vertices
-from raycasted.data.etl.utils.constants import N_RAYS, RAY_COS, RAY_SIN
+from raycasted.data.etl.utils import constants as _const
 
 
 class RayCastAnnotator:
@@ -61,9 +61,9 @@ class RayCastAnnotator:
         polygons = np.asarray(polygons, dtype=np.float64)
         cx = polygons[:, 0]
         cy = polygons[:, 1]
-        rays = polygons[:, 2 : 2 + N_RAYS]
+        rays = polygons[:, 2 : 2 + _const.N_RAYS]
 
-        # Decode to vertices: [N, 32, 2]
+        # Decode to vertices: [N, n_rays, 2]
         vertices = decode_to_vertices(rays, cx, cy)
 
         for i in range(len(polygons)):
@@ -79,9 +79,9 @@ class RayCastAnnotator:
 
             # Optional: draw individual rays
             if self.show_rays:
-                for j in range(N_RAYS):
-                    end_x = int(cx[i] + rays[i, j] * RAY_COS[j])
-                    end_y = int(cy[i] + rays[i, j] * RAY_SIN[j])
+                for j in range(_const.N_RAYS):
+                    end_x = int(cx[i] + rays[i, j] * _const.RAY_COS[j])
+                    end_y = int(cy[i] + rays[i, j] * _const.RAY_SIN[j])
                     cv2.line(self.im, (cx_i, cy_i), (end_x, end_y), self.ray_color, 1, cv2.LINE_AA)
 
     def result(self) -> np.ndarray:

@@ -54,9 +54,8 @@ def run_inference(model, dataloader, device, conf_threshold=0.25):
 
     Returns:
         results: list of dicts, one per image, with keys:
-            'pred_polys': [N_pred, 34] denormalised polygons
-            'gt_polys': [N_gt, 34] denormalised polygons
-            'pred_det': [N_pred, 36] with [cx, cy, d1..d32, score, cls]
+            'pred_polys': [N_pred, raycast_dim] denormalised polygons
+            'gt_polys': [N_gt, raycast_dim] denormalised polygons
             'gt_cls': [N_gt] class labels
             'pred_cls': [N_pred] class labels
             'imgsz': int, tile size
@@ -64,13 +63,14 @@ def run_inference(model, dataloader, device, conf_threshold=0.25):
     results = []
     training_args = getattr(model, 'training_args', {})
     crop_size = training_args.get('crop_size', 640)
+    n_rays = training_args.get('n_rays', 32)
+    raycast_dim = 2 + n_rays
 
     with torch.no_grad():
         for _batch_idx, batch in enumerate(dataloader):
             images = batch['img'].to(device)
 
             # Forward pass — model(images) returns (decoded_preds, training_dict)
-            # decoded_preds is already [B, max_det, 36] with [cx, cy, d1..d32, score, cls]
             raw_out = model(images)
             decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
 
@@ -80,7 +80,7 @@ def run_inference(model, dataloader, device, conf_threshold=0.25):
                 # --- GT ---
                 mask = batch['batch_idx'] == si
                 gt_cls = batch['cls'][mask].numpy().flatten()
-                gt_poly = batch['bboxes'][mask].numpy()  # [N_gt, 34] normalised
+                gt_poly = batch['bboxes'][mask].numpy()  # [N_gt, raycast_dim] normalised
 
                 # Denormalise GT
                 if gt_poly.shape[0] > 0:
@@ -90,17 +90,17 @@ def run_inference(model, dataloader, device, conf_threshold=0.25):
                     gt_poly[:, 2:] *= crop_size
 
                 # --- Predictions ---
-                det = decoded[si].cpu().numpy()  # [max_det, 36] or [N, 36]
+                det = decoded[si].cpu().numpy()  # [max_det, raycast_dim+2]
                 # Filter by confidence
-                if det.ndim == 2 and det.shape[1] == 36:
-                    conf_mask = det[:, 34] > conf_threshold
+                if det.ndim == 2 and det.shape[1] == raycast_dim + 2:
+                    conf_mask = det[:, raycast_dim] > conf_threshold
                     det = det[conf_mask]
 
                 if det.shape[0] > 0:
-                    pred_poly = det[:, :34]  # [N_pred, 34]
-                    pred_cls = det[:, 35].astype(int)
+                    pred_poly = det[:, :raycast_dim]  # [N_pred, raycast_dim]
+                    pred_cls = det[:, raycast_dim + 1].astype(int)
                 else:
-                    pred_poly = np.zeros((0, 34), dtype=np.float32)
+                    pred_poly = np.zeros((0, raycast_dim), dtype=np.float32)
                     pred_cls = np.array([], dtype=int)
 
                 results.append({
@@ -327,7 +327,7 @@ def main():
     parser.add_argument('--output', default=None, help='Output dir (required with --config)')
     parser.add_argument('--batch', type=int, default=16, help='Batch size')
     parser.add_argument('--device', default='0', help='Device (cpu, 0, 0,1)')
-    parser.add_argument('--conf', type=float, default=0.001, help='Confidence threshold')
+    parser.add_argument('--conf', type=float, default=0.25, help='Confidence threshold')
     parser.add_argument('--workers', type=int, default=8, help='DataLoader workers')
     parser.add_argument('--debug', action='store_true', help='Print diagnostic info for first 10 images')
     args = parser.parse_args()
@@ -374,7 +374,8 @@ def main():
     training_args = getattr(model, 'training_args', {})
     crop_size = training_args.get('crop_size', 640)
     nc = training_args.get('nc', 1)
-    print(f'  crop_size={crop_size}, nc={nc}')
+    n_rays = training_args.get('n_rays', 32)
+    print(f'  crop_size={crop_size}, nc={nc}, n_rays={n_rays}')
 
     # Build dataset
     dataset = RayCastTileDataset(data_dir=str(data_dir), crop_size=crop_size, augment=False)
@@ -510,7 +511,7 @@ def _simple_collate(batch):
     if target_list:
         targets = _torch.from_numpy(np.concatenate(target_list, axis=0))
     else:
-        targets = _torch.zeros((0, 36), dtype=_torch.float32)
+        targets = _torch.zeros((0, labels_list[0].shape[1] + 1 if labels_list else 36), dtype=_torch.float32)
 
     return {
         'img': images,

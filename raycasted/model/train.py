@@ -56,7 +56,7 @@ def _raycast_collate_fn(batch: list) -> dict:
         'img':        [B, 3, H, W] float32
         'batch_idx':  [sum_M] float32
         'cls':        [sum_M] float32 (class id)
-        'bboxes':     [sum_M, 34] float32 (cx, cy, d_1..d_32)
+        'bboxes':     [sum_M, raycast_dim] float32 (cx, cy, d_1..d_n)
 
     Args:
         batch: List of (image_tensor, labels_array) tuples from RayCastTileDataset.
@@ -79,7 +79,7 @@ def _raycast_collate_fn(batch: list) -> dict:
     if target_list:
         targets = torch.from_numpy(np.concatenate(target_list, axis=0))
     else:
-        targets = torch.zeros((0, 36), dtype=torch.float32)
+        targets = torch.zeros((0, 4 + 32), dtype=torch.float32)  # batch_idx + cls + raycast_dim
 
     # Metadata required by validator (ori_shape, ratio_pad, im_file)
     ori_shapes = []
@@ -172,7 +172,8 @@ class RayCastTrainer(DetectionTrainer):
         if not isinstance(old_head, RayCastDetect):
             ch = _extract_neck_channels(old_head)
             nc = old_head.nc
-            new_head = RayCastDetect(nc=nc, end2end=True, ch=ch)
+            n_rays = getattr(self.args, 'n_rays', 32)
+            new_head = RayCastDetect(nc=nc, end2end=True, ch=ch, n_rays=n_rays)
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):
                 if hasattr(old_head, attr):
@@ -269,7 +270,7 @@ class RayCastTrainer(DetectionTrainer):
             'crop_size': self.args.imgsz,
             'imgsz': self.args.imgsz,
             'nc': head.nc,
-            'n_rays': 32,
+            'n_rays': head.n_rays,
             'strides': strides,
         }
 

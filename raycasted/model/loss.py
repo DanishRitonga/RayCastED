@@ -36,7 +36,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
     def __init__(self, model, tal_topk: int = 10, tal_topk2: int | None = None):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
-        self.no = m.nc + 34  # BUG-02 fix (parent sets nc + reg_max*4)
+        self.raycast_dim = m.raycast_dim  # 2 + n_rays
+        self.no = m.nc + self.raycast_dim  # BUG-02 fix (parent sets nc + reg_max*4)
         self.use_dfl = False  # DFL not applicable to polygon regression
 
         # Assigner swap — read params from the TaskAlignedAssigner super() just created
@@ -61,10 +62,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
     def preprocess(self, targets, batch_size, scale_tensor=None):
         """Preprocess polygon targets.
 
-        Accepts (N, 36) collated batch targets:
-            [batch_idx, class_id, cx_norm, cy_norm, d_1_norm..d_32_norm]
-        Returns [B, N_gt_max, 35]:
-            [class_id, cx_norm, cy_norm, d_1_norm..d_32_norm]
+        Accepts (N, 4+n_rays) collated batch targets:
+            [batch_idx, class_id, cx_norm, cy_norm, d_1_norm..d_n_norm]
+        Returns [B, N_gt_max, 3+n_rays]:
+            [class_id, cx_norm, cy_norm, d_1_norm..d_n_norm]
 
         No xywh2xyxy conversion, no scaling — all spatial quantities
         arrive normalised from the DataLoader.
@@ -113,7 +114,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         loss = torch.zeros(5, device=self.device)  # [xy, cls, L1, piou, smooth]
 
         # --- Prediction parsing ---
-        pred_distri = preds['boxes'].permute(0, 2, 1).contiguous()  # [B, N, 34]
+        pred_distri = preds['boxes'].permute(0, 2, 1).contiguous()  # [B, N, raycast_dim]
         pred_scores = preds['scores'].permute(0, 2, 1).contiguous()  # [B, N, nc]
         anchor_points, stride_tensor = make_anchors(preds['feats'], self.stride, 0.5)
 
@@ -122,17 +123,19 @@ class RayCastDetectionLoss(v8DetectionLoss):
         imgsz = torch.tensor(preds['feats'][0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]
 
         # --- Targets ---
-        targets = torch.cat((batch['batch_idx'].view(-1, 1), batch['cls'].view(-1, 1), batch['bboxes']), 1)  # [N, 36]
+        targets = torch.cat(
+            (batch['batch_idx'].view(-1, 1), batch['cls'].view(-1, 1), batch['bboxes']), 1
+        )  # [N, 4+n_rays]
         targets = self.preprocess(targets.to(self.device), batch_size)
-        gt_labels, gt_bboxes = targets.split((1, 34), 2)  # cls:(B,N,1), poly:(B,N,34)
+        gt_labels, gt_bboxes = targets.split((1, self.raycast_dim), 2)  # cls:(B,N,1), poly:(B,N,raycast_dim)
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
 
         # --- Decode predictions ---
         xy_raw = pred_distri[..., :2]  # [B, N, 2]
-        rays_raw = pred_distri[..., 2:]  # [B, N, 32]
+        rays_raw = pred_distri[..., 2:]  # [B, N, n_rays]
         pred_xy = self.decode_pred_xy(xy_raw, anchor_points, stride_tensor, imgsz)
-        pred_rays = F.softplus(rays_raw)  # [B, N, 32]
-        pred_poly = torch.cat([pred_xy, pred_rays], dim=-1)  # [B, N, 34]
+        pred_rays = F.softplus(rays_raw)  # [B, N, n_rays]
+        pred_poly = torch.cat([pred_xy, pred_rays], dim=-1)  # [B, N, raycast_dim]
 
         # --- Normalise anchor points to [0, 1] to match GT space ---
         anchor_points_norm = anchor_points * stride_tensor / imgsz[[1, 0]]
@@ -158,9 +161,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
             weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)  # [N_fg, 1]
 
             fg_pred_xy = pred_xy[fg_mask]  # [N_fg, 2]
-            fg_pred_rays = pred_rays[fg_mask]  # [N_fg, 32]
+            fg_pred_rays = pred_rays[fg_mask]  # [N_fg, n_rays]
             fg_target_xy = target_bboxes[fg_mask][:, :2]  # [N_fg, 2]
-            fg_target_rays = target_bboxes[fg_mask][:, 2:]  # [N_fg, 32]
+            fg_target_rays = target_bboxes[fg_mask][:, 2:]  # [N_fg, n_rays]
 
             # Cast to float32 for numerical stability under AMP/FP16 validation
             fg_pred_xy = fg_pred_xy.float()

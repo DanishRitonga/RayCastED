@@ -12,8 +12,6 @@ from ultralytics.engine.results import Results
 from ultralytics.models.yolo.detect.predict import DetectionPredictor
 from ultralytics.utils import ops
 
-RAYCAST_DIM = 34  # xy(2) + rays(32)
-
 
 class RayCastPredictor(DetectionPredictor):
     """Polygon detection predictor with distance-based dedup.
@@ -24,17 +22,23 @@ class RayCastPredictor(DetectionPredictor):
     head.postprocess() already did top-k selection.
     """
 
+    def setup_model(self, model, verbose=True):
+        """Set up model and derive raycast_dim from head."""
+        super().setup_model(model, verbose)
+        head = self.model.model[-1] if hasattr(self.model, 'model') else self.model
+        self.raycast_dim = getattr(head, 'raycast_dim', 34)
+
     def postprocess(self, preds, img, orig_imgs):
         """Post-process polygon predictions into Results objects.
 
         Args:
             preds: Either [y_tensor, raw_dict] (non-export) or y_tensor (export).
-                y_tensor: [B, max_det, 36] from head.postprocess (end2end).
+                y_tensor: [B, max_det, raycast_dim+2] from head.postprocess (end2end).
             img: [B, C, H, W] preprocessed image tensor.
             orig_imgs: list of original images (H, W, 3).
 
         Returns:
-            list[Results] with polygon data in result.polygons [N, 36].
+            list[Results] with polygon data in result.polygons [N, raycast_dim+2].
         """
         pred_tensor = preds[0] if isinstance(preds, (list, tuple)) else preds
 
@@ -46,34 +50,34 @@ class RayCastPredictor(DetectionPredictor):
 
         results = []
         for i in range(pred_tensor.shape[0]):
-            det = pred_tensor[i]  # [max_det, 36]
-            det = det[det[:, RAYCAST_DIM] > self.args.conf]
+            det = pred_tensor[i]  # [max_det, raycast_dim+2]
+            det = det[det[:, self.raycast_dim] > self.args.conf]
 
             if det.shape[0] == 0:
                 r = Results(orig_imgs[i], path=self.batch[0][i], names=self.model.names)
-                r.polygons = np.zeros((0, RAYCAST_DIM + 2), dtype=np.float32)
+                r.polygons = np.zeros((0, self.raycast_dim + 2), dtype=np.float32)
                 results.append(r)
                 continue
 
             # Scale from letterboxed space to original image space
-            poly = det[:, :RAYCAST_DIM].clone()
+            poly = det[:, :self.raycast_dim].clone()
             poly = self._scale_polygons(poly, img.shape[2:], orig_imgs[i].shape[:2])
-            det = torch.cat([poly, det[:, RAYCAST_DIM:]], dim=1)
+            det = torch.cat([poly, det[:, self.raycast_dim:]], dim=1)
 
             # Distance-based dedup on centroids
-            keep = self._dedup_by_distance(det[:, :2], det[:, RAYCAST_DIM], dedup_radius)
+            keep = self._dedup_by_distance(det[:, :2], det[:, self.raycast_dim], dedup_radius)
             det = det[keep]
 
             # Class filter
             if self.args.classes is not None:
                 cls_mask = torch.tensor(
-                    [int(c.item()) in self.args.classes for c in det[:, RAYCAST_DIM + 1]],
+                    [int(c.item()) in self.args.classes for c in det[:, self.raycast_dim + 1]],
                     device=det.device,
                 )
                 det = det[cls_mask]
 
             r = Results(orig_imgs[i], path=self.batch[0][i], names=self.model.names)
-            r.polygons = det.cpu().numpy()  # [N_det, 36]
+            r.polygons = det.cpu().numpy()  # [N_det, raycast_dim+2]
             results.append(r)
 
         return results
@@ -83,12 +87,12 @@ class RayCastPredictor(DetectionPredictor):
         """Scale polygon predictions from letterboxed to original image space.
 
         Args:
-            poly: [N, 34] — [cx, cy, d_1..d_32] in letterboxed pixel space.
+            poly: [N, raycast_dim] — [cx, cy, d_1..d_n] in letterboxed pixel space.
             img1_shape: (H, W) of the letterboxed image.
             img0_shape: (H, W) of the original image.
 
         Returns:
-            poly: [N, 34] scaled to original image space.
+            poly: [N, raycast_dim] scaled to original image space.
         """
         gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])
         pad_x = round((img1_shape[1] - round(img0_shape[1] * gain)) / 2 - 0.1)

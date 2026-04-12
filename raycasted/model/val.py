@@ -16,6 +16,7 @@ from ultralytics.utils.metrics import DetMetrics, Metric, ap_per_class
 
 from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 
+# Backward compat constant (tests import this). At runtime, use self.raycast_dim.
 RAYCAST_DIM = 34  # xy(2) + rays(32)
 
 
@@ -155,6 +156,7 @@ class RayCastValidator(DetectionValidator):
         self.metrics = RayCastDetMetrics()
         self.centroid_thresholds = [6.0, 8.0, 10.0]  # px, LSP-DETR comparability
         self.n_centroid = len(self.centroid_thresholds)
+        self.raycast_dim = 34  # default; overwritten in init_metrics from model head
 
     def preprocess(self, batch):
         """Move batch to device without /255 — images already normalised by RayCastTileDataset.
@@ -178,6 +180,10 @@ class RayCastValidator(DetectionValidator):
         self.jdict = []
         self.metrics = RayCastDetMetrics(names=model.names)
         self.confusion_matrix = None  # skip — incompatible with polygon format
+        # Derive raycast_dim from model head
+        head = model.model[-1] if hasattr(model, 'model') else model
+        self.raycast_dim = getattr(head, 'raycast_dim', 34)
+        self.n_rays = getattr(head, 'n_rays', 32)
 
     def finalize_metrics(self, *args, **kwargs):
         """Skip confusion matrix plotting — incompatible with 34-dim polygon data."""
@@ -195,13 +201,13 @@ class RayCastValidator(DetectionValidator):
 
         outputs = []
         for i in range(pred_tensor.shape[0]):
-            det = pred_tensor[i]  # [max_det, 36]
-            det = det[det[:, RAYCAST_DIM] > self.args.conf]
+            det = pred_tensor[i]  # [max_det, raycast_dim+2]
+            det = det[det[:, self.raycast_dim] > self.args.conf]
             outputs.append(
                 {
-                    'bboxes': det[:, :RAYCAST_DIM],  # [N, 34] cx, cy, d_1..d_32
-                    'conf': det[:, RAYCAST_DIM],  # [N]
-                    'cls': det[:, RAYCAST_DIM + 1],  # [N]
+                    'bboxes': det[:, :self.raycast_dim],  # [N, raycast_dim] cx, cy, d_1..d_n
+                    'conf': det[:, self.raycast_dim],  # [N]
+                    'cls': det[:, self.raycast_dim + 1],  # [N]
                 }
             )
         return outputs
@@ -267,12 +273,12 @@ class RayCastValidator(DetectionValidator):
             }
 
         # Extract rays from polygon tensors (keep on GPU)
-        pred_rays = preds['bboxes'][:, 2:]  # [N_pred, 32]
-        gt_rays = batch['bboxes'][:, 2:]  # [N_gt, 32]
+        pred_rays = preds['bboxes'][:, 2:]  # [N_pred, n_rays]
+        gt_rays = batch['bboxes'][:, 2:]  # [N_gt, n_rays]
 
         # Expand to pairwise shape for polar IoU on GPU
-        pred_exp = pred_rays[:, None, :].expand(n_pred, n_gt, 32)
-        gt_exp = gt_rays[None, :, :].expand(n_pred, n_gt, 32)
+        pred_exp = pred_rays[:, None, :].expand(n_pred, n_gt, self.n_rays)
+        gt_exp = gt_rays[None, :, :].expand(n_pred, n_gt, self.n_rays)
         iou_matrix = polar_iou_pairwise_flat_torch(pred_exp, gt_exp)  # [N_pred, N_gt]
 
         # Polar IoU true-positive matching (same metric as training loss)

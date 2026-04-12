@@ -11,23 +11,13 @@ import numpy as np
 from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import nearest_points
 
-from ..utils.constants import (
-    CLASS_IDX,
-    CX_IDX,
-    CY_IDX,
-    N_RAYS,
-    RAY_ANGLES,
-    RAY_COS,
-    RAY_END_IDX,
-    RAY_SIN,
-    RAY_START_IDX,
-)
+from ..utils import constants as _const
 
 
 def polygon_to_raycast(
     poly: Polygon,
     class_id: int,
-    n_rays: int = 32,
+    n_rays: int | None = None,
     fallback_counter: collections.Counter | None = None,
 ) -> np.ndarray | None:
     """Convert a Shapely polygon to a raycast annotation row.
@@ -51,6 +41,9 @@ def polygon_to_raycast(
             Increments key 'representative_point_fallback' when triggered.
     """
     import shapely
+
+    if n_rays is None:
+        n_rays = _const.N_RAYS
 
     if poly is None or poly.is_empty or poly.area == 0:
         return None
@@ -80,7 +73,7 @@ def polygon_to_raycast(
     shapely.prepare(poly)  # build spatial index once; ~5x faster per-ray query
     rays = np.zeros(n_rays, dtype=np.float32)
 
-    angles = RAY_ANGLES  # from raycasted.data.etl.utils.constants
+    angles = _const.RAY_ANGLES[:n_rays]  # from raycasted.data.etl.utils.constants
 
     for i, theta in enumerate(angles):
         dx = math.cos(theta) * R_far
@@ -117,11 +110,11 @@ def raycast_to_annotation(
     Returns:
         annotation: Array of shape (35,) — [class_id, cx, cy, d_1, ..., d_32]
     """
-    annotation = np.zeros(35, dtype=np.float32)
-    annotation[CLASS_IDX] = float(class_id)
-    annotation[CX_IDX] = cx
-    annotation[CY_IDX] = cy
-    annotation[RAY_START_IDX:RAY_END_IDX] = rays
+    annotation = np.zeros(3 + _const.N_RAYS, dtype=np.float32)
+    annotation[_const.CLASS_IDX] = float(class_id)
+    annotation[_const.CX_IDX] = cx
+    annotation[_const.CY_IDX] = cy
+    annotation[_const.RAY_START_IDX:_const.RAY_END_IDX] = rays
     return annotation
 
 
@@ -142,8 +135,8 @@ def raycast_to_polygon(
     """
     rays = np.asarray(rays, dtype=np.float64)
 
-    vertex_x = cx + rays * RAY_COS
-    vertex_y = cy + rays * RAY_SIN
+    vertex_x = cx + rays * _const.RAY_COS
+    vertex_y = cy + rays * _const.RAY_SIN
 
     coords = list(zip(vertex_x, vertex_y))
 
@@ -171,8 +164,8 @@ def decode_to_vertices(
     cx = np.asarray(cx, dtype=np.float64)
     cy = np.asarray(cy, dtype=np.float64)
 
-    vertex_x = cx[:, np.newaxis] + rays * RAY_COS[np.newaxis, :]
-    vertex_y = cy[:, np.newaxis] + rays * RAY_SIN[np.newaxis, :]
+    vertex_x = cx[:, np.newaxis] + rays * _const.RAY_COS[np.newaxis, :]
+    vertex_y = cy[:, np.newaxis] + rays * _const.RAY_SIN[np.newaxis, :]
 
     vertices = np.stack([vertex_x, vertex_y], axis=2)
 

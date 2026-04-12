@@ -1,9 +1,9 @@
 """RayCastED — RayCast Detection Head.
 
 Implements the RayRefinementBlock and RayCastDetect head that replaces
-YOLO's bounding-box regression with 34-dim raycast polygon predictions.
+YOLO's bounding-box regression with raycast polygon predictions.
 
-Output format: [xy_offset(2), rays(32)] per anchor.
+Output format: [xy_offset(2), rays(n_rays)] per anchor.
   - xy_offset: Sigmoid-activated, grid-cell-relative, bounded [0, 1]
   - rays: Softplus-activated, strictly positive distances
 
@@ -20,7 +20,9 @@ from ultralytics.nn.modules.conv import Conv
 from ultralytics.nn.modules.head import Detect
 from ultralytics.utils.tal import make_anchors
 
-RAYCAST_DIM = 34  # xy_offset(2) + rays(32)
+# Default raycast dimension for backward compat (tests, export).
+# At runtime, use head.raycast_dim which reflects the actual n_rays parameter.
+RAYCAST_DIM = 34  # xy(2) + rays(32)
 
 
 class RayRefinementBlock(nn.Module):
@@ -47,14 +49,14 @@ class RayCastDetect(Detect):
     """Polygon detection head replacing bounding-box regression with raycast.
 
     Subclasses ultralytics Detect, replacing the cv2 regression branch with:
-        Conv → Conv → RayRefinementBlock → Conv2d(c2, 34, 1)
+        Conv → Conv → RayRefinementBlock → Conv2d(c2, raycast_dim, 1)
 
     DFL is removed entirely. Output activations:
         - Channels 0-1 (xy): Sigmoid (inference only)
-        - Channels 2-33 (rays): Softplus (inference only)
+        - Channels 2..(2+n_rays) (rays): Softplus (inference only)
     """
 
-    def __init__(self, nc: int = 80, reg_max: int = 16, end2end: bool = False, ch: tuple = ()):
+    def __init__(self, nc: int = 80, reg_max: int = 16, end2end: bool = False, ch: tuple = (), n_rays: int = 32):
         """Initialize polygon detection head.
 
         Args:
@@ -62,11 +64,15 @@ class RayCastDetect(Detect):
             reg_max: DFL channels (ignored for polygon head, kept for API compat).
             end2end: Whether to use end-to-end NMS-free detection.
             ch: Tuple of channel sizes from backbone feature maps.
+            n_rays: Number of radial rays for polygon parameterization.
         """
+        self.n_rays = n_rays
+        self.raycast_dim = 2 + n_rays  # xy + rays
+
         super().__init__(nc, reg_max, end2end, ch)
 
-        # BUG-02 fix: override self.no from nc + reg_max*4 to nc + 34
-        self.no = nc + RAYCAST_DIM
+        # BUG-02 fix: override self.no from nc + reg_max*4 to nc + raycast_dim
+        self.no = nc + self.raycast_dim
 
         # Replace cv2 (box regression) with polygon regression stack
         c2 = max(16, ch[0] // 4)
@@ -75,7 +81,7 @@ class RayCastDetect(Detect):
                 Conv(x, c2, 3),
                 Conv(c2, c2, 3),
                 RayRefinementBlock(c2),
-                nn.Conv2d(c2, RAYCAST_DIM, 1),
+                nn.Conv2d(c2, self.raycast_dim, 1),
             )
             for x in ch
         )
@@ -95,13 +101,13 @@ class RayCastDetect(Detect):
     ) -> dict[str, torch.Tensor]:
         """Concatenate polygon predictions and class scores across scales.
 
-        Returns dict with 'boxes' key containing 34-dim polygon logits
+        Returns dict with 'boxes' key containing raycast_dim polygon logits
         and 'scores' key containing class logits.
         """
         if box_head is None or cls_head is None:
             return {}
         bs = x[0].shape[0]
-        poly = torch.cat([box_head[i](x[i]).view(bs, RAYCAST_DIM, -1) for i in range(self.nl)], dim=-1)
+        poly = torch.cat([box_head[i](x[i]).view(bs, self.raycast_dim, -1) for i in range(self.nl)], dim=-1)
         scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
         return dict(boxes=poly, scores=scores, feats=x)
 
@@ -118,7 +124,7 @@ class RayCastDetect(Detect):
             self.anchors, self.strides = (a.transpose(0, 1) for a in make_anchors(x['feats'], self.stride, 0.5))
             self.shape = shape
 
-        poly = x['boxes']  # [B, 34, N_anchors]
+        poly = x['boxes']  # [B, raycast_dim, N_anchors]
         xy_offset = poly[:, :2, :].sigmoid()  # bounded [0, 1]
         rays = F.softplus(poly[:, 2:, :])  # strictly positive
 
@@ -129,7 +135,7 @@ class RayCastDetect(Detect):
         # During training, rays are normalised by crop_size (from DataLoader),
         # so softplus outputs are in [0, ~1]. Multiply by imgsz to get pixels.
         imgsz = torch.tensor(shape[2:], device=poly.device, dtype=poly.dtype) * self.stride[0]
-        rays_abs = rays * imgsz[0]  # [B, 32, N] — pixel-space ray distances
+        rays_abs = rays * imgsz[0]  # [B, n_rays, N] — pixel-space ray distances
 
         dbox = torch.cat([xy_abs, rays_abs], dim=1)
         return torch.cat((dbox, x['scores'].sigmoid()), 1)
@@ -137,26 +143,26 @@ class RayCastDetect(Detect):
     def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
         """Post-process end-to-end polygon predictions with top-k selection.
 
-        Overrides Detect.postprocess() to handle 34-dim polygon vectors
+        Overrides Detect.postprocess() to handle raycast_dim polygon vectors
         instead of 4-dim bboxes. Called by Detect.forward() when end2end=True.
 
         Args:
-            preds: [B, N_anchors, 34+nc] — decoded polygon + class scores.
+            preds: [B, N_anchors, raycast_dim+nc] — decoded polygon + class scores.
 
         Returns:
-            [B, max_det, 34+2] — top-k predictions with format
-            [cx, cy, d_1..d_32, max_score, class_idx] per detection.
+            [B, max_det, raycast_dim+2] — top-k predictions with format
+            [cx, cy, d_1..d_n, max_score, class_idx] per detection.
         """
-        poly, scores = preds.split([RAYCAST_DIM, self.nc], dim=-1)
+        poly, scores = preds.split([self.raycast_dim, self.nc], dim=-1)
         scores, conf, idx = self.get_topk_index(scores, self.max_det)
-        poly = poly.gather(dim=1, index=idx.repeat(1, 1, RAYCAST_DIM))
+        poly = poly.gather(dim=1, index=idx.repeat(1, 1, self.raycast_dim))
         return torch.cat([poly, scores, conf], dim=-1)
 
     def bias_init(self, crop_size: int = 640):
         """Initialize polygon head biases.
 
         XY channels (0-1): bias=2.0 → sigmoid(2.0)≈0.88, encourages initial detections.
-        Ray channels (2-33): calibrated for ~15px radius cells at 0.25 MPP
+        Ray channels (2..2+n_rays): calibrated for ~15px radius cells at 0.25 MPP
             (lymphocytes 7-10μm → 28-40px diameter → radius ≈15px).
             During training, GT rays are normalized by crop_size, so
             softplus(bias) must equal target_px / crop_size.

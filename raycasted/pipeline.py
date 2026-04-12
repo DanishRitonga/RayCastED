@@ -28,6 +28,7 @@ import yaml
 from raycasted.data.etl.ingestors.ingestion_orchestrator import IngestionOrchestrator
 from raycasted.data.etl.transform.transform_orchestrator import TransformOrchestrator
 from raycasted.data.etl.utils.config import ETLConfig
+from raycasted.data.etl.utils.constants import configure_rays
 from raycasted.model.train import RayCastTrainer
 
 
@@ -51,6 +52,7 @@ class RayCastPipeline:
         output_dir: str,
         training_overrides: dict | None = None,
         ingest_workers: int | None = None,
+        n_rays: int | None = None,
     ):
         self.config = ETLConfig(config_path)
         self.output_dir = Path(output_dir)
@@ -58,6 +60,13 @@ class RayCastPipeline:
         self.transformed_dir = self.output_dir / 'transformed'
         self.training_overrides = training_overrides or {}
         self.ingest_workers = ingest_workers
+
+        # Resolve n_rays: CLI > config YAML > default 32
+        if n_rays is None:
+            n_rays = self.config.global_settings.get('n_rays', 32)
+        self.n_rays = n_rays
+        configure_rays(self.n_rays)
+
         # Default imgsz to crop_size from ETL config unless explicitly overridden
         if 'imgsz' not in self.training_overrides:
             self.training_overrides['imgsz'] = self.config.global_settings.get('crop_size', 640)
@@ -171,6 +180,7 @@ class RayCastPipeline:
 
         overrides = {
             'data': yaml_path,
+            'n_rays': self.n_rays,
             **self.training_overrides,
         }
         trainer = RayCastTrainer(overrides=overrides)
@@ -256,6 +266,7 @@ def main():  # noqa: D103
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch', type=int, default=16, help='Batch size')
     parser.add_argument('--imgsz', type=int, default=None, help='Input image size (default: from config crop_size)')
+    parser.add_argument('--n-rays', type=int, default=None, help='Number of radial rays (default: from config or 32)')
     parser.add_argument('--device', default='', help='Device (cpu, 0, 0,1)')
     parser.add_argument('--workers', type=int, default=8, help='DataLoader workers')
     parser.add_argument('--lr0', type=float, default=None, help='Initial learning rate')
@@ -303,6 +314,7 @@ def main():  # noqa: D103
         output_dir=args.output,
         training_overrides=training_overrides,
         ingest_workers=args.ingest_workers,
+        n_rays=args.n_rays,
     )
     pipeline.run(stage=args.stage, dataset=args.dataset)
 

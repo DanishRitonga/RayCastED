@@ -5,7 +5,7 @@ Helper functions for annotation validation and quality monitoring.
 
 import numpy as np
 
-from ..utils.constants import RAY_END_IDX, RAY_START_IDX
+from ..utils import constants as _const
 
 
 def count_zero_rays(annotations: np.ndarray) -> int:
@@ -23,7 +23,7 @@ def count_zero_rays(annotations: np.ndarray) -> int:
     if annotations is None or len(annotations) == 0:
         return 0
 
-    rays = annotations[:, RAY_START_IDX:RAY_END_IDX]
+    rays = annotations[:, _const.RAY_START_IDX:_const.RAY_END_IDX]
     n_zero = np.sum(rays == 0, axis=1)
 
     return int(np.sum(n_zero > 5))
@@ -41,5 +41,7 @@ def validate_annotation_format(annotations: np.ndarray, name: str = 'annotations
     assert annotations is not None, f'{name} is None'
     assert isinstance(annotations, np.ndarray), f'{name} must be numpy array'
     assert annotations.ndim == 2, f'{name} must be 2D, got {annotations.ndim}D'
-    assert annotations.shape[1] == 35, f'{name} must have 35 columns, got {annotations.shape[1]}'
+    assert annotations.shape[1] == 3 + _const.N_RAYS, (
+        f'{name} must have {3 + _const.N_RAYS} columns, got {annotations.shape[1]}'
+    )
     assert annotations.dtype == np.float32, f'{name} must be float32, got {annotations.dtype}'

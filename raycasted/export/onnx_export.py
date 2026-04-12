@@ -17,7 +17,7 @@ import onnxruntime as ort
 import torch
 import torch.nn as nn
 
-from raycasted.data.etl.utils.constants import RAY_COS, RAY_SIN
+from raycasted.data.etl.utils import constants as _const
 
 METADATA_KEYS = [
     'crop_size',
@@ -149,9 +149,9 @@ def export_polygon_yolo_onnx(
         'crop_size': imgsz,
         'imgsz': imgsz,
         'nc': head.nc,
-        'n_rays': 32,
-        'ray_cos': RAY_COS.tolist(),
-        'ray_sin': RAY_SIN.tolist(),
+        'n_rays': head.n_rays,
+        'ray_cos': _const.RAY_COS.tolist(),
+        'ray_sin': _const.RAY_SIN.tolist(),
         'strides': strides,
         'conf_threshold': 0.25,
         'dedup_radius_px': 5,

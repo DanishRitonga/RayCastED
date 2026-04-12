@@ -10,7 +10,11 @@ This module is hardware-independent and can be tested on any machine.
 
 import numpy as np
 
-RAYCAST_DIM = 34  # xy(2) + rays(32)
+# Default ray count — can be overridden via n_rays parameter
+_DEFAULT_N_RAYS = 32
+
+# Backward compat constant (tests, legacy callers)
+RAYCAST_DIM = 2 + _DEFAULT_N_RAYS  # 34
 
 
 def postprocess_raw_output(
@@ -19,6 +23,7 @@ def postprocess_raw_output(
     imgsz: int = 640,
     conf_threshold: float = 0.25,
     dedup_radius_px: float = 5.0,
+    n_rays: int = _DEFAULT_N_RAYS,
 ) -> list[np.ndarray]:
     """Post-process raw ONNX head output to polygon detections.
 
@@ -26,32 +31,34 @@ def postprocess_raw_output(
     denormalises rays, filters by confidence, and deduplicates.
 
     Args:
-        output: [B, N_anchors, nc + 34] raw logits from ONNX model.
+        output: [B, N_anchors, nc + 2 + n_rays] raw logits from ONNX model.
         strides: Feature map strides [8, 16, 32].
         imgsz: Input image size (square).
         conf_threshold: Confidence threshold for filtering.
         dedup_radius_px: Minimum distance between centroids for dedup.
+        n_rays: Number of radial rays (default 32).
 
     Returns:
-        list of [N_det, 36] arrays (one per image), where each row is
-        [cx, cy, d_1..d_32, score, cls_idx].
+        list of [N_det, 4+n_rays] arrays (one per image), where each row is
+        [cx, cy, d_1..d_n, score, cls_idx].
     """
+    raycast_dim = 2 + n_rays
     batch_size = output.shape[0]
     results = []
 
     for i in range(batch_size):
-        det = _decode_single(output[i], strides, imgsz)
+        det = _decode_single(output[i], strides, imgsz, n_rays)
 
         # Filter by confidence
-        mask = det[:, RAYCAST_DIM] > conf_threshold
+        mask = det[:, raycast_dim] > conf_threshold
         det = det[mask]
 
         if det.shape[0] == 0:
-            results.append(np.zeros((0, RAYCAST_DIM + 2), dtype=np.float32))
+            results.append(np.zeros((0, raycast_dim + 2), dtype=np.float32))
             continue
 
         # Distance-based dedup
-        keep = _dedup_by_distance(det[:, :2], det[:, RAYCAST_DIM], dedup_radius_px)
+        keep = _dedup_by_distance(det[:, :2], det[:, raycast_dim], dedup_radius_px)
         det = det[keep]
 
         results.append(det)
@@ -59,21 +66,23 @@ def postprocess_raw_output(
     return results
 
 
-def _decode_single(raw: np.ndarray, strides: list[float], imgsz: int) -> np.ndarray:
+def _decode_single(raw: np.ndarray, strides: list[float], imgsz: int, n_rays: int = _DEFAULT_N_RAYS) -> np.ndarray:
     """Decode raw logits for a single image.
 
     Args:
-        raw: [N_anchors, nc + 34] raw logits.
+        raw: [N_anchors, nc + 2 + n_rays] raw logits.
         strides: Feature map strides.
         imgsz: Input image size.
+        n_rays: Number of radial rays.
 
     Returns:
-        [N_anchors, 36] decoded detections.
+        [N_anchors, 4+n_rays] decoded detections.
     """
+    raycast_dim = 2 + n_rays
     n_anchors = raw.shape[0]
 
-    poly_logits = raw[:, :RAYCAST_DIM]  # [N, 34]
-    cls_logits = raw[:, RAYCAST_DIM:]  # [N, nc]
+    poly_logits = raw[:, :raycast_dim]  # [N, raycast_dim]
+    cls_logits = raw[:, raycast_dim:]  # [N, nc]
 
     # Activations
     xy_offset = 1.0 / (1.0 + np.exp(-poly_logits[:, :2]))  # sigmoid
@@ -95,13 +104,13 @@ def _decode_single(raw: np.ndarray, strides: list[float], imgsz: int) -> np.ndar
     max_scores = cls_scores.max(axis=1)
     cls_idx = cls_scores.argmax(axis=1)
 
-    # Assemble: [cx, cy, d_1..d_32, score, cls_idx]
-    det = np.zeros((n_anchors, RAYCAST_DIM + 2), dtype=np.float32)
+    # Assemble: [cx, cy, d_1..d_n, score, cls_idx]
+    det = np.zeros((n_anchors, raycast_dim + 2), dtype=np.float32)
     det[:, 0] = cx
     det[:, 1] = cy
-    det[:, 2:34] = rays_px
-    det[:, 34] = max_scores
-    det[:, 35] = cls_idx
+    det[:, 2:2 + n_rays] = rays_px
+    det[:, raycast_dim] = max_scores
+    det[:, raycast_dim + 1] = cls_idx
 
     return det
 
