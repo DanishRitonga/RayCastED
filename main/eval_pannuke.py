@@ -516,7 +516,10 @@ def _simple_collate(batch):
     if target_list:
         targets = _torch.from_numpy(np.concatenate(target_list, axis=0))
     else:
-        targets = _torch.zeros((0, labels_list[0].shape[1] + 1 if labels_list else 36), dtype=_torch.float32)
+        # Derive annotation width from non-empty labels, or fallback to a safe default.
+        # When targets are empty the exact width doesn't affect computation.
+        ann_width = next((l.shape[1] for l in labels_list if l.ndim == 2 and l.shape[1] > 0), 35)
+        targets = _torch.zeros((0, 2 + ann_width), dtype=_torch.float32)  # batch_idx + cls + rays
 
     return {
         'img': images,
