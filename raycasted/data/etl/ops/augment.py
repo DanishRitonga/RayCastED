@@ -2,11 +2,37 @@
 
 Geometric augmentations for star-convex polygon annotations.
 Uses precomputed permutation indices for efficient ray reordering.
+
+Ray count is derived from the annotation array shape (N, 3+n_rays)
+so the same code works with any ray count.
 """
 
 import numpy as np
 
-from ..utils import constants as _const
+
+def _get_permutation_indices(n_rays: int) -> dict:
+    """Get flip/rotation permutation indices for the given ray count.
+
+    Uses precomputed indices from constants if available, otherwise computes on the fly.
+    """
+    from ..utils import constants as _const
+
+    if n_rays == _const.N_RAYS:
+        return {
+            'flip_h': _const.FLIP_H_IDX,
+            'flip_v': _const.FLIP_V_IDX,
+            'rot': _const.ROT_INDICES,
+        }
+
+    # Compute on the fly
+    flip_h = np.array([(n_rays // 2 - i) % n_rays for i in range(n_rays)], dtype=np.int64)
+    flip_v = np.array([(n_rays - i) % n_rays for i in range(n_rays)], dtype=np.int64)
+    rot = {}
+    for k in (1, 2, 3):
+        shift = (k * n_rays) // 4
+        rot[k] = np.array([(i + shift) % n_rays for i in range(n_rays)], dtype=np.int64)
+
+    return {'flip_h': flip_h, 'flip_v': flip_v, 'rot': rot}
 
 
 def flip_horizontal(
@@ -18,24 +44,25 @@ def flip_horizontal(
     Reflects x-coordinate and permutes ray ordering.
 
     Args:
-        annotations: Array of shape (N, 3+N_RAYS) in ETL format (crop-relative).
+        annotations: Array of shape (N, 3+n_rays) in ETL format (crop-relative).
         canvas_w: Width of the canvas (crop size).
 
     Returns:
-        flipped: Array of shape (N, 3+N_RAYS) with flipped annotations.
+        flipped: Array of shape (N, 3+n_rays) with flipped annotations.
     """
     if annotations is None or len(annotations) == 0:
-        return np.zeros((0, 3 + _const.N_RAYS), dtype=np.float32)
+        return annotations if annotations is not None else np.zeros((0, 0), dtype=np.float32)
 
     annotations = annotations.copy()
 
     # Flip x-coordinate: x' = canvas_w - x
-    annotations[:, _const.CX_IDX] = canvas_w - annotations[:, _const.CX_IDX]
+    annotations[:, 1] = canvas_w - annotations[:, 1]  # CX
 
     # Permute rays
-    rays = annotations[:, _const.RAY_START_IDX:_const.RAY_END_IDX]
-    rays_flipped = rays[:, _const.FLIP_H_IDX]
-    annotations[:, _const.RAY_START_IDX:_const.RAY_END_IDX] = rays_flipped
+    n_rays = annotations.shape[1] - 3
+    perm = _get_permutation_indices(n_rays)
+    rays = annotations[:, 3:]
+    annotations[:, 3:] = rays[:, perm['flip_h']]
 
     return annotations
 
@@ -49,24 +76,25 @@ def flip_vertical(
     Reflects y-coordinate and permutes ray ordering.
 
     Args:
-        annotations: Array of shape (N, 3+N_RAYS) in ETL format (crop-relative).
+        annotations: Array of shape (N, 3+n_rays) in ETL format (crop-relative).
         canvas_h: Height of the canvas (crop size).
 
     Returns:
-        flipped: Array of shape (N, 3+N_RAYS) with flipped annotations.
+        flipped: Array of shape (N, 3+n_rays) with flipped annotations.
     """
     if annotations is None or len(annotations) == 0:
-        return np.zeros((0, 3 + _const.N_RAYS), dtype=np.float32)
+        return annotations if annotations is not None else np.zeros((0, 0), dtype=np.float32)
 
     annotations = annotations.copy()
 
     # Flip y-coordinate: y' = canvas_h - y
-    annotations[:, _const.CY_IDX] = canvas_h - annotations[:, _const.CY_IDX]
+    annotations[:, 2] = canvas_h - annotations[:, 2]  # CY
 
     # Permute rays
-    rays = annotations[:, _const.RAY_START_IDX:_const.RAY_END_IDX]
-    rays_flipped = rays[:, _const.FLIP_V_IDX]
-    annotations[:, _const.RAY_START_IDX:_const.RAY_END_IDX] = rays_flipped
+    n_rays = annotations.shape[1] - 3
+    perm = _get_permutation_indices(n_rays)
+    rays = annotations[:, 3:]
+    annotations[:, 3:] = rays[:, perm['flip_v']]
 
     return annotations
 
@@ -82,26 +110,25 @@ def rotate_90(
     transformed to the new coordinate system.
 
     Args:
-        annotations: Array of shape (N, 3+N_RAYS) in ETL format (crop-relative).
+        annotations: Array of shape (N, 3+n_rays) in ETL format (crop-relative).
         k: Number of 90° rotations (1, 2, or 3).
         canvas_size: Size of the square canvas (assumes square crop).
 
     Returns:
-        rotated: Array of shape (N, 3+N_RAYS) with rotated annotations.
+        rotated: Array of shape (N, 3+n_rays) with rotated annotations.
     """
     if annotations is None or len(annotations) == 0:
-        return np.zeros((0, 3 + _const.N_RAYS), dtype=np.float32)
+        return annotations if annotations is not None else np.zeros((0, 0), dtype=np.float32)
 
     if k not in [1, 2, 3]:
         raise ValueError(f'k must be 1, 2, or 3, got {k}')
 
     annotations = annotations.copy()
 
-    cx = annotations[:, _const.CX_IDX].copy()
-    cy = annotations[:, _const.CY_IDX].copy()
+    cx = annotations[:, 1].copy()  # CX
+    cy = annotations[:, 2].copy()  # CY
 
     # Apply rotation to centroid
-    # For a square canvas, rotation formulas:
     # k=1 (90° CCW): (x, y) → (y, canvas_size - x)
     # k=2 (180°): (x, y) → (canvas_size - x, canvas_size - y)
     # k=3 (270° CCW): (x, y) → (canvas_size - y, x)
@@ -116,13 +143,13 @@ def rotate_90(
         new_cx = canvas_size - cy
         new_cy = cx
 
-    annotations[:, _const.CX_IDX] = new_cx
-    annotations[:, _const.CY_IDX] = new_cy
+    annotations[:, 1] = new_cx
+    annotations[:, 2] = new_cy
 
     # Permute rays
-    perm_idx = _const.ROT_INDICES[k]
-    rays = annotations[:, _const.RAY_START_IDX:_const.RAY_END_IDX]
-    rays_rotated = rays[:, perm_idx]
-    annotations[:, _const.RAY_START_IDX:_const.RAY_END_IDX] = rays_rotated
+    n_rays = annotations.shape[1] - 3
+    perm = _get_permutation_indices(n_rays)
+    rays = annotations[:, 3:]
+    annotations[:, 3:] = rays[:, perm['rot'][k]]
 
     return annotations

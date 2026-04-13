@@ -3,6 +3,9 @@
 Reads tiled .npz files from TransformOrchestrator output, applies online
 augmentation and random cropping, normalises to [0, 1], and emits tensors
 ready for training.
+
+Annotation column layout: [class_id, cx, cy, d_1, ..., d_n]
+Ray count is derived from the actual .npz annotation shape.
 """
 
 from pathlib import Path
@@ -13,7 +16,6 @@ from torch.utils.data import Dataset
 
 from ..ops.augment import flip_horizontal, flip_vertical, rotate_90
 from ..ops.filter import filter_and_clip_annotations
-from ..utils import constants as _const
 
 
 class RayCastTileDataset(Dataset):
@@ -42,12 +44,37 @@ class RayCastTileDataset(Dataset):
         if not self.tile_paths:
             raise FileNotFoundError(f'No .npz files found in {self.data_dir}')
 
+        # Detect n_rays from the first tile's annotation shape
+        self._detect_n_rays()
+
         # Compatibility: Ultralytics plot_training_labels reads dataset.labels
         self.labels = self._build_labels()
 
     def __len__(self) -> int:
         """Return the number of tiles in the dataset."""
         return len(self.tile_paths)
+
+    def _detect_n_rays(self) -> None:
+        """Detect ray count from the first tile's annotations.
+
+        Compares with the globally configured N_RAYS and warns on mismatch.
+        The annotation format is [class_id, cx, cy, d_1..d_n], so n_rays = ncols - 3.
+        """
+        from ..utils import constants as _const
+
+        for path in self.tile_paths:
+            data = np.load(path)
+            anns = data.get('annotations', data.get('bboxes'))
+            if anns is not None and len(anns) > 0:
+                self.n_rays = anns.shape[1] - 3
+                configured = _const.N_RAYS
+                if self.n_rays != configured:
+                    print(
+                        f'WARNING: Tiles have {self.n_rays} rays but N_RAYS={configured}. '
+                        f'Re-ingest with --n-rays {configured} to match, or use --n-rays {self.n_rays}.'
+                    )
+                return
+        self.n_rays = _const.N_RAYS  # fallback if all tiles are empty
 
     def _build_labels(self) -> list[dict]:
         """Build Ultralytics-compatible labels list for plot_training_labels.
@@ -87,7 +114,7 @@ class RayCastTileDataset(Dataset):
         content_w = int(data['content_w'])
 
         if annotations is None or len(annotations) == 0:
-            annotations = np.zeros((0, 3 + _const.N_RAYS), dtype=np.float32)
+            annotations = np.zeros((0, 0), dtype=np.float32)
         else:
             # Filter out Ignore class (class_id=255) — these must not reach the loss
             valid_mask = annotations[:, 0] != 255
@@ -155,6 +182,9 @@ class RayCastTileDataset(Dataset):
 
         Augmentations: horizontal flip (50%), vertical flip (50%), rotation (0/90/180/270).
         """
+        if len(annotations) == 0:
+            return image, annotations
+
         # Horizontal flip
         if self.rng.random() < 0.5:
             image = image[:, ::-1, :].copy()
@@ -182,9 +212,9 @@ class RayCastTileDataset(Dataset):
             return annotations
 
         annotations = annotations.copy()
-        annotations[:, _const.CX_IDX] /= self.crop_size
-        annotations[:, _const.CY_IDX] /= self.crop_size
-        annotations[:, _const.RAY_START_IDX:_const.RAY_END_IDX] /= self.crop_size
+        annotations[:, 1] /= self.crop_size  # CX
+        annotations[:, 2] /= self.crop_size  # CY
+        annotations[:, 3:] /= self.crop_size  # all rays
         return annotations
 
     def _validate_batch(self, labels: np.ndarray) -> None:
@@ -195,36 +225,36 @@ class RayCastTileDataset(Dataset):
         if len(labels) == 0:
             return
 
-        rays = labels[:, _const.RAY_START_IDX:_const.RAY_END_IDX]
+        rays = labels[:, 3:]
         assert rays.max() <= 1.0, f'Ray > 1.0: clipping or normalisation bug (max={rays.max()})'
 
-        cx_cy = labels[:, _const.CX_IDX : _const.CY_IDX + 1]
+        cx_cy = labels[:, 1:3]
         assert cx_cy.min() >= 0.0, f'Centroid < 0: {cx_cy.min()}'
         assert cx_cy.max() <= 1.0, f'Centroid > 1.0: {cx_cy.max()}'
 
 
-def collate_fn(
-    batch: list[tuple[torch.Tensor, np.ndarray]],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Collate a batch of (image, labels) tuples.
+def collate_fn(batch):
+    """Collate a batch of (image, labels, path) tuples.
 
     Args:
-        batch: List of (image_tensor [3, H, W], labels_array [N, 35]) tuples.
-            Labels are normalised float32.
+        batch: List of (image_tensor [3, H, W], labels_array [N, 3+n_rays], path) tuples.
 
     Returns:
         images: [B, 3, H, W] float32
-        targets: [sum_M, 36] float32 — collated with batch_idx column prepended
+        targets: [sum_M, 4+n_rays] float32 — collated with batch_idx column prepended
     """
     images = torch.stack([item[0] for item in batch])
 
     target_list = []
-    for batch_idx, (_, labels) in enumerate(batch):
+    for batch_idx, (_, labels, _) in enumerate(batch):
         if labels.shape[0] == 0:
             continue
-        batch_col = torch.full((labels.shape[0], 1), batch_idx, dtype=torch.float32)
-        target_list.append(torch.cat([batch_col, torch.from_numpy(labels)], dim=1))
+        batch_col = np.full((labels.shape[0], 1), batch_idx, dtype=np.float32)
+        target_list.append(np.concatenate([batch_col, labels], axis=1))
 
-    targets = torch.cat(target_list, dim=0) if target_list else torch.zeros((0, 4 + _const.N_RAYS), dtype=torch.float32)
+    if target_list:
+        targets = torch.from_numpy(np.concatenate(target_list, axis=0))
+    else:
+        targets = torch.zeros((0, 4 + 32), dtype=torch.float32)  # fallback, shape doesn't matter for empty
 
     return images, targets

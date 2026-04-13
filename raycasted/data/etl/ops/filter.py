@@ -2,11 +2,12 @@
 
 Annotation filtering and clipping for crop regions.
 Implements the 4-step filtering pipeline.
+
+Ray count is derived from the annotation array shape (N, 3+n_rays)
+so the same code works with any ray count.
 """
 
 import numpy as np
-
-from ..utils import constants as _const
 
 
 def filter_and_clip_annotations(
@@ -26,7 +27,7 @@ def filter_and_clip_annotations(
         STEP 4: Filter by ray survival rate
 
     Args:
-        annotations: Array of shape (N, 3+N_RAYS) in ETL format (pixel space).
+        annotations: Array of shape (N, 3+n_rays) in ETL format (pixel space).
         x_start: Left edge of crop region (pixels).
         y_start: Top edge of crop region (pixels).
         chunk_w: Width of crop region (pixels).
@@ -34,45 +35,56 @@ def filter_and_clip_annotations(
         min_rays_after_clip: Minimum fraction of non-zero rays required.
 
     Returns:
-        filtered: Array of shape (M, 3+N_RAYS) in crop-relative pixel space
+        filtered: Array of shape (M, 3+n_rays) in crop-relative pixel space
             where M <= N (cells outside crop or with too few rays dropped).
     """
     if annotations is None or len(annotations) == 0:
-        return np.zeros((0, 3 + _const.N_RAYS), dtype=np.float32)
+        return annotations if annotations is not None else np.zeros((0, 0), dtype=np.float32)
 
     # Ensure correct shape
     if annotations.ndim == 1:
         annotations = annotations.reshape(1, -1)
 
+    n_rays = annotations.shape[1] - 3  # [class_id, cx, cy, d_1..d_n]
+
     # =========================================================================
     # STEP 1: Filter by centroid position
     # =========================================================================
-    cx = annotations[:, _const.CX_IDX]
-    cy = annotations[:, _const.CY_IDX]
+    cx = annotations[:, 1]  # CX_IDX
+    cy = annotations[:, 2]  # CY_IDX
 
     centroid_inside = (cx >= x_start) & (cx < x_start + chunk_w) & (cy >= y_start) & (cy < y_start + chunk_h)
 
     annotations = annotations[centroid_inside]
 
     if len(annotations) == 0:
-        return np.zeros((0, 3 + _const.N_RAYS), dtype=np.float32)
+        return np.zeros((0, 3 + n_rays), dtype=np.float32)
 
     # =========================================================================
     # STEP 2: Translate to crop-relative coordinates
     # =========================================================================
     annotations = annotations.copy()
-    annotations[:, _const.CX_IDX] -= x_start
-    annotations[:, _const.CY_IDX] -= y_start
+    annotations[:, 1] -= x_start  # CX
+    annotations[:, 2] -= y_start  # CY
 
     # =========================================================================
     # STEP 3: Clip rays to crop boundary
     # =========================================================================
-    cx_rel = annotations[:, _const.CX_IDX]
-    cy_rel = annotations[:, _const.CY_IDX]
+    cx_rel = annotations[:, 1]
+    cy_rel = annotations[:, 2]
 
-    ray_cos = _const.RAY_COS
-    ray_sin = _const.RAY_SIN
-    n_rays = _const.N_RAYS
+    # Use precomputed cos/sin matching the actual ray count
+    from ..utils import constants as _const
+
+    if n_rays == _const.N_RAYS:
+        ray_cos = _const.RAY_COS
+        ray_sin = _const.RAY_SIN
+    else:
+        # Compute on the fly if ray count doesn't match configured constants
+        angular_spacing = 2.0 * np.pi / n_rays
+        angles = np.array([i * angular_spacing for i in range(n_rays)])
+        ray_cos = np.cos(angles)
+        ray_sin = np.sin(angles)
 
     for i in range(n_rays):
         cos_a = ray_cos[i]
@@ -88,13 +100,13 @@ def filter_and_clip_annotations(
 
         d_max = np.minimum(np.minimum(d_right, d_left), np.minimum(d_bottom, d_top))
 
-        ray_idx = _const.RAY_START_IDX + i
+        ray_idx = 3 + i  # RAY_START_IDX + i
         annotations[:, ray_idx] = np.minimum(annotations[:, ray_idx], d_max)
 
     # =========================================================================
     # STEP 4: Filter by ray survival rate
     # =========================================================================
-    rays = annotations[:, _const.RAY_START_IDX:_const.RAY_END_IDX]
+    rays = annotations[:, 3:]  # all ray columns
     n_surviving = np.sum(rays > 0, axis=1)
     survival_rate = n_surviving / n_rays
 

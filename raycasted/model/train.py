@@ -80,7 +80,8 @@ def _raycast_collate_fn(batch: list) -> dict:
     if target_list:
         targets = torch.from_numpy(np.concatenate(target_list, axis=0))
     else:
-        targets = torch.zeros((0, 4 + 32), dtype=torch.float32)  # batch_idx + cls + raycast_dim
+        # Empty batch — shape doesn't matter, just needs correct ndim
+        targets = torch.zeros((0, 4 + 32), dtype=torch.float32)
 
     # Metadata required by validator (ori_shape, ratio_pad, im_file)
     ori_shapes = []
@@ -233,6 +234,20 @@ class RayCastTrainer(DetectionTrainer):
         """
         assert mode in {'train', 'val'}, f"Mode must be 'train' or 'val', not {mode}"
         dataset = self.build_dataset(dataset_path, mode, batch_size)
+
+        # Validate data/model ray count match
+        head = self.model.model[-1] if hasattr(self, 'model') and hasattr(self.model, 'model') else None
+        if (
+            head is not None
+            and hasattr(head, 'n_rays')
+            and hasattr(dataset, 'n_rays')
+            and dataset.n_rays != head.n_rays
+        ):
+            raise ValueError(
+                f'Data/model ray count mismatch: tiles have {dataset.n_rays} rays '
+                f'but model head expects {head.n_rays}. '
+                f'Re-ingest with --n-rays {head.n_rays} or train with --n-rays {dataset.n_rays}.'
+            )
         return InfiniteDataLoader(
             dataset,
             batch_size=batch_size,
