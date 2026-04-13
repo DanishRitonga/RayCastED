@@ -217,11 +217,12 @@ class RayCastE2ELoss(E2ELoss):
     smooth_anneal_epochs. Inherits o2m/o2o weight decay from parent.
     """
 
-    def __init__(self, model):
+    def __init__(self, model, max_epochs: int = 200):
         super().__init__(model, loss_fn=RayCastDetectionLoss)
         self.smooth_start = 0.05
         self.smooth_end = 0.0
-        self.smooth_anneal_epochs = 50
+        self.smooth_anneal_fraction = 0.3  # anneal over first 30% of training
+        self.smooth_anneal_epochs = max(1, int(max_epochs * self.smooth_anneal_fraction))
 
     def update(self):
         """Update o2m/o2o weights (inherited) + anneal smoothness lambda."""

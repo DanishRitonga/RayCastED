@@ -377,6 +377,11 @@ def main():
     n_rays = training_args.get('n_rays', 32)
     print(f'  crop_size={crop_size}, nc={nc}, n_rays={n_rays}')
 
+    # Configure ray geometry so polygon rasterization uses correct angles
+    from raycasted.data.etl.utils.constants import configure_rays
+
+    configure_rays(n_rays)
+
     # Build dataset
     dataset = RayCastTileDataset(data_dir=str(data_dir), crop_size=crop_size, augment=False)
     dataloader = DataLoader(

@@ -112,11 +112,12 @@ class _RayCastCriterionWrapper:
     Called as: model.init_criterion() — the wrapper is callable.
     """
 
-    def __init__(self, model):
+    def __init__(self, model, max_epochs: int = 200):
         self._model = model
+        self._max_epochs = max_epochs
 
     def __call__(self):
-        return RayCastE2ELoss(self._model)
+        return RayCastE2ELoss(self._model, max_epochs=self._max_epochs)
 
 
 class RayCastTrainer(DetectionTrainer):
@@ -189,7 +190,8 @@ class RayCastTrainer(DetectionTrainer):
         # Patch init_criterion for both initial creation and resume path.
         # The resume path calls model.init_criterion() to re-create the loss,
         # so monkey-patching ensures RayCastE2ELoss is always used.
-        model.init_criterion = _RayCastCriterionWrapper(model)
+        max_epochs = getattr(self.args, 'epochs', 200)
+        model.init_criterion = _RayCastCriterionWrapper(model, max_epochs=max_epochs)
 
         return model
 
