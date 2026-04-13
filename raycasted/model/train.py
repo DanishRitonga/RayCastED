@@ -28,6 +28,7 @@ from ultralytics.models.yolo.detect.train import DetectionTrainer
 from ultralytics.utils import DEFAULT_CFG
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
+from raycasted.data.etl.utils import constants as _const
 from raycasted.model.head import RayCastDetect
 from raycasted.model.loss import RayCastE2ELoss
 from raycasted.model.register import register_raycast_head
@@ -172,7 +173,7 @@ class RayCastTrainer(DetectionTrainer):
         if not isinstance(old_head, RayCastDetect):
             ch = _extract_neck_channels(old_head)
             nc = old_head.nc
-            n_rays = getattr(self.args, 'n_rays', 32)
+            n_rays = _const.N_RAYS
             new_head = RayCastDetect(nc=nc, end2end=True, ch=ch, n_rays=n_rays)
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):

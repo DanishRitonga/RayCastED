@@ -63,8 +63,8 @@ class RayCastPipeline:
 
         # Resolve n_rays: CLI > config YAML > default 32
         if n_rays is None:
-            n_rays = self.config.global_settings.get('n_rays', 32)
-        self.n_rays = n_rays
+            n_rays = int(self.config.global_settings.get('n_rays', 32))
+        self.n_rays = int(n_rays)
         configure_rays(self.n_rays)
 
         # Default imgsz to crop_size from ETL config unless explicitly overridden
@@ -180,7 +180,6 @@ class RayCastPipeline:
 
         overrides = {
             'data': yaml_path,
-            'n_rays': self.n_rays,
             **self.training_overrides,
         }
         trainer = RayCastTrainer(overrides=overrides)
