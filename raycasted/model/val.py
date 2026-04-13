@@ -15,6 +15,7 @@ from ultralytics.models.yolo.detect.val import DetectionValidator
 from ultralytics.utils.metrics import DetMetrics, Metric, ap_per_class
 
 from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
+from raycasted.model.head import RayCastDetect
 
 # Backward compat constant (tests import this). At runtime, use self.raycast_dim.
 RAYCAST_DIM = 34  # xy(2) + rays(32)
@@ -180,8 +181,16 @@ class RayCastValidator(DetectionValidator):
         self.jdict = []
         self.metrics = RayCastDetMetrics(names=model.names)
         self.confusion_matrix = None  # skip — incompatible with polygon format
-        # Derive raycast_dim from model head
-        head = model.model[-1] if hasattr(model, 'model') else model
+        # Derive raycast_dim from model head — traverse nested model structure
+        # During training: model is DetectionModel, model.model is nn.Sequential
+        # During final_eval: model.model may be DetectionModel again (unwrapped)
+        head = model
+        while hasattr(head, 'model') and not isinstance(head, RayCastDetect):
+            child = head.model
+            if isinstance(child, (list, torch.nn.Sequential)):
+                head = child[-1]
+                break
+            head = child
         self.raycast_dim = getattr(head, 'raycast_dim', 34)
         self.n_rays = getattr(head, 'n_rays', 32)
 
