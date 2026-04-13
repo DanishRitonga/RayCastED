@@ -66,6 +66,12 @@ def _worker_process_row(
     """
     import collections as _collections
 
+    # Configure ray count for this worker process (spawn doesn't inherit globals)
+    n_rays = merged_config.get('n_rays', 32)
+    from raycasted.data.etl.utils.constants import configure_rays
+
+    configure_rays(n_rays)
+
     ingestor_cls = DISPATCH_MAP[method]
     ingestor = ingestor_cls(merged_config)
     output_path = Path(output_dir)

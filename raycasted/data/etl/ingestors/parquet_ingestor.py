@@ -61,7 +61,9 @@ def _extract_raycast_annotations(
 
     if annotations:
         return np.stack(annotations).astype(np.float32)
-    return np.zeros((0, 35), dtype=np.float32)
+    from raycasted.data.etl.utils import constants as _c
+
+    return np.zeros((0, 3 + _c.N_RAYS), dtype=np.float32)
 
 
 def _extract_bbox_annotations(
@@ -123,6 +125,12 @@ def _process_roi_worker(task: dict) -> tuple[str, np.ndarray, np.ndarray, int] |
 
     All config needed for label/tissue resolution is passed in the task dict.
     """
+    # Configure ray count for this worker (spawn doesn't inherit globals)
+    n_rays = task.get('n_rays', 32)
+    from raycasted.data.etl.utils.constants import configure_rays
+
+    configure_rays(n_rays)
+
     try:
         rgb_bytes = task['rgb_bytes']
         image_array = _decode_image(rgb_bytes, is_mask=False)
@@ -205,6 +213,7 @@ class ParquetIngestor(BaseDataIngestor):  # noqa: D101
                 'global_cell_map': self.global_cell_map,
                 'tissue_origin': self.resolve_tissue(raw_tissue_id),
                 'scale_factor': self.scale_factor,
+                'n_rays': self.config.get('n_rays', 32),
             })
 
         # Dispatch
