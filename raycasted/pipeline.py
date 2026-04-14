@@ -67,6 +67,10 @@ class RayCastPipeline:
         self.n_rays = int(n_rays)
         configure_rays(self.n_rays)
 
+        # Propagate CLI n_rays into the config dict so ETL stages use it
+        if self.config.global_settings.get('n_rays') != self.n_rays:
+            self.config.global_settings['n_rays'] = self.n_rays
+
         # Default imgsz to crop_size from ETL config unless explicitly overridden
         if 'imgsz' not in self.training_overrides:
             self.training_overrides['imgsz'] = self.config.global_settings.get('crop_size', 640)
