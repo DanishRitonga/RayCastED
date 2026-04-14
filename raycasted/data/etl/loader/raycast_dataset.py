@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from ..ops.augment import flip_horizontal, flip_vertical, rotate_90
+from ..ops.augment import flip_horizontal, flip_vertical, random_scale, random_translate, rotate_90, stain_jitter
 from ..ops.filter import filter_and_clip_annotations
 
 
@@ -24,7 +24,7 @@ class RayCastTileDataset(Dataset):
     Reads tiled .npz files produced by TransformOrchestrator. Each tile contains
     an image, raycast annotations in pixel space, and content dimensions. The
     dataset applies random cropping (constrained to tissue area), geometric
-    augmentation, and normalisation to [0, 1].
+    augmentation, photometric augmentation, and normalisation to [0, 1].
     """
 
     def __init__(
@@ -33,11 +33,13 @@ class RayCastTileDataset(Dataset):
         crop_size: int = 640,
         augment: bool = True,
         min_rays_after_clip: float = 0.3,
+        augment_config: dict | None = None,
     ):
         self.data_dir = Path(data_dir)
         self.crop_size = crop_size
         self.augment = augment
         self.min_rays_after_clip = min_rays_after_clip
+        self.augment_config = augment_config or {}
         self.rng = np.random.default_rng()
 
         self.tile_paths = sorted(self.data_dir.glob('*.npz'))
@@ -178,12 +180,56 @@ class RayCastTileDataset(Dataset):
         return cropped, filtered
 
     def _augment(self, image: np.ndarray, annotations: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Apply random geometric augmentations to image and annotations in lockstep.
+        """Apply random augmentations to image and annotations in lockstep.
 
-        Augmentations: horizontal flip (50%), vertical flip (50%), rotation (0/90/180/270).
+        Augmentations applied in order:
+        1. Stain jitter (color-only, HSV perturbation)
+        2. Random scale (resize + scale annotations)
+        3. Random translation (shift image + shift cx/cy)
+        4. Horizontal flip (50%)
+        5. Vertical flip (50%)
+        6. Rotation (0/90/180/270)
         """
         if len(annotations) == 0:
             return image, annotations
+
+        cfg = self.augment_config
+
+        # Stain jitter (color-only, no annotation transform needed)
+        if cfg.get('stain_jitter', False):
+            image = stain_jitter(
+                image,
+                self.rng,
+                hsv_h=cfg.get('stain_hsv_h', 0.05),
+                hsv_s=cfg.get('stain_hsv_s', 0.3),
+                hsv_v=cfg.get('stain_hsv_v', 0.2),
+                blur_prob=cfg.get('stain_blur_prob', 0.2),
+                blur_sigma=cfg.get('stain_blur_sigma', 1.0),
+            )
+
+        # Random scale
+        if cfg.get('scale_augment', False):
+            image, annotations = random_scale(
+                image,
+                annotations,
+                scale_range=cfg.get('scale_range', (0.7, 1.3)),
+                crop_size=self.crop_size,
+                rng=self.rng,
+            )
+            if len(annotations) == 0:
+                return image, annotations
+
+        # Random translation
+        if cfg.get('translate_augment', False):
+            image, annotations = random_translate(
+                image,
+                annotations,
+                translate_range=cfg.get('translate_range', 0.1),
+                crop_size=self.crop_size,
+                rng=self.rng,
+            )
+            if len(annotations) == 0:
+                return image, annotations
 
         # Horizontal flip
         if self.rng.random() < 0.5:

@@ -75,6 +75,9 @@ class RayCastPipeline:
         if 'project' not in self.training_overrides:
             self.training_overrides['project'] = str(self.output_dir.resolve())
 
+        # Resolve training config: None → legacy defaults, dict → TrainingSettings values
+        self.training_config = self.config.training  # dict or None
+
     def run(self, stage: str = 'all', dataset: str | None = None) -> None:
         """Run pipeline stages up to and including the specified one.
 
@@ -182,7 +185,12 @@ class RayCastPipeline:
             'data': yaml_path,
             **self.training_overrides,
         }
-        trainer = RayCastTrainer(overrides=overrides)
+
+        # Apply training config to Ultralytics overrides
+        if self.training_config is not None and self.training_config.get('cos_lr', True):
+            overrides['cos_lr'] = True
+
+        trainer = RayCastTrainer(overrides=overrides, training_config=self.training_config)
         trainer.train()
 
     def _generate_training_yaml(self) -> str:

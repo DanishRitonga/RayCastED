@@ -112,12 +112,21 @@ class _RayCastCriterionWrapper:
     Called as: model.init_criterion() — the wrapper is callable.
     """
 
-    def __init__(self, model, max_epochs: int = 200):
+    def __init__(self, model, max_epochs: int = 200, training_config: dict | None = None):
         self._model = model
         self._max_epochs = max_epochs
+        self._training_config = training_config
 
     def __call__(self):
-        return RayCastE2ELoss(self._model, max_epochs=self._max_epochs)
+        tcfg = self._training_config or {}
+        return RayCastE2ELoss(
+            self._model,
+            max_epochs=self._max_epochs,
+            assigner_topk=tcfg.get('assigner_topk', 20),
+            assigner_radius_scale=tcfg.get('assigner_radius_scale', 2.0),
+            focal_loss=tcfg.get('focal_loss', True),
+            focal_gamma=tcfg.get('focal_gamma', 2.0),
+        )
 
 
 class RayCastTrainer(DetectionTrainer):
@@ -135,19 +144,21 @@ class RayCastTrainer(DetectionTrainer):
         set_model_attributes — Training metadata for inference/export
     """
 
-    def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None):
+    def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None, training_config=None):
         """Initialise RayCastTrainer with mosaic/mixup forced off.
 
         Args:
             cfg: Default configuration.
             overrides: Dict of parameter overrides.
             _callbacks: Callback functions.
+            training_config: Dict of training settings from YAML (or None for legacy defaults).
         """
         overrides = overrides or {}
         super().__init__(cfg, overrides, _callbacks)
         # Force mosaic/mixup off — they corrupt polygon targets (GAP-06)
         self.args.mosaic = 0.0
         self.args.mixup = 0.0
+        self.training_config = training_config  # dict or None
 
     def plot_training_labels(self):
         """Skip standard bbox label plotting — incompatible with 34-dim polygon data."""
@@ -176,7 +187,18 @@ class RayCastTrainer(DetectionTrainer):
             ch = _extract_neck_channels(old_head)
             nc = old_head.nc
             n_rays = _const.N_RAYS
-            new_head = RayCastDetect(nc=nc, end2end=True, ch=ch, n_rays=n_rays)
+            # Read head channel config from training_config (None → recommended defaults)
+            tcfg = self.training_config
+            head_channel_scale = tcfg.get('head_channel_scale', 0.5) if tcfg else 0.5
+            head_channel_min = tcfg.get('head_channel_min', 64) if tcfg else 64
+            new_head = RayCastDetect(
+                nc=nc,
+                end2end=True,
+                ch=ch,
+                n_rays=n_rays,
+                head_channel_scale=head_channel_scale,
+                head_channel_min=head_channel_min,
+            )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):
                 if hasattr(old_head, attr):
@@ -191,7 +213,9 @@ class RayCastTrainer(DetectionTrainer):
         # The resume path calls model.init_criterion() to re-create the loss,
         # so monkey-patching ensures RayCastE2ELoss is always used.
         max_epochs = getattr(self.args, 'epochs', 200)
-        model.init_criterion = _RayCastCriterionWrapper(model, max_epochs=max_epochs)
+        model.init_criterion = _RayCastCriterionWrapper(
+            model, max_epochs=max_epochs, training_config=self.training_config
+        )
 
         return model
 
@@ -216,10 +240,32 @@ class RayCastTrainer(DetectionTrainer):
         Returns:
             RayCastTileDataset instance.
         """
+        # Build augmentation config for the dataset
+        augment_config = {}
+        if mode == 'train' and self.training_config:
+            augment_config = {
+                k: v
+                for k, v in self.training_config.items()
+                if k
+                in (
+                    'stain_jitter',
+                    'stain_hsv_h',
+                    'stain_hsv_s',
+                    'stain_hsv_v',
+                    'stain_blur_prob',
+                    'stain_blur_sigma',
+                    'scale_augment',
+                    'scale_range',
+                    'translate_augment',
+                    'translate_range',
+                )
+            }
+
         return RayCastTileDataset(
             data_dir=img_path,
             crop_size=self.args.imgsz,
             augment=(mode == 'train'),
+            augment_config=augment_config if augment_config else None,
         )
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode='train'):

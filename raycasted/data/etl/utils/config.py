@@ -32,6 +32,45 @@ class CSVColumnMap(BaseModel):
     category: str | None = None
 
 
+# === TRAINING SETTINGS ===
+class TrainingSettings(BaseModel):
+    """Configurable training parameters for RayCastED.
+
+    All defaults are recommended/improved values. When the ``training``
+    section is absent from the YAML config, legacy constants are used
+    instead (see pipeline.py).
+    """
+
+    # Head architecture
+    head_channel_scale: float = 0.5  # c2 = max(head_channel_min, ch * scale). Was 0.25
+    head_channel_min: int = 64  # minimum channels in polygon head. Was 16
+
+    # Learning rate
+    cos_lr: bool = True  # cosine LR schedule. Was False
+
+    # Assigner
+    assigner_topk: int = 20  # positive anchors per GT. Was 13
+    assigner_radius_scale: float = 2.0  # containment radius multiplier. Was 1.5
+
+    # Classification loss
+    focal_loss: bool = True  # use focal loss instead of BCE. Was False
+    focal_gamma: float = 2.0  # focal loss gamma
+
+    # Augmentation (polygon-safe)
+    stain_jitter: bool = True  # HSV color jitter for histopathology
+    stain_hsv_h: float = 0.05  # hue shift range
+    stain_hsv_s: float = 0.3  # saturation scale range (±)
+    stain_hsv_v: float = 0.2  # value/brightness scale range (±)
+    stain_blur_prob: float = 0.2  # probability of Gaussian blur
+    stain_blur_sigma: float = 1.0  # max blur sigma
+
+    scale_augment: bool = True  # random scale augmentation
+    scale_range: tuple[float, float] = (0.7, 1.3)  # min/max scale factors
+
+    translate_augment: bool = True  # random translation augmentation
+    translate_range: float = 0.1  # fraction of crop_size
+
+
 # === GLOBAL SETTINGS ===
 class GlobalSettings(BaseModel):
     root_dir: str
@@ -91,8 +130,7 @@ class DatasetConfig(BaseModel):
                 for mapped in self.split_args.split_map.values():
                     if mapped not in valid_splits:
                         raise ValueError(
-                            f"split_map value '{mapped}' is not a recognized split name. "
-                            f'Must be one of: {valid_splits}'
+                            f"split_map value '{mapped}' is not a recognized split name. Must be one of: {valid_splits}"
                         )
 
         elif self.split_separation == 'none':
@@ -124,6 +162,7 @@ class DatasetConfig(BaseModel):
 class ETLConfigModel(BaseModel):
     global_settings: GlobalSettings
     datasets: dict[str, DatasetConfig]
+    training: TrainingSettings | None = None
     namespace_map: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
@@ -141,6 +180,7 @@ class ETLConfig:
         self.global_settings = self.model.global_settings.model_dump()
         self.datasets = {k: v.model_dump() for k, v in self.model.datasets.items()}
         self.namespace_map = self.model.namespace_map
+        self.training = self.model.training.model_dump() if self.model.training else None
 
     def _load_yaml(self) -> dict[str, Any]:
         if not self.config_path.exists():

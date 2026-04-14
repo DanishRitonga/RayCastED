@@ -56,7 +56,16 @@ class RayCastDetect(Detect):
         - Channels 2..(2+n_rays) (rays): Softplus (inference only)
     """
 
-    def __init__(self, nc: int = 80, reg_max: int = 16, end2end: bool = False, ch: tuple = (), n_rays: int = 32):
+    def __init__(
+        self,
+        nc: int = 80,
+        reg_max: int = 16,
+        end2end: bool = False,
+        ch: tuple = (),
+        n_rays: int = 32,
+        head_channel_scale: float = 0.5,
+        head_channel_min: int = 64,
+    ):
         """Initialize polygon detection head.
 
         Args:
@@ -65,6 +74,8 @@ class RayCastDetect(Detect):
             end2end: Whether to use end-to-end NMS-free detection.
             ch: Tuple of channel sizes from backbone feature maps.
             n_rays: Number of radial rays for polygon parameterization.
+            head_channel_scale: Fraction of input channels for head width.
+            head_channel_min: Minimum head intermediate channels.
         """
         self.n_rays = n_rays
         self.raycast_dim = 2 + n_rays  # xy + rays
@@ -75,7 +86,7 @@ class RayCastDetect(Detect):
         self.no = nc + self.raycast_dim
 
         # Replace cv2 (box regression) with polygon regression stack
-        c2 = max(16, ch[0] // 4)
+        c2 = max(head_channel_min, int(ch[0] * head_channel_scale))
         self.cv2 = nn.ModuleList(
             nn.Sequential(
                 Conv(x, c2, 3),

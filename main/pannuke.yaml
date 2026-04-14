@@ -36,6 +36,38 @@ global_settings:
     "Thyroid": 17
     "Uterus": 18
 
+# Training settings — recommended values for improved detection quality.
+# Omit the entire section for legacy behavior (backward compat).
+training:
+  # Head architecture
+  head_channel_scale: 0.5    # c2 = max(head_channel_min, ch * scale). Was 0.25
+  head_channel_min: 64       # minimum channels in polygon head. Was 16
+
+  # Learning rate
+  cos_lr: true               # cosine LR schedule. Was false
+
+  # Assigner
+  assigner_topk: 20          # positive anchors per GT. Was 13
+  assigner_radius_scale: 2.0 # containment radius multiplier. Was 1.5
+
+  # Classification loss
+  focal_loss: true           # use focal loss instead of BCE. Was false
+  focal_gamma: 2.0           # focal loss gamma
+
+  # Augmentation (polygon-safe)
+  stain_jitter: true         # HSV color jitter for histopathology. Was false
+  stain_hsv_h: 0.05          # hue shift range
+  stain_hsv_s: 0.3           # saturation scale range (±)
+  stain_hsv_v: 0.2           # value/brightness scale range (±)
+  stain_blur_prob: 0.2       # probability of Gaussian blur
+  stain_blur_sigma: 1.0      # max blur sigma
+
+  scale_augment: true        # random scale augmentation. Was false
+  scale_range: [0.7, 1.3]    # min/max scale factors
+
+  translate_augment: true    # random translation augmentation. Was false
+  translate_range: 0.1       # fraction of crop_size
+
 datasets:
   PanNuke:
     root_dir: "PanNuke/data"

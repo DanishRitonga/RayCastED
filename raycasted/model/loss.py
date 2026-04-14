@@ -9,6 +9,8 @@ RayCastE2ELoss subclasses E2ELoss, wiring RayCastDetectionLoss
 into both one2many/one2one branches with smoothness annealing.
 """
 
+from functools import partial
+
 import torch
 import torch.nn.functional as F
 from ultralytics.utils.loss import E2ELoss, v8DetectionLoss
@@ -23,7 +25,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
     """Polygon detection loss with 5 terms.
 
     Replaces v8DetectionLoss bbox/DFL terms:
-      L_cls     — BCE on classification scores
+      L_cls     — BCE or Focal on classification scores
       L_xy      — Huber(δ=0.01) on decoded centroid
       L_L1      — Uniform MAE on 32 rays
       L_PolarIoU — 1 - PolarIoU
@@ -33,22 +35,35 @@ class RayCastDetectionLoss(v8DetectionLoss):
     the assigner with RayCastAssigner.
     """
 
-    def __init__(self, model, tal_topk: int = 10, tal_topk2: int | None = None):
+    def __init__(
+        self,
+        model,
+        tal_topk: int = 10,
+        tal_topk2: int | None = None,
+        assigner_topk: int = 20,
+        assigner_radius_scale: float = 2.0,
+        focal_loss: bool = True,
+        focal_gamma: float = 2.0,
+    ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
         self.raycast_dim = m.raycast_dim  # 2 + n_rays
         self.no = m.nc + self.raycast_dim  # BUG-02 fix (parent sets nc + reg_max*4)
         self.use_dfl = False  # DFL not applicable to polygon regression
 
-        # Assigner swap — read params from the TaskAlignedAssigner super() just created
+        # Focal loss configuration
+        self.focal_loss = focal_loss
+        self.focal_gamma = focal_gamma
+
+        # Assigner swap — use configurable topk and radius_scale
         self.assigner = RayCastAssigner(
-            topk=self.assigner.topk,
+            topk=assigner_topk,
             num_classes=self.nc,
             alpha=self.assigner.alpha,
             beta=self.assigner.beta,
             stride=self.stride.tolist(),
             topk2=tal_topk2,
-            radius_scale=1.5,
+            radius_scale=assigner_radius_scale,
         )
 
         # Loss weights
@@ -154,7 +169,14 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # --- L_cls (term 1) ---
         # Cast to float32 for numerical stability under AMP/FP16 validation
-        loss[1] = self.bce(pred_scores.float(), target_scores.float()).sum() / target_scores_sum
+        pred_f = pred_scores.float()
+        target_f = target_scores.float()
+        if self.focal_loss:
+            bce = F.binary_cross_entropy_with_logits(pred_f, target_f, reduction='none')
+            pt = torch.exp(-bce)
+            loss[1] = (((1 - pt) ** self.focal_gamma) * bce).sum() / target_scores_sum
+        else:
+            loss[1] = self.bce(pred_f, target_f).sum() / target_scores_sum
 
         # --- Polygon regression losses (foreground only) ---
         if fg_mask.sum():
@@ -217,8 +239,24 @@ class RayCastE2ELoss(E2ELoss):
     smooth_anneal_epochs. Inherits o2m/o2o weight decay from parent.
     """
 
-    def __init__(self, model, max_epochs: int = 200):
-        super().__init__(model, loss_fn=RayCastDetectionLoss)
+    def __init__(
+        self,
+        model,
+        max_epochs: int = 200,
+        assigner_topk: int = 20,
+        assigner_radius_scale: float = 2.0,
+        focal_loss: bool = True,
+        focal_gamma: float = 2.0,
+    ):
+        # Bind training config to RayCastDetectionLoss so E2ELoss passes it through
+        loss_fn = partial(
+            RayCastDetectionLoss,
+            assigner_topk=assigner_topk,
+            assigner_radius_scale=assigner_radius_scale,
+            focal_loss=focal_loss,
+            focal_gamma=focal_gamma,
+        )
+        super().__init__(model, loss_fn=loss_fn)
         self.smooth_start = 0.05
         self.smooth_end = 0.0
         self.smooth_anneal_fraction = 0.3  # anneal over first 30% of training
