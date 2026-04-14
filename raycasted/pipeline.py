@@ -52,7 +52,6 @@ class RayCastPipeline:
         output_dir: str,
         training_overrides: dict | None = None,
         ingest_workers: int | None = None,
-        n_rays: int | None = None,
     ):
         self.config = ETLConfig(config_path)
         self.output_dir = Path(output_dir)
@@ -61,15 +60,9 @@ class RayCastPipeline:
         self.training_overrides = training_overrides or {}
         self.ingest_workers = ingest_workers
 
-        # Resolve n_rays: CLI > config YAML > default 32
-        if n_rays is None:
-            n_rays = int(self.config.global_settings.get('n_rays', 32))
-        self.n_rays = int(n_rays)
+        # n_rays comes from config YAML only (data property, not a training flag)
+        self.n_rays = int(self.config.global_settings.get('n_rays', 32))
         configure_rays(self.n_rays)
-
-        # Propagate CLI n_rays into the config dict so ETL stages use it
-        if self.config.global_settings.get('n_rays') != self.n_rays:
-            self.config.global_settings['n_rays'] = self.n_rays
 
         # Default imgsz to crop_size from ETL config unless explicitly overridden
         if 'imgsz' not in self.training_overrides:
@@ -277,7 +270,6 @@ def main():  # noqa: D103
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
     parser.add_argument('--batch', type=int, default=16, help='Batch size')
     parser.add_argument('--imgsz', type=int, default=None, help='Input image size (default: from config crop_size)')
-    parser.add_argument('--n-rays', type=int, default=None, help='Number of radial rays (default: from config or 32)')
     parser.add_argument('--device', default='', help='Device (cpu, 0, 0,1)')
     parser.add_argument('--workers', type=int, default=8, help='DataLoader workers')
     parser.add_argument('--lr0', type=float, default=None, help='Initial learning rate')
@@ -325,7 +317,6 @@ def main():  # noqa: D103
         output_dir=args.output,
         training_overrides=training_overrides,
         ingest_workers=args.ingest_workers,
-        n_rays=args.n_rays,
     )
     pipeline.run(stage=args.stage, dataset=args.dataset)
 
