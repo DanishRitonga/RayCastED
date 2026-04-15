@@ -202,9 +202,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss_l1 = (fg_pred_rays - fg_target_rays).abs().mean(-1)
             loss[2] = (loss_l1.unsqueeze(-1) * weight).sum() / target_scores_sum
 
-            # L_PolarIoU: 1 - PolarIoU
+            # L_PolarIoU: -log(PolarIoU) — matches PolarMask formulation
+            # Logarithmic loss more strongly penalizes low-IoU predictions than linear (1 - IoU)
             fg_piou = polar_iou_torch(fg_pred_rays, fg_target_rays)  # [N_fg] (already float32)
-            loss_piou = 1.0 - fg_piou
+            loss_piou = -torch.log(fg_piou + 1e-7)
             loss[3] = (loss_piou * weight.squeeze(-1)).sum() / target_scores_sum
 
             # L_smooth: Angular smoothness on predicted rays

@@ -1,7 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"        # YOLO26 variant: n, s, m, l, x
-  n_rays: 32          # Number of radial rays for polygon parameterization
+  n_rays: 64          # Number of radial rays for polygon parameterization
   max_size: 256
   crop_size: 256
   output_mpp: 0.25
@@ -47,12 +47,12 @@ training:
   cos_lr: true               # cosine LR schedule. Was false
 
   # Assigner
-  assigner_topk: 20          # positive anchors per GT. Was 13
-  assigner_radius_scale: 2.0 # containment radius multiplier. Was 1.5
+  assigner_topk: 13          # positive anchors per GT (baseline value)
+  assigner_radius_scale: 1.5 # containment radius multiplier (baseline value)
 
   # Classification loss
-  focal_loss: true           # use focal loss instead of BCE. Was false
-  focal_gamma: 2.0           # focal loss gamma
+  focal_loss: false          # BCE loss (baseline)
+  focal_gamma: 2.0           # focal loss gamma (unused when focal_loss=false)
 
   # Augmentation (polygon-safe)
   stain_jitter: true         # HSV color jitter for histopathology. Was false
