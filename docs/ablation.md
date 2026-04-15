@@ -18,7 +18,8 @@ Tracking the effect of each config change on detection quality.
 | 4m | same as Run 4 but yolo26m (24M params) | 0.509 | 0.231 | 0.119 | 0.358 | 0.735 | 0.456 | 0.343 | 0.687 | 0.458 |
 | 5 | revert focal loss (BCE), keep wide head + augment + cos_lr (yolo26s) | 0.542 | 0.379 | 0.144 | 0.526 | 0.724 | 0.680 | 0.681 | 0.591 | 0.633 |
 | 6 | + -log(IoU) loss (PolarMask formulation), same config as Run 5 | 0.553 | 0.384 | 0.187 | 0.536 | 0.745 | 0.676 | 0.680 | 0.601 | 0.638 |
-| 7 | + soft polar centerness (PolarMask++), same config as Run 6 | — | — | — | — | — | — | — | — | — |
+| 7 | + soft polar centerness (PolarMask++), same config as Run 6 | 0.553 | 0.389 | 0.174 | 0.538 | 0.736 | 0.686 | 0.695 | 0.598 | 0.643 |
+| 8 | same as Run 7 but scale/translate augment OFF | 0.553 | 0.374 | 0.164 | 0.550 | 0.730 | 0.709 | 0.642 | 0.624 | 0.633 |
 
 ---
 
@@ -76,4 +77,5 @@ Result: full recovery to baseline. Focal loss confirmed harmful.
 - **Run 4m vs Run 4:** Doubling backbone (s→m, 10.7M→24.0M params) gave negligible improvement (+0.011 mAP, +0.016 F1). Model capacity is not the bottleneck. The low precision (0.34) persists — problem is in loss/augmentation config, not model size.
 - **Run 5 vs Run 2:** Reverting focal loss recovered all metrics to baseline. mAP@0.5: 0.379 vs 0.377 (baseline). The wide head, stain jitter, scale/translate augment, and cos_lr are neutral — not hurting, not significantly helping yet. **Conclusion: focal loss is harmful for YOLO-based polygon detection.** BCE should be the default.
 - **Run 6 vs Run 5:** `-log(IoU)` loss (PolarMask formulation) improved all metrics except DQ (-0.004 noise). mAP@0.75 gained +0.043 and SQ +0.021 — stronger gradients on low-quality predictions directly improve polygon quality at stricter IoU thresholds. **Conclusion: `-log(IoU)` is superior to `1 - IoU`.**
-- **Run 7 vs Run 6:** Soft polar centerness (PolarMask++) adds a centerness branch that predicts anchor centering quality. At inference, `cls_score × centerness` suppresses off-center duplicate predictions, improving precision. Target: close the mAP gap further.
+- **Run 7 vs Run 6:** Soft polar centerness (PolarMask++) improved precision (+0.015) as expected — the centerness branch suppresses off-center duplicate predictions. However, the overall gain is marginal (+0.005 mAP@0.5, +0.005 F1) with a slight SQ regression (-0.009) and mAP@0.75 regression (-0.014). The YOLO anchor-based framework already has strong assignment (RayCastAssigner with polar IoU), so centerness provides limited additional benefit. **Conclusion: soft polar centerness is neutral-to-slightly-positive for YOLO-based polygon detection. Worth keeping but not a major quality lever.**
+- **Run 8 vs Run 7:** Removing scale/translate augmentation hurt precision by 5 points (0.695→0.642) with mAP@0.5 dropping -0.015. Earlier comparison (Run 5 vs Run 2) falsely suggested augmentations were neutral — it was confounded by the wide head addition. **Conclusion: scale and translate augmentation are beneficial (+0.015 mAP, +0.053 precision). Must be kept enabled.**
