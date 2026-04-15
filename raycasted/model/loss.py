@@ -66,6 +66,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         focal_loss: bool = True,
         focal_gamma: float = 2.0,
         centerness_weight: float = 1.0,
+        quality_focal_loss: bool = False,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -76,6 +77,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Focal loss configuration
         self.focal_loss = focal_loss
         self.focal_gamma = focal_gamma
+
+        # Quality focal loss configuration
+        self.quality_focal_loss = quality_focal_loss
 
         # Centerness configuration
         self.lambda_ct = centerness_weight
@@ -192,11 +196,33 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         target_scores_sum = max(target_scores.sum(), 1)
 
+        # --- Pre-compute IoU for QFL (before cls loss, detached for quality target) ---
+        fg_piou_detached = None
+        if self.quality_focal_loss and fg_mask.sum():
+            fg_piou_detached = polar_iou_torch(
+                pred_rays[fg_mask].float(), target_bboxes[fg_mask][:, 2:].float()
+            ).detach()
+
         # --- L_cls (term 1) ---
         # Cast to float32 for numerical stability under AMP/FP16 validation
         pred_f = pred_scores.float()
         target_f = target_scores.float()
-        if self.focal_loss:
+        if self.quality_focal_loss:
+            # QFL: |σ - ŷ|^γ × BCE(z, σ)
+            # σ = IoU for positive assigned class, 0 otherwise
+            # ŷ = sigmoid(z) = predicted probability
+            qfl_target = torch.zeros_like(target_f)
+            if fg_mask.sum():
+                fg_target_cls = target_f[fg_mask]  # [N_fg, nc]
+                fg_assigned_cls = fg_target_cls.argmax(dim=-1)  # [N_fg]
+                fg_quality = torch.zeros_like(fg_target_cls)
+                fg_quality.scatter_(1, fg_assigned_cls.unsqueeze(-1), fg_piou_detached.unsqueeze(-1))
+                qfl_target[fg_mask] = fg_quality
+            pred_prob = pred_f.sigmoid()
+            modulating = (qfl_target - pred_prob).abs().pow(self.focal_gamma)
+            bce = F.binary_cross_entropy_with_logits(pred_f, qfl_target, reduction='none')
+            loss[1] = (modulating * bce).sum() / target_scores_sum
+        elif self.focal_loss:
             bce = F.binary_cross_entropy_with_logits(pred_f, target_f, reduction='none')
             pt = torch.exp(-bce)
             loss[1] = (((1 - pt) ** self.focal_gamma) * bce).sum() / target_scores_sum
@@ -288,6 +314,7 @@ class RayCastE2ELoss(E2ELoss):
         focal_loss: bool = True,
         focal_gamma: float = 2.0,
         centerness_weight: float = 1.0,
+        quality_focal_loss: bool = False,
     ):
         # Bind training config to RayCastDetectionLoss so E2ELoss passes it through
         loss_fn = partial(
@@ -297,6 +324,7 @@ class RayCastE2ELoss(E2ELoss):
             focal_loss=focal_loss,
             focal_gamma=focal_gamma,
             centerness_weight=centerness_weight,
+            quality_focal_loss=quality_focal_loss,
         )
         super().__init__(model, loss_fn=loss_fn)
         self.smooth_start = 0.05

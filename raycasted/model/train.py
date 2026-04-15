@@ -127,6 +127,7 @@ class _RayCastCriterionWrapper:
             focal_loss=tcfg.get('focal_loss', True),
             focal_gamma=tcfg.get('focal_gamma', 2.0),
             centerness_weight=tcfg.get('centerness_weight', 1.0),
+            quality_focal_loss=tcfg.get('quality_focal_loss', False),
         )
 
 
