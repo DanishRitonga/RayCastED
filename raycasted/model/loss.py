@@ -1,7 +1,7 @@
 """RayCastED — RayCast Detection Loss (Phase 6).
 
-5-term polygon loss:
-  L = λ_cls × L_cls + λ_xy × L_xy + λ_L1 × L_L1 + λ_piou × L_PolarIoU + λ_smooth × L_smooth
+6-term polygon loss:
+  L = λ_cls × L_cls + λ_xy × L_xy + λ_L1 × L_L1 + λ_piou × L_PolarIoU + λ_smooth × L_smooth + λ_ct × L_ct
 
 RayCastDetectionLoss subclasses v8DetectionLoss, replacing bbox/DFL logic
 with polygon regression terms.
@@ -19,6 +19,27 @@ from ultralytics.utils.tal import make_anchors
 from raycasted.data.etl.ops.iou import polar_iou_torch
 from raycasted.data.etl.ops.loss import angular_smoothness_loss_torch
 from raycasted.model.tal import RayCastAssigner
+
+
+def _compute_soft_polar_centerness(gt_rays: torch.Tensor, n_rays: int) -> torch.Tensor:
+    """Compute soft polar centerness target from GT ray distances.
+
+    Divides rays into 4 quadrants (0-90°, 90-180°, 180-270°, 270-360°) and
+    computes: sqrt(F(D1)/F(D3) * F(D2)/F(D4)) where F = mean of quadrant.
+
+    Args:
+        gt_rays: [N, n_rays] normalised ray distances (foreground only).
+        n_rays: Number of rays.
+
+    Returns:
+        [N] centerness targets in [0, 1].
+    """
+    q = n_rays // 4
+    f1 = gt_rays[:, :q].mean(-1).clamp(min=1e-7)
+    f2 = gt_rays[:, q : 2 * q].mean(-1).clamp(min=1e-7)
+    f3 = gt_rays[:, 2 * q : 3 * q].mean(-1).clamp(min=1e-7)
+    f4 = gt_rays[:, 3 * q : 4 * q].mean(-1).clamp(min=1e-7)
+    return (f1 / f3 * f2 / f4).clamp(max=1.0).sqrt()
 
 
 class RayCastDetectionLoss(v8DetectionLoss):
@@ -44,6 +65,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         assigner_radius_scale: float = 2.0,
         focal_loss: bool = True,
         focal_gamma: float = 2.0,
+        centerness_weight: float = 1.0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -54,6 +76,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Focal loss configuration
         self.focal_loss = focal_loss
         self.focal_gamma = focal_gamma
+
+        # Centerness configuration
+        self.lambda_ct = centerness_weight
 
         # Assigner swap — use configurable topk and radius_scale
         self.assigner = RayCastAssigner(
@@ -126,7 +151,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         Returns:
             (assignment_info, loss_5vec, loss_detach)
         """
-        loss = torch.zeros(5, device=self.device)  # [xy, cls, L1, piou, smooth]
+        loss = torch.zeros(6, device=self.device)  # [xy, cls, L1, piou, smooth, ct]
 
         # --- Prediction parsing ---
         pred_distri = preds['boxes'].permute(0, 2, 1).contiguous()  # [B, N, raycast_dim]
@@ -211,12 +236,25 @@ class RayCastDetectionLoss(v8DetectionLoss):
             # L_smooth: Angular smoothness on predicted rays
             fg_smooth = angular_smoothness_loss_torch(fg_pred_rays)  # [N_fg] (already float32)
             loss[4] = (fg_smooth * weight.squeeze(-1)).sum() / target_scores_sum
+
+            # L_ct: Soft polar centerness (foreground only)
+            ct_pred = preds.get('centerness')
+            if ct_pred is not None:
+                fg_ct = ct_pred.permute(0, 2, 1)[fg_mask].squeeze(-1).float()  # [N_fg]
+                n_rays = self.raycast_dim - 2
+                ct_target = _compute_soft_polar_centerness(fg_target_rays, n_rays)
+                loss_ct = F.binary_cross_entropy_with_logits(fg_ct, ct_target, reduction='none')
+                loss[5] = (loss_ct * weight.squeeze(-1)).sum() / target_scores_sum
         else:
             # DDP safety — touch all prediction tensors to avoid unused-gradient errors
             loss[0] += (pred_xy * 0).sum()
             loss[2] += (pred_rays * 0).sum()
             loss[3] += (pred_rays * 0).sum()
             loss[4] += (pred_rays * 0).sum()
+            # Touch centerness tensor for DDP safety
+            ct_pred = preds.get('centerness')
+            if ct_pred is not None:
+                loss[5] += (ct_pred * 0).sum()
 
         # --- Apply loss weights ---
         loss[0] *= self.lambda_xy
@@ -224,6 +262,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         loss[2] *= self.lambda_l1
         loss[3] *= self.lambda_piou
         loss[4] *= self.lambda_smooth
+        loss[5] *= self.lambda_ct
 
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
@@ -248,6 +287,7 @@ class RayCastE2ELoss(E2ELoss):
         assigner_radius_scale: float = 2.0,
         focal_loss: bool = True,
         focal_gamma: float = 2.0,
+        centerness_weight: float = 1.0,
     ):
         # Bind training config to RayCastDetectionLoss so E2ELoss passes it through
         loss_fn = partial(
@@ -256,6 +296,7 @@ class RayCastE2ELoss(E2ELoss):
             assigner_radius_scale=assigner_radius_scale,
             focal_loss=focal_loss,
             focal_gamma=focal_gamma,
+            centerness_weight=centerness_weight,
         )
         super().__init__(model, loss_fn=loss_fn)
         self.smooth_start = 0.05

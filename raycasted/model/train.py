@@ -126,6 +126,7 @@ class _RayCastCriterionWrapper:
             assigner_radius_scale=tcfg.get('assigner_radius_scale', 2.0),
             focal_loss=tcfg.get('focal_loss', True),
             focal_gamma=tcfg.get('focal_gamma', 2.0),
+            centerness_weight=tcfg.get('centerness_weight', 1.0),
         )
 
 
@@ -191,6 +192,7 @@ class RayCastTrainer(DetectionTrainer):
             tcfg = self.training_config
             head_channel_scale = tcfg.get('head_channel_scale', 0.5) if tcfg else 0.5
             head_channel_min = tcfg.get('head_channel_min', 64) if tcfg else 64
+            use_centerness = tcfg.get('soft_polar_centerness', True) if tcfg else True
             new_head = RayCastDetect(
                 nc=nc,
                 end2end=True,
@@ -198,6 +200,7 @@ class RayCastTrainer(DetectionTrainer):
                 n_rays=n_rays,
                 head_channel_scale=head_channel_scale,
                 head_channel_min=head_channel_min,
+                use_centerness=use_centerness,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):
@@ -221,7 +224,7 @@ class RayCastTrainer(DetectionTrainer):
 
     def get_validator(self):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
-        self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'piou_loss', 'smooth_loss')
+        self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'piou_loss', 'smooth_loss', 'ct_loss')
         return RayCastValidator(
             self.test_loader,
             save_dir=self.save_dir,

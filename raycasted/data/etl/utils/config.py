@@ -70,6 +70,10 @@ class TrainingSettings(BaseModel):
     translate_augment: bool = True  # random translation augmentation
     translate_range: float = 0.1  # fraction of crop_size
 
+    # Soft polar centerness (PolarMask++)
+    soft_polar_centerness: bool = True  # add centerness prediction branch
+    centerness_weight: float = 1.0  # BCE loss weight for centerness term
+
 
 # === GLOBAL SETTINGS ===
 class GlobalSettings(BaseModel):

@@ -68,6 +68,10 @@ training:
   translate_augment: true    # random translation augmentation. Was false
   translate_range: 0.1       # fraction of crop_size
 
+  # Soft polar centerness (PolarMask++)
+  soft_polar_centerness: true  # centerness prediction branch. Was false (new)
+  centerness_weight: 1.0       # BCE loss weight for centerness
+
 datasets:
   PanNuke:
     root_dir: "PanNuke/data"
