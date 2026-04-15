@@ -84,6 +84,7 @@ class GlobalSettings(BaseModel):
     patching_overlap_pct: float
     annotation_type: str = 'bbox'
     n_rays: int = 32
+    model: str | None = None  # model YAML override (e.g. yolo26s-p2.yaml). If set, overrides variant.
 
     global_cell_map: dict[str, int] = Field(default_factory=dict)
     global_tissue_map: dict[str, int] = Field(default_factory=dict)

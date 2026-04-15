@@ -1,6 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"        # YOLO26 variant: n, s, m, l, x
+  model: "yolo26s-p2.yaml"  # P2 detection scale (stride 4,8,16,32). Overrides variant.
   n_rays: 64          # Number of radial rays for polygon parameterization
   max_size: 256
   crop_size: 256

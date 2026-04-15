@@ -278,20 +278,23 @@ def main():  # noqa: D103
 
     args = parser.parse_args()
 
-    # Read variant from config if not overridden by CLI
+    # Read variant/model from config if not overridden by CLI
     variant = args.variant
+    config_model = None
     if args.model is None:
         try:
             import yaml as _yaml
 
             with open(args.config) as f:
                 cfg = _yaml.safe_load(f)
-            variant = cfg.get('global_settings', {}).get('variant', args.variant)
+            gs = cfg.get('global_settings', {})
+            variant = gs.get('variant', args.variant)
+            config_model = gs.get('model')  # e.g. "yolo26s-p2.yaml" overrides variant
         except Exception:
             pass
 
     # Build training overrides from CLI args
-    model_yaml = args.model if args.model else f'yolo26{variant}.yaml'
+    model_yaml = args.model or config_model or f'yolo26{variant}.yaml'
     training_overrides = {
         'model': model_yaml,
         'optimizer': 'MuSGD',
