@@ -94,10 +94,23 @@ All import paths must use these actual locations.
 - **Plotting crashes**: Ultralytics' `plot_images()` and `plot_predictions()` expect 4-dim bboxes but get 34-dim polygon data. Override as no-ops in trainer/validator.
 - **Bias initialization**: `RayCastDetect.bias_init()` must use `crop_size` not `stride` for normalised-space predictions.
 
+### E2E Dual-Assignment Architecture (NMS-Free)
+- **CRITICAL**: RayCastED uses `E2ELoss` for NMS-free detection.
+- **Architecture**: `one2many` branch (dense supervision) + `one2one` branch (NMS-free enforcement).
+- **Assignment**: Both branches use `RayCastAssigner` with Polar-IoU for matching.
+- **NMS-free requirement**: `one2one.assigner.topk=1` (exactly 1 positive anchor per GT for NMS-free inference).
+- **Config parameter**: Use `tal_topk` (NOT `assigner_topk`) - this correctly propagates to both branches.
+- **Default values**: `tal_topk=13`, `assigner_radius_scale=1.5`, `focal_loss=false` (proven baseline).
+- **Validation**: Check console output for `✓ E2E NMS-free: o2m.topk=13, o2o.topk=1` during training.
+
 ### Geometry Operations
 - **XY decode mismatch**: Training and inference must use same decode formula: `(sigmoid * 2.0 - 0.5 + anchor) * stride`.
 - **Val losses NaN**: Force `overlaps` tensor to float32 in assigner — `eps=1e-9` underflows to 0 in float16.
 - **Centroid collapse**: `Huber(delta=0.01)` on normalised coordinates produces tiny gradients. Use `lambda_xy=50.0, delta=1.0` for stronger centroid loss.
+- **NMS-free loss weights**: For `one2one.topk=1`, use LSP-DETR-inspired weighting:
+  - `lambda_l1=5.0` (very strong direct ray supervision)
+  - `lambda_piou=0.5` (minimal IoU, mainly for ranking)
+  - This compensates for sparse assignment while maintaining NMS-free property.
 
 ## Testing Strategy
 

@@ -94,8 +94,8 @@ def test_constructor():
     )
     assert loss_fn.lambda_cls == 0.5
     assert loss_fn.lambda_xy == 50.0  # Updated to proven value from AGENTS.md
-    assert loss_fn.lambda_l1 == 1.0
-    assert loss_fn.lambda_piou == 2.0
+    assert loss_fn.lambda_l1 == 5.0  # Updated: LSP-DETR inspired for topk=1
+    assert loss_fn.lambda_piou == 0.5  # Updated: Minimal for NMS-free topk=1
     assert loss_fn.lambda_smooth == 0.05
     print('PASS: constructor — assigner swapped, params correct')
 
@@ -321,8 +321,10 @@ def test_e2e_constructor():
     assert isinstance(e2e.one2many.assigner, RayCastAssigner)
     assert isinstance(e2e.one2one.assigner, RayCastAssigner)
 
-    # CRITICAL: Check E2E topk configuration (one2one must be 1)
-    assert e2e.one2one.assigner.topk == 1, f'one2one.assigner.topk should be 1, got {e2e.one2one.assigner.topk}'
+    # CRITICAL: Check E2E topk configuration (NMS-free requires one2one.topk=1)
+    assert e2e.one2one.assigner.topk == 1, (
+        f'one2one.assigner.topk should be 1 (NMS-free), got {e2e.one2one.assigner.topk}'
+    )
     assert e2e.one2many.assigner.topk == 13, f'one2many.assigner.topk should be 13, got {e2e.one2many.assigner.topk}'
 
     assert e2e.one2many.lambda_smooth == 0.05

@@ -53,11 +53,13 @@ def test_e2e_topk_configuration():
     assert isinstance(e2e.one2many.assigner, RayCastAssigner), 'one2many should use RayCastAssigner'
     assert isinstance(e2e.one2one.assigner, RayCastAssigner), 'one2one should use RayCastAssigner'
 
-    # CRITICAL: Check topk values
+    # CRITICAL: Check topk values (NMS-free requires one2one.topk=1)
     assert e2e.one2many.assigner.topk == 13, f'one2many.assigner.topk should be 13, got {e2e.one2many.assigner.topk}'
-    assert e2e.one2one.assigner.topk == 1, f'one2one.assigner.topk should be 1, got {e2e.one2one.assigner.topk}'
+    assert e2e.one2one.assigner.topk == 1, (
+        f'one2one.assigner.topk should be 1 (NMS-free), got {e2e.one2one.assigner.topk}'
+    )
 
-    print('PASS: E2E topk configuration — o2m.topk=13, o2o.topk=1')
+    print('PASS: E2E NMS-free configuration — o2m.topk=13, o2o.topk=1')
 
 
 def test_e2e_custom_tal_topk():
@@ -68,9 +70,11 @@ def test_e2e_custom_tal_topk():
     e2e = RayCastE2ELoss(model, max_epochs=200, tal_topk=20)
 
     assert e2e.one2many.assigner.topk == 20, f'one2many.assigner.topk should be 20, got {e2e.one2many.assigner.topk}'
-    assert e2e.one2one.assigner.topk == 1, f'one2one.assigner.topk should always be 1, got {e2e.one2one.assigner.topk}'
+    assert e2e.one2one.assigner.topk == 1, (
+        f'one2one.assigner.topk should be 1 (NMS-free), got {e2e.one2one.assigner.topk}'
+    )
 
-    print('PASS: Custom tal_topk — o2m.topk=20, o2o.topk=1')
+    print('PASS: Custom tal_topk — o2m.topk=20, o2o.topk=1 (NMS-free)')
 
 
 def test_e2e_assertions_trigger_on_bad_config():
@@ -80,15 +84,15 @@ def test_e2e_assertions_trigger_on_bad_config():
     # Manually break the configuration to test assertions
     e2e = RayCastE2ELoss(model, max_epochs=200, tal_topk=13)
 
-    # Simulate a bug: set one2one.topk to 20
-    e2e.one2one.assigner.topk = 20
+    # Simulate a bug: set one2many.topk to 0 (invalid)
+    e2e.one2many.assigner.topk = 0
 
     try:
         e2e.update()  # Should trigger assertion
-        assert False, 'Expected assertion error for one2one.topk=20'
+        assert False, 'Expected assertion error for one2many.topk=0'
     except AssertionError as e:
         assert 'E2E violation' in str(e), f'Wrong error message: {e}'
-        print('PASS: Assertion catches one2one.topk=20 violation')
+        print('PASS: Assertion catches one2many.topk=0 violation')
 
 
 def test_e2e_default_parameters_match_baseline():
@@ -98,14 +102,18 @@ def test_e2e_default_parameters_match_baseline():
     # Test with defaults (no parameters specified)
     e2e = RayCastE2ELoss(model)
 
-    # Check loss defaults
+    # Check loss defaults (updated for dense cell optimization)
     assert e2e.one2many.focal_loss == False, f'Default focal_loss should be False, got {e2e.one2many.focal_loss}'
     assert e2e.one2many.assigner.radius_scale == 1.5, (
         f'Default radius_scale should be 1.5, got {e2e.one2many.assigner.radius_scale}'
     )
     assert e2e.one2many.assigner.topk == 13, f'Default tal_topk should be 13, got {e2e.one2many.assigner.topk}'
+    assert e2e.one2many.lambda_l1 == 5.0, f'Default lambda_l1 should be 5.0 (LSP-DETR), got {e2e.one2many.lambda_l1}'
+    assert e2e.one2many.lambda_piou == 0.5, (
+        f'Default lambda_piou should be 0.5 (minimal for topk=1), got {e2e.one2many.lambda_piou}'
+    )
 
-    print('PASS: Default parameters match Run 7 baseline')
+    print('PASS: Default parameters match NMS-free + LSP-DETR loss configuration')
 
 
 if __name__ == '__main__':

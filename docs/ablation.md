@@ -22,6 +22,8 @@ Tracking the effect of each config change on detection quality.
 | 8 | same as Run 7 but scale/translate augment OFF | 0.553 | 0.374 | 0.164 | 0.550 | 0.730 | 0.709 | 0.642 | 0.624 | 0.633 |
 | 9 | same as Run 7 but yolo26s-p2 (4-scale, stride 4/8/16/32) | 0.538 | 0.381 | 0.135 | 0.520 | 0.722 | 0.675 | 0.684 | 0.588 | 0.632 |
 | 10 | same as Run 7 but QFL (quality focal loss) replaces BCE | 0.529 | 0.243 | 0.134 | 0.379 | 0.740 | 0.480 | 0.370 | 0.669 | 0.477 |
+| 11 | E2E Fix + LSP-DETR loss (tal_topk=13, o2o.topk=1) | ? | ? | ? | ? | ? | ? | ? | ? | ? |
+| 11b | E2E Fix + LSP-DETR loss + QFL (with fixed E2E) | ? | ? | ? | ? | ? | ? | ? | ? | ? |
 
 ---
 

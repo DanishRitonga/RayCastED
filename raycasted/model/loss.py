@@ -94,12 +94,13 @@ class RayCastDetectionLoss(v8DetectionLoss):
             radius_scale=assigner_radius_scale,
         )
 
-        # Loss weights
+        # Loss weights for topk=1 NMS-free detection
+        # Focus on direct ray regression rather than strict IoU supervision
         self.lambda_cls = 0.5
         self.lambda_xy = 50.0  # Huber(delta=0.01) on normalised coords produces tiny
         # gradients; high lambda ensures the optimizer sees centroid errors.
-        self.lambda_l1 = 1.0
-        self.lambda_piou = 2.0
+        self.lambda_l1 = 5.0  # Very strong direct ray supervision (replaces strict IoU)
+        self.lambda_piou = 0.5  # Minimal IoU supervision (mainly for ranking)
         self.lambda_smooth = 0.05  # annealed by RayCastE2ELoss
 
     def preprocess(self, targets, batch_size, scale_tensor=None):
@@ -330,12 +331,13 @@ class RayCastE2ELoss(E2ELoss):
         # CRITICAL: Override parent's hardcoded tal_topk values with our custom values
         # Parent E2ELoss hardcodes tal_topk=10 for one2many and tal_topk=7 for one2one
         # We override these to use our configurable tal_topk parameter
+        # NMS-free requires one2one.topk=1 (exactly one prediction per GT)
         self.one2many.assigner.topk = tal_topk  # Override parent's hardcoded 10
-        self.one2one.assigner.topk = 1  # Override parent's hardcoded 7, enforce top-1
+        self.one2one.assigner.topk = 1  # CRITICAL: NMS-free requires topk=1
 
         # Validate E2E architecture integrity
         assert self.one2one.assigner.topk == 1, (
-            f'E2E violation: one2one.assigner.topk={self.one2one.assigner.topk}, must be 1'
+            f'E2E violation: one2one.assigner.topk={self.one2one.assigner.topk}, must be 1 for NMS-free'
         )
         assert self.one2many.assigner.topk == tal_topk, (
             f'E2E violation: one2many.assigner.topk={self.one2many.assigner.topk}, expected {tal_topk}'
@@ -352,12 +354,12 @@ class RayCastE2ELoss(E2ELoss):
         # Validate E2E integrity on first update (catches config drift)
         if self.updates == 1:
             assert self.one2one.assigner.topk == 1, (
-                f'E2E violation at epoch 1: one2one.assigner.topk={self.one2one.assigner.topk}'
+                f'E2E violation at epoch 1: one2one.assigner.topk={self.one2one.assigner.topk}, must be 1 for NMS-free'
             )
             assert self.one2many.assigner.topk > 1, (
                 f'E2E violation at epoch 1: one2many.assigner.topk={self.one2many.assigner.topk}'
             )
-            print(f'✓ E2E: o2m.topk={self.one2many.assigner.topk}, o2o.topk={self.one2one.assigner.topk}')
+            print(f'✓ E2E NMS-free: o2m.topk={self.one2many.assigner.topk}, o2o.topk={self.one2one.assigner.topk}')
 
         delta = (self.smooth_start - self.smooth_end) / self.smooth_anneal_epochs
         new_lambda = max(self.smooth_end, self.smooth_start - delta * self.updates)

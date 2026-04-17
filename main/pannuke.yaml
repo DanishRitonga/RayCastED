@@ -46,9 +46,9 @@ training:
   # Learning rate
   cos_lr: true               # cosine LR schedule. Was false
 
-  # Assigner
-  assigner_topk: 13          # positive anchors per GT (baseline value)
-  assigner_radius_scale: 1.5 # containment radius multiplier (baseline value)
+  # E2E dual-assignment (NMS-free)
+  tal_topk: 13                # one2many positives per GT (was assigner_topk)
+  assigner_radius_scale: 1.5  # containment radius multiplier
 
   # Classification loss
   focal_loss: false          # BCE loss (baseline)

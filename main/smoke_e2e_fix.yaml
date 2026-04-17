@@ -1,0 +1,70 @@
+global_settings:
+  root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
+  variant: "s"
+  n_rays: 32              # Use 32 rays for faster smoke test
+  max_size: 256
+  crop_size: 256
+  output_mpp: 0.25
+  patching_overlap_pct: 0
+  annotation_type: "raycast"
+
+  global_cell_map:
+    "Neoplastic": 0
+    "Inflammatory": 1
+    "Connective": 2
+    "Dead": 3
+    "Epithelial": 4
+
+# E2E FIX: Updated to use tal_topk instead of assigner_topk
+training:
+  # CRITICAL: E2E dual-assignment fix
+  tal_topk: 13              # NEW: Controls one2many branch (was assigner_topk)
+  assigner_radius_scale: 1.5
+  focal_loss: false         # BCE loss (baseline)
+  cos_lr: true
+
+  # Minimal augmentation for smoke test
+  scale_augment: false      # Disable for faster training
+  translate_augment: false
+  stain_jitter: false
+
+datasets:
+  PanNuke:
+    root_dir: "PanNuke/data"
+    ingestion_method: 1
+    native_mpp: 0.25
+
+    # Use only fold1 for quick smoke test
+    split_separation: "filename_regex"
+    split_args:
+      regex: "(fold1)"
+      split_map:
+        "fold1": "train"
+    modality_separation: "bundled_archive"
+
+    namespace_map:
+      '0': "Neoplastic"
+      '1': "Inflammatory"
+      '2': "Connective"
+      '3': "Dead"
+      '4': "Epithelial"
+    tissue_map:
+      '0': "Breast"
+      '1': "Lung"
+      '2': "Kidney"
+      '3': "Breast"
+      '4': "Prostate"
+      '5': "Colon"
+      '6': "Lung"
+      '7': "Kidney"
+      '8': "Liver"
+      '9': "Prostate"
+      '10': "Lung"
+      '11': "Uterus"
+      '12': "Skin"
+      '13': "Kidney"
+      '14': "Stomach"
+      '15': "Testis"
+      '16': "Thyroid"
+      '17': "Uterus"
+      '18': "Bladder"
