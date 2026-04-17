@@ -55,7 +55,7 @@ class TrainingSettings(BaseModel):
     # Classification loss
     focal_loss: bool = True  # use focal loss instead of BCE. Was False
     focal_gamma: float = 2.0  # focal loss gamma
-    quality_focal_loss: bool = False  # QFL: IoU-aware classification. Replaces BCE/focal when true.
+    quality_focal_loss: bool = False  # QFL is HARMFUL with IoU-based assignment. Do not enable.
 
     # Augmentation (polygon-safe)
     stain_jitter: bool = True  # HSV color jitter for histopathology

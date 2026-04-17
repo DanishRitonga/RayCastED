@@ -67,7 +67,7 @@ def polygon_to_raycast(
     minx, miny, maxx, maxy = poly.bounds
     bbox_w = maxx - minx
     bbox_h = maxy - miny
-    R_far = math.sqrt(bbox_w ** 2 + bbox_h ** 2) * 1.1
+    R_far = math.sqrt(bbox_w**2 + bbox_h**2) * 1.1
 
     # --- Ray casting ---
     shapely.prepare(poly)  # build spatial index once; ~5x faster per-ray query
@@ -114,7 +114,7 @@ def raycast_to_annotation(
     annotation[_const.CLASS_IDX] = float(class_id)
     annotation[_const.CX_IDX] = cx
     annotation[_const.CY_IDX] = cy
-    annotation[_const.RAY_START_IDX:_const.RAY_END_IDX] = rays
+    annotation[_const.RAY_START_IDX : _const.RAY_END_IDX] = rays
     return annotation
 
 

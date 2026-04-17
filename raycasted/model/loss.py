@@ -59,11 +59,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
     def __init__(
         self,
         model,
-        tal_topk: int = 10,
+        tal_topk: int = 13,
         tal_topk2: int | None = None,
-        assigner_topk: int = 20,
-        assigner_radius_scale: float = 2.0,
-        focal_loss: bool = True,
+        assigner_radius_scale: float = 1.5,
+        focal_loss: bool = False,
         focal_gamma: float = 2.0,
         centerness_weight: float = 1.0,
         quality_focal_loss: bool = False,
@@ -84,14 +83,14 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Centerness configuration
         self.lambda_ct = centerness_weight
 
-        # Assigner swap — use configurable topk and radius_scale
+        # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
-            topk=assigner_topk,
+            topk=tal_topk,
             num_classes=self.nc,
             alpha=self.assigner.alpha,
             beta=self.assigner.beta,
             stride=self.stride.tolist(),
-            topk2=tal_topk2,
+            topk2=tal_topk2,  # Pass through topk2 for E2E one2one branch
             radius_scale=assigner_radius_scale,
         )
 
@@ -309,9 +308,9 @@ class RayCastE2ELoss(E2ELoss):
         self,
         model,
         max_epochs: int = 200,
-        assigner_topk: int = 20,
-        assigner_radius_scale: float = 2.0,
-        focal_loss: bool = True,
+        tal_topk: int = 13,
+        assigner_radius_scale: float = 1.5,
+        focal_loss: bool = False,
         focal_gamma: float = 2.0,
         centerness_weight: float = 1.0,
         quality_focal_loss: bool = False,
@@ -319,7 +318,7 @@ class RayCastE2ELoss(E2ELoss):
         # Bind training config to RayCastDetectionLoss so E2ELoss passes it through
         loss_fn = partial(
             RayCastDetectionLoss,
-            assigner_topk=assigner_topk,
+            tal_topk=tal_topk,
             assigner_radius_scale=assigner_radius_scale,
             focal_loss=focal_loss,
             focal_gamma=focal_gamma,
@@ -327,14 +326,39 @@ class RayCastE2ELoss(E2ELoss):
             quality_focal_loss=quality_focal_loss,
         )
         super().__init__(model, loss_fn=loss_fn)
+
+        # CRITICAL: Override parent's hardcoded tal_topk values with our custom values
+        # Parent E2ELoss hardcodes tal_topk=10 for one2many and tal_topk=7 for one2one
+        # We override these to use our configurable tal_topk parameter
+        self.one2many.assigner.topk = tal_topk  # Override parent's hardcoded 10
+        self.one2one.assigner.topk = 1  # Override parent's hardcoded 7, enforce top-1
+
+        # Validate E2E architecture integrity
+        assert self.one2one.assigner.topk == 1, (
+            f'E2E violation: one2one.assigner.topk={self.one2one.assigner.topk}, must be 1'
+        )
+        assert self.one2many.assigner.topk == tal_topk, (
+            f'E2E violation: one2many.assigner.topk={self.one2many.assigner.topk}, expected {tal_topk}'
+        )
         self.smooth_start = 0.05
         self.smooth_end = 0.0
         self.smooth_anneal_fraction = 0.3  # anneal over first 30% of training
         self.smooth_anneal_epochs = max(1, int(max_epochs * self.smooth_anneal_fraction))
 
     def update(self):
-        """Update o2m/o2o weights (inherited) + anneal smoothness lambda."""
+        """Update o2m/o2o weights (inherited) + anneal smoothness + validate E2E integrity."""
         super().update()
+
+        # Validate E2E integrity on first update (catches config drift)
+        if self.updates == 1:
+            assert self.one2one.assigner.topk == 1, (
+                f'E2E violation at epoch 1: one2one.assigner.topk={self.one2one.assigner.topk}'
+            )
+            assert self.one2many.assigner.topk > 1, (
+                f'E2E violation at epoch 1: one2many.assigner.topk={self.one2many.assigner.topk}'
+            )
+            print(f'✓ E2E: o2m.topk={self.one2many.assigner.topk}, o2o.topk={self.one2one.assigner.topk}')
+
         delta = (self.smooth_start - self.smooth_end) / self.smooth_anneal_epochs
         new_lambda = max(self.smooth_end, self.smooth_start - delta * self.updates)
         self.one2many.lambda_smooth = new_lambda

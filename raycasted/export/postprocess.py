@@ -108,7 +108,7 @@ def _decode_single(raw: np.ndarray, strides: list[float], imgsz: int, n_rays: in
     det = np.zeros((n_anchors, raycast_dim + 2), dtype=np.float32)
     det[:, 0] = cx
     det[:, 1] = cy
-    det[:, 2:2 + n_rays] = rays_px
+    det[:, 2 : 2 + n_rays] = rays_px
     det[:, raycast_dim] = max_scores
     det[:, raycast_dim + 1] = cls_idx
 

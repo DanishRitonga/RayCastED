@@ -16,6 +16,7 @@ from raycasted.data.etl.ops.convert import decode_to_vertices, polygon_to_raycas
 from raycasted.data.etl.utils.constants import CX_IDX, CY_IDX, RAY_END_IDX, RAY_START_IDX
 
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from shapely.affinity import rotate
@@ -26,13 +27,16 @@ from shapely.geometry import Point
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_oval_polygon(cx: float, cy: float, semi_a: float, semi_b: float, angle_deg: float) -> 'Polygon':
     """Create a rotated oval (ellipse) as a Shapely Polygon."""
     circle = Point(0, 0).buffer(1.0, resolution=32)
     from shapely.affinity import scale
+
     oval = scale(circle, xfact=semi_a, yfact=semi_b)
     oval = rotate(oval, angle_deg, origin=(0, 0))
     from shapely.affinity import translate
+
     oval = translate(oval, xoff=cx, yoff=cy)
     return oval
 
@@ -94,14 +98,16 @@ def _create_tile_with_ovals(
     cw = content_w if content_w is not None else w
 
     path = directory / name
-    np.savez_compressed(path, image=img, annotations=anns, tissue=np.int32(1),
-                        content_h=np.int32(ch), content_w=np.int32(cw))
+    np.savez_compressed(
+        path, image=img, annotations=anns, tissue=np.int32(1), content_h=np.int32(ch), content_w=np.int32(cw)
+    )
     return path
 
 
 # ---------------------------------------------------------------------------
 # Plotting helpers
 # ---------------------------------------------------------------------------
+
 
 def _plot_crops(ds, ax_idx_offset, axes_flat, crop_size):
     """Plot augmented crops on the given axes."""
@@ -147,6 +153,7 @@ def _plot_crops(ds, ax_idx_offset, axes_flat, crop_size):
 # Main visual generation
 # ---------------------------------------------------------------------------
 
+
 def generate_oval_visuals():
     output_dir = Path(__file__).parent / 'output'
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -159,17 +166,21 @@ def generate_oval_visuals():
         tile_dir = Path(tmp)
         # Tile larger than crop → random crops will place cells near edges
         _create_tile_with_ovals(
-            tile_dir, name='dense.npz',
-            image_size=(1200, 1200), content_h=1100, content_w=1100,
-            n_cells=40, rng=rng,
-            semi_a_range=(15, 50), semi_b_range=(5, 18),
+            tile_dir,
+            name='dense.npz',
+            image_size=(1200, 1200),
+            content_h=1100,
+            content_w=1100,
+            n_cells=40,
+            rng=rng,
+            semi_a_range=(15, 50),
+            semi_b_range=(5, 18),
         )
 
         ds = RayCastTileDataset(str(tile_dir), crop_size=crop_size, augment=True)
 
         fig, axes = plt.subplots(3, 4, figsize=(20, 15))
-        fig.suptitle('Oval Annotations — Dense Edge Cases (cyan=safe, yellow=close, red=near-edge)',
-                      fontsize=13)
+        fig.suptitle('Oval Annotations — Dense Edge Cases (cyan=safe, yellow=close, red=near-edge)', fontsize=13)
         _plot_crops(ds, 0, axes.flat, crop_size)
         plt.tight_layout()
         out = output_dir / 'oval_dense.png'
@@ -181,17 +192,21 @@ def generate_oval_visuals():
     with tempfile.TemporaryDirectory() as tmp:
         tile_dir = Path(tmp)
         _create_tile_with_ovals(
-            tile_dir, name='large.npz',
-            image_size=(1024, 1024), content_h=950, content_w=950,
-            n_cells=12, rng=rng,
-            semi_a_range=(30, 60), semi_b_range=(8, 20),
+            tile_dir,
+            name='large.npz',
+            image_size=(1024, 1024),
+            content_h=950,
+            content_w=950,
+            n_cells=12,
+            rng=rng,
+            semi_a_range=(30, 60),
+            semi_b_range=(8, 20),
         )
 
         ds = RayCastTileDataset(str(tile_dir), crop_size=crop_size, augment=True)
 
         fig, axes = plt.subplots(3, 4, figsize=(20, 15))
-        fig.suptitle('Oval Annotations — Large Shapes (cyan=safe, yellow=close, red=near-edge)',
-                      fontsize=13)
+        fig.suptitle('Oval Annotations — Large Shapes (cyan=safe, yellow=close, red=near-edge)', fontsize=13)
         _plot_crops(ds, 12, axes.flat, crop_size)
         plt.tight_layout()
         out = output_dir / 'oval_large.png'
@@ -203,17 +218,21 @@ def generate_oval_visuals():
     with tempfile.TemporaryDirectory() as tmp:
         tile_dir = Path(tmp)
         _create_tile_with_ovals(
-            tile_dir, name='noaug.npz',
-            image_size=(1200, 1200), content_h=1100, content_w=1100,
-            n_cells=30, rng=rng,
-            semi_a_range=(15, 50), semi_b_range=(5, 18),
+            tile_dir,
+            name='noaug.npz',
+            image_size=(1200, 1200),
+            content_h=1100,
+            content_w=1100,
+            n_cells=30,
+            rng=rng,
+            semi_a_range=(15, 50),
+            semi_b_range=(5, 18),
         )
 
         ds = RayCastTileDataset(str(tile_dir), crop_size=crop_size, augment=False)
 
         fig, axes = plt.subplots(3, 4, figsize=(20, 15))
-        fig.suptitle('Oval Annotations — No Augmentation (raw crop clipping only)',
-                      fontsize=13)
+        fig.suptitle('Oval Annotations — No Augmentation (raw crop clipping only)', fontsize=13)
         _plot_crops(ds, 24, axes.flat, crop_size)
         plt.tight_layout()
         out = output_dir / 'oval_noaug.png'

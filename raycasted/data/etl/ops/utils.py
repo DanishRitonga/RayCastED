@@ -23,7 +23,7 @@ def count_zero_rays(annotations: np.ndarray) -> int:
     if annotations is None or len(annotations) == 0:
         return 0
 
-    rays = annotations[:, _const.RAY_START_IDX:_const.RAY_END_IDX]
+    rays = annotations[:, _const.RAY_START_IDX : _const.RAY_END_IDX]
     n_zero = np.sum(rays == 0, axis=1)
 
     return int(np.sum(n_zero > 5))

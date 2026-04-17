@@ -199,23 +199,25 @@ def test_end_to_end_pipeline():
         print(f'  data.yaml: nc={nc}, names={names}')
 
         # --- Stage 3: Train on GPU ---
-        trainer = RayCastTrainer(overrides={
-            'model': 'yolo11n.yaml',
-            'data': str(yaml_path),
-            'epochs': 2,
-            'batch': 4,
-            'imgsz': 640,
-            'mosaic': 0.0,
-            'mixup': 0.0,
-            'cache': False,
-            'pretrained': False,
-            'device': '0',
-            'workers': 0,
-            'verbose': False,
-            'plots': False,
-            'save': False,
-            'val': True,
-        })
+        trainer = RayCastTrainer(
+            overrides={
+                'model': 'yolo11n.yaml',
+                'data': str(yaml_path),
+                'epochs': 2,
+                'batch': 4,
+                'imgsz': 640,
+                'mosaic': 0.0,
+                'mixup': 0.0,
+                'cache': False,
+                'pretrained': False,
+                'device': '0',
+                'workers': 0,
+                'verbose': False,
+                'plots': False,
+                'save': False,
+                'val': True,
+            }
+        )
         trainer.train()
 
         elapsed = time.time() - start
@@ -226,7 +228,9 @@ def test_end_to_end_pipeline():
         assert ta['nc'] == nc
         assert ta['n_rays'] == 32
 
-        print(f'\nPASS: end-to-end pipeline — ingest({len(npz_files)} ROIs) -> transform({n_train}+{n_val} tiles) -> train(2 epochs GPU) in {elapsed:.1f}s')
+        print(
+            f'\nPASS: end-to-end pipeline — ingest({len(npz_files)} ROIs) -> transform({n_train}+{n_val} tiles) -> train(2 epochs GPU) in {elapsed:.1f}s'
+        )
 
 
 if __name__ == '__main__':

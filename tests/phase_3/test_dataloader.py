@@ -54,7 +54,9 @@ def _create_synthetic_tile(
     cw = content_w if content_w is not None else w
 
     path = directory / name
-    np.savez_compressed(path, image=img, annotations=anns, tissue=np.int32(1), content_h=np.int32(ch), content_w=np.int32(cw))
+    np.savez_compressed(
+        path, image=img, annotations=anns, tissue=np.int32(1), content_h=np.int32(ch), content_w=np.int32(cw)
+    )
     return path
 
 
@@ -165,7 +167,14 @@ def test_empty_annotations_handled():
         # Create tile with 0 annotations
         img = _make_image(640, 640)
         path = tile_dir / 'empty.npz'
-        np.savez_compressed(path, image=img, annotations=np.zeros((0, 35), dtype=np.float32), tissue=np.int32(1), content_h=np.int32(640), content_w=np.int32(640))
+        np.savez_compressed(
+            path,
+            image=img,
+            annotations=np.zeros((0, 35), dtype=np.float32),
+            tissue=np.int32(1),
+            content_h=np.int32(640),
+            content_w=np.int32(640),
+        )
 
         ds = RayCastTileDataset(str(tile_dir), crop_size=640, augment=False)
         img_tensor, labels = ds[0]
@@ -268,7 +277,9 @@ def test_image_annotation_spatial_consistency():
         anns[0, RAY_START_IDX:] = 30.0
 
         path = tile_dir / 'center.npz'
-        np.savez_compressed(path, image=img, annotations=anns, tissue=np.int32(1), content_h=np.int32(640), content_w=np.int32(640))
+        np.savez_compressed(
+            path, image=img, annotations=anns, tissue=np.int32(1), content_h=np.int32(640), content_w=np.int32(640)
+        )
 
         ds = RayCastTileDataset(str(tile_dir), crop_size=640, augment=False)
         _, labels = ds[0]
@@ -324,6 +335,7 @@ def test_visual_output():
     """
     try:
         import matplotlib
+
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
     except ImportError:
@@ -339,7 +351,9 @@ def test_visual_output():
         tile_dir = Path(tmp)
 
         # Create a synthetic tile with cells spread across the image
-        _create_synthetic_tile(tile_dir, name='visual.npz', n_cells=15, image_size=(1024, 1024), content_h=900, content_w=900)
+        _create_synthetic_tile(
+            tile_dir, name='visual.npz', n_cells=15, image_size=(1024, 1024), content_h=900, content_w=900
+        )
 
         ds = RayCastTileDataset(str(tile_dir), crop_size=640, augment=True)
 

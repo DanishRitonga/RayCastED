@@ -122,9 +122,9 @@ class _RayCastCriterionWrapper:
         return RayCastE2ELoss(
             self._model,
             max_epochs=self._max_epochs,
-            assigner_topk=tcfg.get('assigner_topk', 20),
-            assigner_radius_scale=tcfg.get('assigner_radius_scale', 2.0),
-            focal_loss=tcfg.get('focal_loss', True),
+            tal_topk=tcfg.get('tal_topk', 13),
+            assigner_radius_scale=tcfg.get('assigner_radius_scale', 1.5),
+            focal_loss=tcfg.get('focal_loss', False),
             focal_gamma=tcfg.get('focal_gamma', 2.0),
             centerness_weight=tcfg.get('centerness_weight', 1.0),
             quality_focal_loss=tcfg.get('quality_focal_loss', False),

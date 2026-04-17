@@ -11,22 +11,22 @@ def load_puma_geojson(file_path):
     extracted_features = []
 
     # Loop through every annotation in the file
-    for feature in raw_data["features"]:
-        geom = shape(feature["geometry"])
+    for feature in raw_data['features']:
+        geom = shape(feature['geometry'])
 
-        props = feature.get("properties", {})
-        classification = props.get("classification", {})
-        class_name = classification.get("name", "unlabeled")
-        color = classification.get("color", {})
+        props = feature.get('properties', {})
+        classification = props.get('classification', {})
+        class_name = classification.get('name', 'unlabeled')
+        color = classification.get('color', {})
 
         extracted_features.append(
             {
-                "class_name": class_name,
-                "geometry": geom,
-                "color": color,
+                'class_name': class_name,
+                'geometry': geom,
+                'color': color,
             }
         )
 
-    gdf = gpd.GeoDataFrame(extracted_features, geometry="geometry")
+    gdf = gpd.GeoDataFrame(extracted_features, geometry='geometry')
 
     return gdf

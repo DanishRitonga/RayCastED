@@ -93,8 +93,9 @@ def _extract_bbox_annotations(
     return np.array(bboxes, dtype=np.int32) if bboxes else np.empty((0, 5), dtype=np.int32)
 
 
-def _standardize_mpp(image: np.ndarray, annotations: np.ndarray, scale_factor: float,
-                     annotation_type: str) -> tuple[np.ndarray, np.ndarray]:
+def _standardize_mpp(
+    image: np.ndarray, annotations: np.ndarray, scale_factor: float, annotation_type: str
+) -> tuple[np.ndarray, np.ndarray]:
     """Scale image and annotations by MPP factor (module-level for pickling)."""
     if scale_factor == 1.0:
         return image, annotations
@@ -142,17 +143,17 @@ def _process_roi_worker(task: dict) -> tuple[str, np.ndarray, np.ndarray, int] |
         annotation_type = task['annotation_type']
 
         if annotation_type == 'bbox':
-            annotations = _extract_bbox_annotations(masks_df, mask_col, cat_col,
-                                                     task['namespace_map'], task['global_cell_map'])
+            annotations = _extract_bbox_annotations(
+                masks_df, mask_col, cat_col, task['namespace_map'], task['global_cell_map']
+            )
         elif annotation_type == 'raycast':
-            annotations = _extract_raycast_annotations(masks_df, mask_col, cat_col,
-                                                        task['namespace_map'], task['global_cell_map'])
+            annotations = _extract_raycast_annotations(
+                masks_df, mask_col, cat_col, task['namespace_map'], task['global_cell_map']
+            )
         else:
             raise ValueError(f'Unsupported annotation_type: {annotation_type}')
 
-        image_array, annotations = _standardize_mpp(
-            image_array, annotations, task['scale_factor'], annotation_type
-        )
+        image_array, annotations = _standardize_mpp(image_array, annotations, task['scale_factor'], annotation_type)
 
         return (roi_id, image_array, annotations, task['tissue_origin'])
     except Exception as e:
@@ -202,19 +203,21 @@ class ParquetIngestor(BaseDataIngestor):  # noqa: D101
             rgb_bytes = rgb_struct['bytes'] if isinstance(rgb_struct, dict) else rgb_struct
             raw_tissue_id = rgb_row[tissue_col]
 
-            tasks.append({
-                'roi_id': f'{base_roi_name}_roi_{internal_id}',
-                'rgb_bytes': rgb_bytes,
-                'masks_df': masks_by_roi.get(internal_id),
-                'mask_col': mask_col,
-                'cat_col': cat_col,
-                'annotation_type': self.annotation_type,
-                'namespace_map': self.namespace_map,
-                'global_cell_map': self.global_cell_map,
-                'tissue_origin': self.resolve_tissue(raw_tissue_id),
-                'scale_factor': self.scale_factor,
-                'n_rays': self.config.get('n_rays', 32),
-            })
+            tasks.append(
+                {
+                    'roi_id': f'{base_roi_name}_roi_{internal_id}',
+                    'rgb_bytes': rgb_bytes,
+                    'masks_df': masks_by_roi.get(internal_id),
+                    'mask_col': mask_col,
+                    'cat_col': cat_col,
+                    'annotation_type': self.annotation_type,
+                    'namespace_map': self.namespace_map,
+                    'global_cell_map': self.global_cell_map,
+                    'tissue_origin': self.resolve_tissue(raw_tissue_id),
+                    'scale_factor': self.scale_factor,
+                    'n_rays': self.config.get('n_rays', 32),
+                }
+            )
 
         # Dispatch
         if self._workers <= 1 or len(tasks) <= 1:
@@ -225,9 +228,7 @@ class ParquetIngestor(BaseDataIngestor):  # noqa: D101
                     yield result
         else:
             n_workers = min(self._workers, len(tasks))
-            with ProcessPoolExecutor(
-                max_workers=n_workers, mp_context=multiprocessing.get_context('spawn')
-            ) as pool:
+            with ProcessPoolExecutor(max_workers=n_workers, mp_context=multiprocessing.get_context('spawn')) as pool:
                 futures = {pool.submit(_process_roi_worker, t): t['roi_id'] for t in tasks}
                 for future in as_completed(futures):
                     result = future.result()
@@ -254,16 +255,22 @@ class ParquetIngestor(BaseDataIngestor):  # noqa: D101
         return _decode_image(byte_string, is_mask)
 
     def _extract_bbox_annotations(
-        self, roi_masks_df, mask_col: str, cat_col: str, image_array: np.ndarray  # noqa: ARG002
+        self,
+        roi_masks_df,
+        mask_col: str,
+        cat_col: str,
+        image_array: np.ndarray,  # noqa: ARG002
     ) -> np.ndarray:
-        return _extract_bbox_annotations(roi_masks_df, mask_col, cat_col,
-                                          self.namespace_map, self.global_cell_map)
+        return _extract_bbox_annotations(roi_masks_df, mask_col, cat_col, self.namespace_map, self.global_cell_map)
 
     def _extract_ins_segmentation_annotations(self, roi_masks_df, mask_col: str, cat_col: str, image_array: np.ndarray):
         raise NotImplementedError('Instance segmentation annotation extraction not yet implemented')
 
     def _extract_raycast_annotations(
-        self, roi_masks_df, mask_col: str, cat_col: str, image_array: np.ndarray  # noqa: ARG002
+        self,
+        roi_masks_df,
+        mask_col: str,
+        cat_col: str,
+        image_array: np.ndarray,  # noqa: ARG002
     ) -> np.ndarray:
-        return _extract_raycast_annotations(roi_masks_df, mask_col, cat_col,
-                                             self.namespace_map, self.global_cell_map)
+        return _extract_raycast_annotations(roi_masks_df, mask_col, cat_col, self.namespace_map, self.global_cell_map)

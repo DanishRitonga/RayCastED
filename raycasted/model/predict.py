@@ -60,9 +60,9 @@ class RayCastPredictor(DetectionPredictor):
                 continue
 
             # Scale from letterboxed space to original image space
-            poly = det[:, :self.raycast_dim].clone()
+            poly = det[:, : self.raycast_dim].clone()
             poly = self._scale_polygons(poly, img.shape[2:], orig_imgs[i].shape[:2])
-            det = torch.cat([poly, det[:, self.raycast_dim:]], dim=1)
+            det = torch.cat([poly, det[:, self.raycast_dim :]], dim=1)
 
             # Distance-based dedup on centroids
             keep = self._dedup_by_distance(det[:, :2], det[:, self.raycast_dim], dedup_radius)

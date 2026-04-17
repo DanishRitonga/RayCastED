@@ -23,7 +23,9 @@ from raycasted.model.tal import RayCastAssigner
 # ---------------------------------------------------------------------------
 
 NC = 4
-POLY_DIM = 34  # xy(2) + rays(32)
+# Test assumes 32-ray configuration (n_rays=32, so raycast_dim=34)
+# In production, use head.raycast_dim which is computed as 2 + n_rays
+RAYCAST_DIM = 34  # xy(2) + rays(32)
 BATCH_SIZE = 2
 IMG_SIZE = 640
 
@@ -43,6 +45,7 @@ def _make_mock_model(nc=NC, reg_max=1):
     m.reg_max = reg_max
     m.stride = torch.tensor([8.0, 16.0, 32.0])
     m.end2end = True
+    m.raycast_dim = RAYCAST_DIM  # Add this for RayCastED
     model.model = [MagicMock(), m]
     model.model[-1] = m
     return model
@@ -51,12 +54,9 @@ def _make_mock_model(nc=NC, reg_max=1):
 def _make_preds(batch_size=BATCH_SIZE, nc=NC, img_size=IMG_SIZE):
     """Create synthetic prediction dict matching Detect output format."""
     n_anchors = 8400  # 80*80 + 40*40 + 20*20
-    feats = [
-        torch.randn(batch_size, 128, img_size // s, img_size // s)
-        for s in [8, 16, 32]
-    ]
+    feats = [torch.randn(batch_size, 128, img_size // s, img_size // s) for s in [8, 16, 32]]
     return {
-        'boxes': torch.randn(batch_size, POLY_DIM, n_anchors),
+        'boxes': torch.randn(batch_size, RAYCAST_DIM, n_anchors),
         'scores': torch.randn(batch_size, nc, n_anchors),
         'feats': feats,
     }
@@ -66,7 +66,7 @@ def _make_batch(batch_size=BATCH_SIZE, n_gt_per_image=5, nc=NC):
     """Create synthetic batch dict matching Ultralytics DataLoader format."""
     total_gt = batch_size * n_gt_per_image
     # bboxes: (N, 34) — [cx, cy, d_1..d_32] in normalised space
-    bboxes = torch.rand(total_gt, POLY_DIM) * 0.5 + 0.25  # centred in [0.25, 0.75]
+    bboxes = torch.rand(total_gt, RAYCAST_DIM) * 0.5 + 0.25  # centred in [0.25, 0.75]
     bboxes[:, :2] = bboxes[:, :2] * 0.5 + 0.25  # centroids in [0.25, 0.5]
     bboxes[:, 2:] = bboxes[:, 2:] * 0.1 + 0.02  # rays in [0.02, 0.12]
     return {
@@ -87,13 +87,13 @@ def test_constructor():
     model = _make_mock_model()
     loss_fn = RayCastDetectionLoss(model)
 
-    assert loss_fn.no == NC + POLY_DIM, f'Expected no={NC + POLY_DIM}, got {loss_fn.no}'
+    assert loss_fn.no == NC + RAYCAST_DIM, f'Expected no={NC + RAYCAST_DIM}, got {loss_fn.no}'
     assert not loss_fn.use_dfl, 'use_dfl must be False'
     assert isinstance(loss_fn.assigner, RayCastAssigner), (
         f'Assigner must be RayCastAssigner, got {type(loss_fn.assigner).__name__}'
     )
     assert loss_fn.lambda_cls == 0.5
-    assert loss_fn.lambda_xy == 1.0
+    assert loss_fn.lambda_xy == 50.0  # Updated to proven value from AGENTS.md
     assert loss_fn.lambda_l1 == 1.0
     assert loss_fn.lambda_piou == 2.0
     assert loss_fn.lambda_smooth == 0.05
@@ -106,12 +106,15 @@ def test_preprocess_shape():
     loss_fn = RayCastDetectionLoss(model)
 
     # 10 targets: 5 per image across 2 images
-    batch_idx = torch.tensor([0,0,0,0,0, 1,1,1,1,1]).float().unsqueeze(1)
-    targets = torch.cat([
-        batch_idx,
-        torch.randint(0, NC, (10, 1)).float(),  # cls
-        torch.rand(10, POLY_DIM),  # polygon data
-    ], dim=1)
+    batch_idx = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1, 1, 1]).float().unsqueeze(1)
+    targets = torch.cat(
+        [
+            batch_idx,
+            torch.randint(0, NC, (10, 1)).float(),  # cls
+            torch.rand(10, RAYCAST_DIM),  # polygon data
+        ],
+        dim=1,
+    )
 
     out = loss_fn.preprocess(targets, batch_size=2)
     assert out.shape == (2, 5, 35), f'Expected (2, 5, 35), got {out.shape}'
@@ -127,11 +130,14 @@ def test_preprocess_values():
     cx, cy = 0.5, 0.5
     rays = torch.full((1, 32), 0.05)
     polygon = torch.cat([torch.tensor([[cx, cy]]), rays], dim=1)
-    targets = torch.cat([
-        torch.tensor([[0.0]]),  # batch_idx=0
-        torch.tensor([[1.0]]),  # cls=1
-        polygon,
-    ], dim=1)
+    targets = torch.cat(
+        [
+            torch.tensor([[0.0]]),  # batch_idx=0
+            torch.tensor([[1.0]]),  # cls=1
+            polygon,
+        ],
+        dim=1,
+    )
 
     out = loss_fn.preprocess(targets, batch_size=1)
     assert out.shape == (1, 1, 35)
@@ -172,9 +178,7 @@ def test_decode_pred_xy_range():
 
     # With sigmoid(0) = 0.5: (0.5 + 0.5) * 8 / 640 = 8/640 = 0.0125
     expected = (anchor_points + 0.5) * 8.0 / 640.0
-    assert torch.allclose(xy_norm[0], expected, atol=1e-5), (
-        f'Expected {expected}, got {xy_norm[0]}'
-    )
+    assert torch.allclose(xy_norm[0], expected, atol=1e-5), f'Expected {expected}, got {xy_norm[0]}'
     print(f'PASS: decode_pred_xy — output in [0, 1], correct values')
 
 
@@ -272,9 +276,7 @@ def test_piou_correctness():
     expected_piou = 32 * 1.0 / (32 * 4.0)  # = 0.25
     expected_loss = 1.0 - expected_piou  # = 0.75
     assert torch.isclose(piou, torch.tensor(0.25), atol=1e-4), f'Expected PiIoU=0.25, got {piou}'
-    assert torch.isclose(1.0 - piou, torch.tensor(expected_loss), atol=1e-4), (
-        f'Expected loss=0.75, got {1.0 - piou}'
-    )
+    assert torch.isclose(1.0 - piou, torch.tensor(expected_loss), atol=1e-4), f'Expected loss=0.75, got {1.0 - piou}'
     print(f'PASS: L_PolarIoU correctness — PiIoU={piou.item():.4f}, loss={1 - piou.item():.4f}')
 
 
@@ -318,35 +320,38 @@ def test_e2e_constructor():
     )
     assert isinstance(e2e.one2many.assigner, RayCastAssigner)
     assert isinstance(e2e.one2one.assigner, RayCastAssigner)
+
+    # CRITICAL: Check E2E topk configuration (one2one must be 1)
+    assert e2e.one2one.assigner.topk == 1, f'one2one.assigner.topk should be 1, got {e2e.one2one.assigner.topk}'
+    assert e2e.one2many.assigner.topk == 13, f'one2many.assigner.topk should be 13, got {e2e.one2many.assigner.topk}'
+
     assert e2e.one2many.lambda_smooth == 0.05
     assert e2e.one2one.lambda_smooth == 0.05
     assert e2e.smooth_start == 0.05
     assert e2e.smooth_end == 0.0
-    assert e2e.smooth_anneal_epochs == 50
+    assert e2e.smooth_anneal_epochs == 60  # 200 * 0.3 = 60
     print('PASS: E2E constructor — both branches are RayCastDetectionLoss')
 
 
 def test_smoothness_annealing():
-    """Smoothness lambda anneals from 0.05 to 0.0 over 50 updates."""
+    """Smoothness lambda anneals from 0.05 to 0.0 over 60 updates."""
     model = _make_mock_model()
     e2e = RayCastE2ELoss(model)
 
     # Initial value
     assert e2e.one2many.lambda_smooth == 0.05, f'Initial λ should be 0.05'
 
-    # After 50 updates
-    for _ in range(50):
+    # After 60 updates (full annealing period)
+    for _ in range(60):
         e2e.update()
-    assert e2e.one2many.lambda_smooth == 0.0, (
-        f'After 50 updates λ should be 0.0, got {e2e.one2many.lambda_smooth}'
-    )
+    assert e2e.one2many.lambda_smooth == 0.0, f'After 60 updates λ should be 0.0, got {e2e.one2many.lambda_smooth}'
     assert e2e.one2one.lambda_smooth == 0.0
 
     # Stays at 0 after more updates
     for _ in range(10):
         e2e.update()
     assert e2e.one2many.lambda_smooth == 0.0, 'λ should clamp at 0.0'
-    print('PASS: smoothness annealing — 0.05 → 0.0 over 50 updates, clamped at 0.0')
+    print('PASS: smoothness annealing — 0.05 → 0.0 over 60 updates, clamped at 0.0')
 
 
 def test_smoothness_monotonic_decrease():
@@ -359,7 +364,7 @@ def test_smoothness_monotonic_decrease():
         e2e.update()
         current = e2e.one2many.lambda_smooth
         assert current <= prev + 1e-9, (
-            f'λ should be monotonically decreasing: step {i+1}, prev={prev}, current={current}'
+            f'λ should be monotonically decreasing: step {i + 1}, prev={prev}, current={current}'
         )
         prev = current
     print('PASS: smoothness monotonically decreasing')

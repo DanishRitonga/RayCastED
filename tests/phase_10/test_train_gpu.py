@@ -168,23 +168,25 @@ def test_gpu_training_2_epochs():
         yaml_path, total_annots = _prepare_puma_dataset(tmp_dir)
         print(f'Prepared {total_annots} annotations from PUMA')
 
-        trainer = RayCastTrainer(overrides={
-            'model': 'yolo11n.yaml',
-            'data': yaml_path,
-            'epochs': 2,
-            'batch': 4,
-            'imgsz': CROP_SIZE,
-            'mosaic': 0.0,
-            'mixup': 0.0,
-            'cache': False,
-            'pretrained': False,
-            'device': '0',
-            'workers': 0,
-            'verbose': False,
-            'plots': False,
-            'save': True,
-            'val': True,
-        })
+        trainer = RayCastTrainer(
+            overrides={
+                'model': 'yolo11n.yaml',
+                'data': yaml_path,
+                'epochs': 2,
+                'batch': 4,
+                'imgsz': CROP_SIZE,
+                'mosaic': 0.0,
+                'mixup': 0.0,
+                'cache': False,
+                'pretrained': False,
+                'device': '0',
+                'workers': 0,
+                'verbose': False,
+                'plots': False,
+                'save': True,
+                'val': True,
+            }
+        )
 
         trainer.train()
         elapsed = time.time() - start
@@ -208,23 +210,25 @@ def test_all_loss_terms_nonzero_first_epoch():
     with tempfile.TemporaryDirectory() as tmp_dir:
         yaml_path, _ = _prepare_puma_dataset(tmp_dir)
 
-        trainer = RayCastTrainer(overrides={
-            'model': 'yolo11n.yaml',
-            'data': yaml_path,
-            'epochs': 1,
-            'batch': 4,
-            'imgsz': CROP_SIZE,
-            'mosaic': 0.0,
-            'mixup': 0.0,
-            'cache': False,
-            'pretrained': False,
-            'device': '0',
-            'workers': 0,
-            'verbose': False,
-            'plots': False,
-            'save': False,
-            'val': False,
-        })
+        trainer = RayCastTrainer(
+            overrides={
+                'model': 'yolo11n.yaml',
+                'data': yaml_path,
+                'epochs': 1,
+                'batch': 4,
+                'imgsz': CROP_SIZE,
+                'mosaic': 0.0,
+                'mixup': 0.0,
+                'cache': False,
+                'pretrained': False,
+                'device': '0',
+                'workers': 0,
+                'verbose': False,
+                'plots': False,
+                'save': False,
+                'val': False,
+            }
+        )
 
         trainer.train()
 
@@ -262,9 +266,7 @@ def test_lambda_smooth_annealing():
 
     # Monotonically decreasing
     for i in range(1, len(values)):
-        assert values[i] <= values[i - 1] + 1e-9, (
-            f'Non-monotonic at step {i}: {values[i-1]} -> {values[i]}'
-        )
+        assert values[i] <= values[i - 1] + 1e-9, f'Non-monotonic at step {i}: {values[i - 1]} -> {values[i]}'
 
     print(f'PASS: lambda_smooth annealing — 0.05 -> 0.0 over 50 epochs (monotonic)')
 
@@ -278,25 +280,27 @@ def test_checkpoint_save_and_load():
         yaml_path, _ = _prepare_puma_dataset(tmp_dir)
         save_dir = os.path.join(tmp_dir, 'runs')
 
-        trainer = RayCastTrainer(overrides={
-            'model': 'yolo11n.yaml',
-            'data': yaml_path,
-            'epochs': 2,
-            'batch': 4,
-            'imgsz': CROP_SIZE,
-            'mosaic': 0.0,
-            'mixup': 0.0,
-            'cache': False,
-            'pretrained': False,
-            'device': '0',
-            'workers': 0,
-            'verbose': False,
-            'plots': False,
-            'save': True,
-            'val': False,
-            'project': save_dir,
-            'name': 'test_ckpt',
-        })
+        trainer = RayCastTrainer(
+            overrides={
+                'model': 'yolo11n.yaml',
+                'data': yaml_path,
+                'epochs': 2,
+                'batch': 4,
+                'imgsz': CROP_SIZE,
+                'mosaic': 0.0,
+                'mixup': 0.0,
+                'cache': False,
+                'pretrained': False,
+                'device': '0',
+                'workers': 0,
+                'verbose': False,
+                'plots': False,
+                'save': True,
+                'val': False,
+                'project': save_dir,
+                'name': 'test_ckpt',
+            }
+        )
 
         trainer.train()
 
@@ -333,25 +337,27 @@ def test_resume_training():
         save_dir = os.path.join(tmp_dir, 'runs')
 
         # Train 2 epochs
-        trainer1 = RayCastTrainer(overrides={
-            'model': 'yolo11n.yaml',
-            'data': yaml_path,
-            'epochs': 2,
-            'batch': 4,
-            'imgsz': CROP_SIZE,
-            'mosaic': 0.0,
-            'mixup': 0.0,
-            'cache': False,
-            'pretrained': False,
-            'device': '0',
-            'workers': 0,
-            'verbose': False,
-            'plots': False,
-            'save': True,
-            'val': False,
-            'project': save_dir,
-            'name': 'resume_test',
-        })
+        trainer1 = RayCastTrainer(
+            overrides={
+                'model': 'yolo11n.yaml',
+                'data': yaml_path,
+                'epochs': 2,
+                'batch': 4,
+                'imgsz': CROP_SIZE,
+                'mosaic': 0.0,
+                'mixup': 0.0,
+                'cache': False,
+                'pretrained': False,
+                'device': '0',
+                'workers': 0,
+                'verbose': False,
+                'plots': False,
+                'save': True,
+                'val': False,
+                'project': save_dir,
+                'name': 'resume_test',
+            }
+        )
         trainer1.train()
 
         # Find last checkpoint
@@ -360,24 +366,26 @@ def test_resume_training():
         last_ckpt = str(ckpt_candidates[0])
 
         # Start new training from checkpoint (fine-tuning from saved weights)
-        trainer2 = RayCastTrainer(overrides={
-            'model': last_ckpt,
-            'data': yaml_path,
-            'epochs': 2,
-            'batch': 4,
-            'imgsz': CROP_SIZE,
-            'mosaic': 0.0,
-            'mixup': 0.0,
-            'cache': False,
-            'device': '0',
-            'workers': 0,
-            'verbose': False,
-            'plots': False,
-            'save': False,
-            'val': False,
-            'project': save_dir,
-            'name': 'resume_test2',
-        })
+        trainer2 = RayCastTrainer(
+            overrides={
+                'model': last_ckpt,
+                'data': yaml_path,
+                'epochs': 2,
+                'batch': 4,
+                'imgsz': CROP_SIZE,
+                'mosaic': 0.0,
+                'mixup': 0.0,
+                'cache': False,
+                'device': '0',
+                'workers': 0,
+                'verbose': False,
+                'plots': False,
+                'save': False,
+                'val': False,
+                'project': save_dir,
+                'name': 'resume_test2',
+            }
+        )
         trainer2.train()
 
         head = trainer2.model.model[-1]

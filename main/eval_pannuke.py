@@ -103,13 +103,15 @@ def run_inference(model, dataloader, device, conf_threshold=0.25):
                     pred_poly = np.zeros((0, raycast_dim), dtype=np.float32)
                     pred_cls = np.array([], dtype=int)
 
-                results.append({
-                    'pred_polys': pred_poly,
-                    'gt_polys': gt_poly,
-                    'pred_cls': pred_cls,
-                    'gt_cls': gt_cls.astype(int),
-                    'imgsz': crop_size,
-                })
+                results.append(
+                    {
+                        'pred_polys': pred_poly,
+                        'gt_polys': gt_poly,
+                        'pred_cls': pred_cls,
+                        'gt_cls': gt_cls.astype(int),
+                        'imgsz': crop_size,
+                    }
+                )
 
     return results
 
@@ -258,11 +260,7 @@ def compute_map_metrics(results, iou_thresholds=None):
         precision_val = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
         recall_val = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
 
-        f1 = (
-            2 * precision_val * recall_val / (precision_val + recall_val)
-            if (precision_val + recall_val) > 0
-            else 0.0
-        )
+        f1 = 2 * precision_val * recall_val / (precision_val + recall_val) if (precision_val + recall_val) > 0 else 0.0
         results_dict[t] = {
             'mAP': map_val,
             'precision': precision_val,
@@ -352,6 +350,7 @@ def main():
             t.run_pipeline()
             # Reorganize by split
             from raycasted.pipeline import RayCastPipeline
+
             RayCastPipeline._organize_by_split(None, t.registry)
         data_dir = str(test_dir)
 

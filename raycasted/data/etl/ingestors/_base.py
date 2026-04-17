@@ -88,9 +88,7 @@ class BaseDataIngestor(ABC):
             # Apply split_map if provided (e.g., fold1→train, fold2→val, fold3→test)
             split_map = self.config.get('split_args', {}).get('split_map')
             if split_map:
-                df = df.with_columns(
-                    pl.col('split').replace(split_map).alias('split')
-                )
+                df = df.with_columns(pl.col('split').replace(split_map).alias('split'))
 
         elif split_sep == 'none':
             # Stratified random sampling by tissue type
@@ -163,7 +161,12 @@ class BaseDataIngestor(ABC):
         return records
 
     def _assign_stratified_splits(
-        self, df: pl.DataFrame, train_ratio: float, val_ratio: float, test_ratio: float, seed: int  # noqa: ARG002 test_ratio
+        self,
+        df: pl.DataFrame,
+        train_ratio: float,
+        val_ratio: float,
+        test_ratio: float,
+        seed: int,  # noqa: ARG002 test_ratio
     ) -> pl.DataFrame:
         """Assign train/val/test splits via stratified random sampling.
 
@@ -209,7 +212,7 @@ class BaseDataIngestor(ABC):
 
             labels = np.array(['test'] * len(indices), dtype=object)
             labels[:n_train] = 'train'
-            labels[n_train:n_train + n_val] = 'val'
+            labels[n_train : n_train + n_val] = 'val'
             split_arr[indices] = labels
 
         df = df.drop('_tissue')

@@ -22,6 +22,7 @@ from raycasted.data.etl.utils.constants import CX_IDX, CY_IDX, RAY_END_IDX, RAY_
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _circle_polygon(cx: float, cy: float, radius: float, n_pts: int = 64) -> Polygon:
     """Construct a regular n-gon approximating a circle."""
     angles = [2 * math.pi * i / n_pts for i in range(n_pts)]
@@ -49,6 +50,7 @@ def _round_trip_iou(poly: Polygon) -> float:
 # Test 1 — convex round-trip (circle approx, MoNuSAC/PanNuke threshold)
 # ---------------------------------------------------------------------------
 
+
 def test_convex_round_trip():
     poly = _circle_polygon(cx=100.0, cy=100.0, radius=30.0, n_pts=64)
     iou = _round_trip_iou(poly)
@@ -59,6 +61,7 @@ def test_convex_round_trip():
 # ---------------------------------------------------------------------------
 # Test 2 — irregular round-trip (star shape, universal fallback threshold)
 # ---------------------------------------------------------------------------
+
 
 def test_irregular_round_trip():
     # 2:1 ellipse — clearly non-circular (proxy for elongated lymphocyte nuclei).
@@ -82,6 +85,7 @@ def test_irregular_round_trip():
 # Test 3 — representative_point() fallback for concave C-shaped polygon
 # ---------------------------------------------------------------------------
 
+
 def test_representative_point_fallback():
     # C-shape: 80×100 rectangle with a deep notch from x=25 to the right edge,
     # y=15..85. Centroid lands at ≈(28.4, 50) which is inside the notch gap
@@ -92,9 +96,7 @@ def test_representative_point_fallback():
 
     # Confirm the centroid is actually outside (validates our test polygon).
     centroid = c_shape.centroid
-    assert not c_shape.contains(centroid), (
-        'Test setup error: centroid is inside the C-shape — choose a deeper notch'
-    )
+    assert not c_shape.contains(centroid), 'Test setup error: centroid is inside the C-shape — choose a deeper notch'
 
     counter = collections.Counter()
     ann = polygon_to_raycast(c_shape, class_id=1, fallback_counter=counter)
@@ -102,12 +104,8 @@ def test_representative_point_fallback():
 
     rep = c_shape.representative_point()
 
-    assert abs(ann[CX_IDX] - rep.x) < 1e-6, (
-        f'cx {ann[CX_IDX]:.6f} does not match representative_point x {rep.x:.6f}'
-    )
-    assert abs(ann[CY_IDX] - rep.y) < 1e-6, (
-        f'cy {ann[CY_IDX]:.6f} does not match representative_point y {rep.y:.6f}'
-    )
+    assert abs(ann[CX_IDX] - rep.x) < 1e-6, f'cx {ann[CX_IDX]:.6f} does not match representative_point x {rep.x:.6f}'
+    assert abs(ann[CY_IDX] - rep.y) < 1e-6, f'cy {ann[CY_IDX]:.6f} does not match representative_point y {rep.y:.6f}'
     assert counter['representative_point_fallback'] == 1, (
         f'fallback_counter expected 1, got {counter["representative_point_fallback"]}'
     )
@@ -117,6 +115,7 @@ def test_representative_point_fallback():
 # ---------------------------------------------------------------------------
 # Test 4 — R_far validation for circular polygon
 # ---------------------------------------------------------------------------
+
 
 def test_r_far_validation():
     r = 25.0
@@ -129,7 +128,7 @@ def test_r_far_validation():
     minx, miny, maxx, maxy = poly.bounds
     bbox_w = maxx - minx
     bbox_h = maxy - miny
-    actual_r_far = math.sqrt(bbox_w ** 2 + bbox_h ** 2) * 1.1
+    actual_r_far = math.sqrt(bbox_w**2 + bbox_h**2) * 1.1
 
     assert abs(actual_r_far - expected_r_far) < 0.5, (
         f'R_far={actual_r_far:.4f} deviates from expected {expected_r_far:.4f}'
@@ -142,16 +141,20 @@ def test_r_far_validation():
     n_zero = int(np.sum(rays == 0))
     assert n_zero == 0, f'{n_zero} zero rays found — R_far did not reach boundary in all directions'
 
-    print(f'  [PASS] test_r_far_validation  R_far={actual_r_far:.4f} (expected≈{expected_r_far:.4f}), zero_rays={n_zero}')
+    print(
+        f'  [PASS] test_r_far_validation  R_far={actual_r_far:.4f} (expected≈{expected_r_far:.4f}), zero_rays={n_zero}'
+    )
 
 
 # ---------------------------------------------------------------------------
 # Test 5 — visual output (manual inspection, no assertion)
 # ---------------------------------------------------------------------------
 
+
 def test_visual_output():
     try:
         import matplotlib
+
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
     except ImportError:
@@ -166,8 +169,7 @@ def test_visual_output():
 
     cx_s, cy_s = 60.0, 60.0
     ellipse_coords = [
-        (cx_s + 45.0 * math.cos(2 * math.pi * i / 64), cy_s + 22.0 * math.sin(2 * math.pi * i / 64))
-        for i in range(64)
+        (cx_s + 45.0 * math.cos(2 * math.pi * i / 64), cy_s + 22.0 * math.sin(2 * math.pi * i / 64)) for i in range(64)
     ]
     ellipse = Polygon(ellipse_coords)
 

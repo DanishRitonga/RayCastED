@@ -53,7 +53,7 @@ training:
   # Classification loss
   focal_loss: false          # BCE loss (baseline)
   focal_gamma: 2.0           # focal loss gamma (unused when focal_loss=false)
-  quality_focal_loss: true   # QFL: IoU-aware classification. Replaces BCE when true.
+  quality_focal_loss: false  # QFL is harmful with IoU-based assignment
 
   # Augmentation (polygon-safe)
   stain_jitter: true         # HSV color jitter for histopathology. Was false

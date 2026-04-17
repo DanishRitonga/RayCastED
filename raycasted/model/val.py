@@ -214,7 +214,7 @@ class RayCastValidator(DetectionValidator):
             det = det[det[:, self.raycast_dim] > self.args.conf]
             outputs.append(
                 {
-                    'bboxes': det[:, :self.raycast_dim],  # [N, raycast_dim] cx, cy, d_1..d_n
+                    'bboxes': det[:, : self.raycast_dim],  # [N, raycast_dim] cx, cy, d_1..d_n
                     'conf': det[:, self.raycast_dim],  # [N]
                     'cls': det[:, self.raycast_dim + 1],  # [N]
                 }
@@ -292,9 +292,7 @@ class RayCastValidator(DetectionValidator):
 
         # Polar IoU true-positive matching (same metric as training loss)
         # match_predictions expects iou shape [N_gt, N_pred] (parent convention)
-        tp_shapely = (
-            self.match_predictions(preds['cls'], batch['cls'], iou_matrix.T).cpu().numpy()
-        )
+        tp_shapely = self.match_predictions(preds['cls'], batch['cls'], iou_matrix.T).cpu().numpy()
 
         # Centroid distance matching (CPU — small matrices, fast)
         tp_centroid = self._compute_centroid_matches(

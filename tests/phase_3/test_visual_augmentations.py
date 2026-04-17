@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from shapely.affinity import rotate as shapely_rotate, scale as shapely_scale, translate as shapely_translate
@@ -131,7 +132,7 @@ def generate_augmentation_visual():
     for row_idx, (cx, cy, sa, sb, angle) in enumerate(oval_specs):
         oval = _make_oval(cx, cy, sa, sb, angle)
         ann = polygon_to_raycast(oval, class_id=1)
-        assert ann is not None, f'polygon_to_raycast returned None for oval {row_idx+1}'
+        assert ann is not None, f'polygon_to_raycast returned None for oval {row_idx + 1}'
 
         # Build a simple image with a coloured patch for this oval
         img = _make_image_with_ovals(CROP, [oval], bg_rng)
@@ -155,20 +156,30 @@ def generate_augmentation_visual():
             if row_idx == 0:
                 ax.set_title(label, fontsize=11, fontweight='bold')
             if col_idx == 0:
-                ax.set_ylabel(f'Oval {row_idx+1}\n(a={sa}, b={sb}, θ={angle}°)', fontsize=9)
+                ax.set_ylabel(f'Oval {row_idx + 1}\n(a={sa}, b={sb}, θ={angle}°)', fontsize=9)
 
             # Show centroid coords for verification
-            ax.text(4, CROP - 8,
-                    f'cx={aug_ann[CX_IDX]:.0f} cy={aug_ann[CY_IDX]:.0f}',
-                    color='yellow', fontsize=7, va='bottom',
-                    bbox=dict(facecolor='black', alpha=0.5, pad=1))
+            ax.text(
+                4,
+                CROP - 8,
+                f'cx={aug_ann[CX_IDX]:.0f} cy={aug_ann[CY_IDX]:.0f}',
+                color='yellow',
+                fontsize=7,
+                va='bottom',
+                bbox=dict(facecolor='black', alpha=0.5, pad=1),
+            )
 
             ax.tick_params(labelsize=5)
 
     # Legend
-    fig.text(0.5, 0.01,
-             'white = original polygon  |  green = augmented polygon  |  + = centroid',
-             ha='center', fontsize=10, style='italic')
+    fig.text(
+        0.5,
+        0.01,
+        'white = original polygon  |  green = augmented polygon  |  + = centroid',
+        ha='center',
+        fontsize=10,
+        style='italic',
+    )
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.96])
     out = output_dir / 'augmentations.png'

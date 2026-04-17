@@ -45,8 +45,8 @@ def polar_iou(
     d_pred = np.asarray(d_pred, dtype=np.float64)
     d_gt = np.asarray(d_gt, dtype=np.float64)
 
-    pred_sq = d_pred ** 2
-    gt_sq = d_gt ** 2
+    pred_sq = d_pred**2
+    gt_sq = d_gt**2
 
     intersection = np.sum(np.minimum(pred_sq, gt_sq), axis=-1)
     union = np.sum(np.maximum(pred_sq, gt_sq), axis=-1)
@@ -75,11 +75,11 @@ def polar_iou_pairwise_flat(
     d_pred = np.asarray(d_pred, dtype=np.float64)
     d_gt = np.asarray(d_gt, dtype=np.float64)
 
-    pred_sq = d_pred ** 2  # (N_cand, N_gt, 32)
-    gt_sq = d_gt ** 2      # (N_cand, N_gt, 32)
+    pred_sq = d_pred**2  # (N_cand, N_gt, 32)
+    gt_sq = d_gt**2  # (N_cand, N_gt, 32)
 
     intersection = np.sum(np.minimum(pred_sq, gt_sq), axis=2)  # (N_cand, N_gt)
-    union = np.sum(np.maximum(pred_sq, gt_sq), axis=2)         # (N_cand, N_gt)
+    union = np.sum(np.maximum(pred_sq, gt_sq), axis=2)  # (N_cand, N_gt)
 
     return intersection / (union + eps)
 
@@ -107,8 +107,8 @@ def polar_iou_torch(d_pred, d_gt, eps=POLAR_IOU_EPS):
     d_pred = d_pred.float()
     d_gt = d_gt.float()
 
-    pred_sq = d_pred ** 2
-    gt_sq = d_gt ** 2
+    pred_sq = d_pred**2
+    gt_sq = d_gt**2
 
     intersection = torch.sum(torch.minimum(pred_sq, gt_sq), dim=-1)
     union = torch.sum(torch.maximum(pred_sq, gt_sq), dim=-1)
@@ -137,10 +137,10 @@ def polar_iou_pairwise_flat_torch(d_pred, d_gt, eps=POLAR_IOU_EPS):
     d_pred = d_pred.float()
     d_gt = d_gt.float()
 
-    pred_sq = d_pred ** 2  # (N_cand, N_gt, 32)
-    gt_sq = d_gt ** 2      # (N_cand, N_gt, 32)
+    pred_sq = d_pred**2  # (N_cand, N_gt, 32)
+    gt_sq = d_gt**2  # (N_cand, N_gt, 32)
 
     intersection = torch.sum(torch.minimum(pred_sq, gt_sq), dim=2)  # (N_cand, N_gt)
-    union = torch.sum(torch.maximum(pred_sq, gt_sq), dim=2)         # (N_cand, N_gt)
+    union = torch.sum(torch.maximum(pred_sq, gt_sq), dim=2)  # (N_cand, N_gt)
 
     return intersection / (union + eps)

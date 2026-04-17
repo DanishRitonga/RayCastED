@@ -214,8 +214,8 @@ class RayCastAssigner(TaskAlignedAssigner):
             # iou is (N_cand, N_valid_gt), overlaps needs (N_valid_gt, N_cand).
             # Cast to overlaps dtype to handle AMP half/float mismatch.
             pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]  # (N_valid_gt, N_cand)
-            overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = (
-                iou.T.to(overlaps.dtype) * pair_mask.to(overlaps.dtype)
+            overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = iou.T.to(overlaps.dtype) * pair_mask.to(
+                overlaps.dtype
             )
 
         # Alignment metric: cls_score^alpha * iou^beta (same formula as parent)
