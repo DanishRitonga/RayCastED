@@ -338,18 +338,30 @@ class RayCastE2ELoss(E2ELoss):
             branch.hyp.epochs = max_epochs
 
         # CRITICAL: Override parent's hardcoded tal_topk values with our custom values
-        # Parent E2ELoss hardcodes tal_topk=10 for one2many and tal_topk=7 for one2one
-        # We override these to use our configurable tal_topk parameter
-        # NMS-free requires one2one.topk=1 (exactly 1 prediction per GT)
-        self.one2many.assigner.topk = tal_topk  # Override parent's hardcoded 10
-        self.one2one.assigner.topk = 1  # CRITICAL: NMS-free requires topk=1
+        # Parent E2ELoss hardcodes tal_topk=10 for one2many and tal_topk=7 for one2one.
+        #
+        # For one2many: topk=tal_topk, topk2=tal_topk (no secondary filtering)
+        # For one2one: topk=tal_topk//2, topk2=1 (select k/2 candidates, filter to 1)
+        #
+        # Ultralytics' NMS-free mechanism works in two stages:
+        #   1. select_topk_candidates picks `topk` anchors per GT
+        #   2. select_highest_overlaps checks `topk2 != topk` → keeps only `topk2` best
+        # Setting one2one.topk=1 directly SKIPS the candidate pool — the assigner has
+        # no choice, so it can't pick the best anchor. Using topk=7,topk2=1 (like stock
+        # Ultralytics) gives the assigner 7 candidates and picks the single best overlap.
+        self.one2many.assigner.topk = tal_topk
+        self.one2many.assigner.topk2 = tal_topk  # no secondary filtering
+
+        one2one_pool = max(tal_topk // 2, 7)  # candidate pool for one2one
+        self.one2one.assigner.topk = one2one_pool
+        self.one2one.assigner.topk2 = 1  # NMS-free: keep only 1 anchor per GT
 
         # Validate E2E architecture integrity
-        assert self.one2one.assigner.topk == 1, (
-            f'E2E violation: one2one.assigner.topk={self.one2one.assigner.topk}, must be 1 for NMS-free'
+        assert self.one2one.assigner.topk2 == 1, (
+            f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
         )
-        assert self.one2many.assigner.topk == tal_topk, (
-            f'E2E violation: one2many.assigner.topk={self.one2many.assigner.topk}, expected {tal_topk}'
+        assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
+            f'E2E violation: one2many.topk2 ({self.one2many.assigner.topk2}) != topk ({self.one2many.assigner.topk})'
         )
         self.smooth_start = 0.05
         self.smooth_end = 0.0
@@ -362,13 +374,16 @@ class RayCastE2ELoss(E2ELoss):
 
         # Validate E2E integrity on first update (catches config drift)
         if self.updates == 1:
-            assert self.one2one.assigner.topk == 1, (
-                f'E2E violation at epoch 1: one2one.assigner.topk={self.one2one.assigner.topk}, must be 1 for NMS-free'
+            assert self.one2one.assigner.topk2 == 1, (
+                f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
             )
-            assert self.one2many.assigner.topk > 1, (
-                f'E2E violation at epoch 1: one2many.assigner.topk={self.one2many.assigner.topk}'
+            assert self.one2many.assigner.topk == self.one2many.assigner.topk2, (
+                f'E2E violation: one2many topk ({self.one2many.assigner.topk}) != topk2 ({self.one2many.assigner.topk2})'
             )
-            print(f'✓ E2E NMS-free: o2m.topk={self.one2many.assigner.topk}, o2o.topk={self.one2one.assigner.topk}')
+            print(
+                f'✓ E2E NMS-free: o2m.topk={self.one2many.assigner.topk}, '
+                f'o2o.topk={self.one2one.assigner.topk}, o2o.topk2=1'
+            )
 
         delta = (self.smooth_start - self.smooth_end) / self.smooth_anneal_epochs
         new_lambda = max(self.smooth_end, self.smooth_start - delta * self.updates)

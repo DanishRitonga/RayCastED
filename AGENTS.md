@@ -103,6 +103,7 @@ All import paths must use these actual locations.
 - **Default values**: `tal_topk=13`, `assigner_radius_scale=1.5`, `focal_loss=false` (proven baseline).
 - **Validation**: Check console output for `✓ E2E NMS-free: o2m.topk=13, o2o.topk=1` during training.
 - **Weight decay**: Parent `E2ELoss` decays `o2m` weight from 0.8→0.1 over training. `RayCastE2ELoss` must set `hyp.epochs` on both branches to match actual `max_epochs`, otherwise the schedule collapses (e.g. `hyp.epochs=100` with `max_epochs=200` starves one2many for the entire second half of training).
+- **topk2 (secondary filtering)**: Ultralytics' NMS-free mechanism uses a two-stage assignment: `select_topk_candidates` picks `topk` anchors, then `select_highest_overlaps` checks `topk2 != topk` and keeps only `topk2` best. RayCastED must set `one2one.topk2=1` (NOT `one2one.topk=1`). Using `topk=1` directly skips the candidate pool, giving the assigner no choice. Use `topk=max(tal_topk//2, 7)` to provide a candidate pool. For `one2many`, set `topk2=topk` to disable secondary filtering.
 
 ### Geometry Operations
 - **XY decode mismatch**: Training and inference must use same decode formula: `(sigmoid * 2.0 - 0.5 + anchor) * stride`.
