@@ -1,6 +1,6 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
-  variant: "s"        # YOLO26 variant: n, s, m, l, x
+  variant: "m"        # YOLO26 variant: n, s, m, l, x
   n_rays: 64          # Number of radial rays for polygon parameterization
   max_size: 256
   crop_size: 256
