@@ -328,10 +328,19 @@ class RayCastE2ELoss(E2ELoss):
         )
         super().__init__(model, loss_fn=loss_fn)
 
+        # Fix: parent E2ELoss reads one2one.hyp.epochs for the decay schedule,
+        # but RayCastDetectionLoss (mock-based init) doesn't set hyp correctly.
+        # Force both branches to use the actual max_epochs.
+        for branch in (self.one2many, self.one2one):
+            if not hasattr(branch, 'hyp') or branch.hyp is None:
+                from ultralytics.cfg import get_cfg
+                branch.hyp = get_cfg()
+            branch.hyp.epochs = max_epochs
+
         # CRITICAL: Override parent's hardcoded tal_topk values with our custom values
         # Parent E2ELoss hardcodes tal_topk=10 for one2many and tal_topk=7 for one2one
         # We override these to use our configurable tal_topk parameter
-        # NMS-free requires one2one.topk=1 (exactly one prediction per GT)
+        # NMS-free requires one2one.topk=1 (exactly 1 prediction per GT)
         self.one2many.assigner.topk = tal_topk  # Override parent's hardcoded 10
         self.one2one.assigner.topk = 1  # CRITICAL: NMS-free requires topk=1
 

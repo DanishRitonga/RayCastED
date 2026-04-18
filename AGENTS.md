@@ -102,6 +102,7 @@ All import paths must use these actual locations.
 - **Config parameter**: Use `tal_topk` (NOT `assigner_topk`) - this correctly propagates to both branches.
 - **Default values**: `tal_topk=13`, `assigner_radius_scale=1.5`, `focal_loss=false` (proven baseline).
 - **Validation**: Check console output for `✓ E2E NMS-free: o2m.topk=13, o2o.topk=1` during training.
+- **Weight decay**: Parent `E2ELoss` decays `o2m` weight from 0.8→0.1 over training. `RayCastE2ELoss` must set `hyp.epochs` on both branches to match actual `max_epochs`, otherwise the schedule collapses (e.g. `hyp.epochs=100` with `max_epochs=200` starves one2many for the entire second half of training).
 
 ### Geometry Operations
 - **XY decode mismatch**: Training and inference must use same decode formula: `(sigmoid * 2.0 - 0.5 + anchor) * stride`.
