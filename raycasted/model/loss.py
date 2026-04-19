@@ -263,13 +263,16 @@ class RayCastDetectionLoss(v8DetectionLoss):
             fg_smooth = angular_smoothness_loss_torch(fg_pred_rays)  # [N_fg] (already float32)
             loss[4] = (fg_smooth * weight.squeeze(-1)).sum() / target_scores_sum
 
-            # L_ct: Soft polar centerness (foreground only)
+            # L_ct: IoU-aware quality prediction (foreground only)
+            # Instead of polar centerness (which predicts centered-ness),
+            # predict the actual Polar-IoU between predicted and GT rays.
+            # At inference, score = cls * predicted_IoU gives quality-aware
+            # confidence calibration (matching LSP-DETR's scoring strategy).
             ct_pred = preds.get('centerness')
             if ct_pred is not None:
                 fg_ct = ct_pred.permute(0, 2, 1)[fg_mask].squeeze(-1).float()  # [N_fg]
-                n_rays = self.raycast_dim - 2
-                ct_target = _compute_soft_polar_centerness(fg_target_rays, n_rays)
-                loss_ct = F.binary_cross_entropy_with_logits(fg_ct, ct_target, reduction='none')
+                # Target: actual Polar-IoU (already computed above as fg_piou)
+                loss_ct = F.binary_cross_entropy_with_logits(fg_ct, fg_piou.detach(), reduction='none')
                 loss[5] = (loss_ct * weight.squeeze(-1)).sum() / target_scores_sum
         else:
             # DDP safety — touch all prediction tensors to avoid unused-gradient errors
@@ -378,7 +381,8 @@ class RayCastE2ELoss(E2ELoss):
                 f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
             )
             assert self.one2many.assigner.topk == self.one2many.assigner.topk2, (
-                f'E2E violation: one2many topk ({self.one2many.assigner.topk}) != topk2 ({self.one2many.assigner.topk2})'
+                f'E2E violation: one2many topk={self.one2many.assigner.topk} '
+                f'!= topk2={self.one2many.assigner.topk2}'
             )
             print(
                 f'✓ E2E NMS-free: o2m.topk={self.one2many.assigner.topk}, '

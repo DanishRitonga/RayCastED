@@ -321,11 +321,11 @@ def test_e2e_constructor():
     assert isinstance(e2e.one2many.assigner, RayCastAssigner)
     assert isinstance(e2e.one2one.assigner, RayCastAssigner)
 
-    # CRITICAL: Check E2E topk configuration (NMS-free requires one2one.topk=1)
-    assert e2e.one2one.assigner.topk == 1, (
-        f'one2one.assigner.topk should be 1 (NMS-free), got {e2e.one2one.assigner.topk}'
-    )
-    assert e2e.one2many.assigner.topk == 13, f'one2many.assigner.topk should be 13, got {e2e.one2many.assigner.topk}'
+    # CRITICAL: Check E2E topk/topk2 (NMS-free via topk2=1 secondary filtering)
+    assert e2e.one2one.assigner.topk == 7, f'one2one.topk should be 7 (candidate pool), got {e2e.one2one.assigner.topk}'
+    assert e2e.one2one.assigner.topk2 == 1, f'one2one.topk2 should be 1 (NMS-free), got {e2e.one2one.assigner.topk2}'
+    assert e2e.one2many.assigner.topk == 13, f'one2many.topk should be 13, got {e2e.one2many.assigner.topk}'
+    assert e2e.one2many.assigner.topk2 == 13, f'one2many.topk2 should be 13, got {e2e.one2many.assigner.topk2}'
 
     assert e2e.one2many.lambda_smooth == 0.05
     assert e2e.one2one.lambda_smooth == 0.05

@@ -53,13 +53,13 @@ def test_e2e_topk_configuration():
     assert isinstance(e2e.one2many.assigner, RayCastAssigner), 'one2many should use RayCastAssigner'
     assert isinstance(e2e.one2one.assigner, RayCastAssigner), 'one2one should use RayCastAssigner'
 
-    # CRITICAL: Check topk values (NMS-free requires one2one.topk=1)
-    assert e2e.one2many.assigner.topk == 13, f'one2many.assigner.topk should be 13, got {e2e.one2many.assigner.topk}'
-    assert e2e.one2one.assigner.topk == 1, (
-        f'one2one.assigner.topk should be 1 (NMS-free), got {e2e.one2one.assigner.topk}'
-    )
+    # CRITICAL: Check topk/topk2 values
+    assert e2e.one2many.assigner.topk == 13, f'one2many.topk should be 13, got {e2e.one2many.assigner.topk}'
+    assert e2e.one2many.assigner.topk2 == 13, f'one2many.topk2 should be 13 (no secondary filter), got {e2e.one2many.assigner.topk2}'
+    assert e2e.one2one.assigner.topk == 7, f'one2one.topk should be 7 (candidate pool), got {e2e.one2one.assigner.topk}'
+    assert e2e.one2one.assigner.topk2 == 1, f'one2one.topk2 should be 1 (NMS-free), got {e2e.one2one.assigner.topk2}'
 
-    print('PASS: E2E NMS-free configuration — o2m.topk=13, o2o.topk=1')
+    print('PASS: E2E NMS-free — o2m.topk=13, o2o.topk=7→1')
 
 
 def test_e2e_custom_tal_topk():
@@ -69,12 +69,12 @@ def test_e2e_custom_tal_topk():
     # Test with custom topk=20
     e2e = RayCastE2ELoss(model, max_epochs=200, tal_topk=20)
 
-    assert e2e.one2many.assigner.topk == 20, f'one2many.assigner.topk should be 20, got {e2e.one2many.assigner.topk}'
-    assert e2e.one2one.assigner.topk == 1, (
-        f'one2one.assigner.topk should be 1 (NMS-free), got {e2e.one2one.assigner.topk}'
-    )
+    assert e2e.one2many.assigner.topk == 20, f'one2many.topk should be 20, got {e2e.one2many.assigner.topk}'
+    assert e2e.one2many.assigner.topk2 == 20, f'one2many.topk2 should be 20, got {e2e.one2many.assigner.topk2}'
+    assert e2e.one2one.assigner.topk == 10, f'one2one.topk should be 10 (candidate pool), got {e2e.one2one.assigner.topk}'
+    assert e2e.one2one.assigner.topk2 == 1, f'one2one.topk2 should be 1 (NMS-free), got {e2e.one2one.assigner.topk2}'
 
-    print('PASS: Custom tal_topk — o2m.topk=20, o2o.topk=1 (NMS-free)')
+    print('PASS: Custom tal_topk=20 — o2m.topk=20, o2o.topk=10→1')
 
 
 def test_e2e_assertions_trigger_on_bad_config():
