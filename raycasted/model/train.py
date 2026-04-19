@@ -194,6 +194,7 @@ class RayCastTrainer(DetectionTrainer):
             head_channel_scale = tcfg.get('head_channel_scale', 0.5) if tcfg else 0.5
             head_channel_min = tcfg.get('head_channel_min', 64) if tcfg else 64
             use_centerness = tcfg.get('soft_polar_centerness', True) if tcfg else True
+            refinement_kernel_size = tcfg.get('refinement_kernel_size', 3) if tcfg else 3
             new_head = RayCastDetect(
                 nc=nc,
                 end2end=True,
@@ -202,6 +203,7 @@ class RayCastTrainer(DetectionTrainer):
                 head_channel_scale=head_channel_scale,
                 head_channel_min=head_channel_min,
                 use_centerness=use_centerness,
+                refinement_kernel_size=refinement_kernel_size,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):

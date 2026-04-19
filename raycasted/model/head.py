@@ -45,6 +45,67 @@ class RayRefinementBlock(nn.Module):
         return x + self.act(self.gn(self.dwconv(x)))
 
 
+class LargeKernelRefinementBlock(nn.Module):
+    """Large-kernel depthwise conv with reparameterizable small-kernel branch.
+
+    Based on LKCell / RepLKNet design:
+      - Primary branch: large depthwise conv (e.g., 7x7 or 13x13)
+      - Auxiliary branch: small depthwise conv (e.g., 3x3 or 5x5)
+      - At deploy time, merge small kernel into large kernel via reparameterization
+
+    The large kernel gives each anchor a wider receptive field to see
+    neighbouring cells and boundaries, improving polygon quality for
+    dense touching cells without Transformer overhead.
+    """
+
+    def __init__(self, channels: int, kernel_size: int = 7):
+        super().__init__()
+        num_groups = 4 if channels < 64 else 8
+        assert kernel_size % 2 == 1, f'kernel_size must be odd, got {kernel_size}'
+        padding = kernel_size // 2
+
+        self.lk_conv = nn.Conv2d(
+            channels, channels, kernel_size, padding=padding, groups=channels
+        )
+        self.lk_gn = nn.GroupNorm(num_groups, channels)
+
+        # Small auxiliary kernel: use 5 for large kernels, 3 for kernel_size=7
+        small_k = 5 if kernel_size >= 11 else 3
+        small_pad = small_k // 2
+        self.sk_conv = nn.Conv2d(
+            channels, channels, small_k, padding=small_pad, groups=channels
+        )
+        self.sk_gn = nn.GroupNorm(num_groups, channels)
+
+        self.act = nn.SiLU(inplace=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply dual-branch large-kernel refinement with residual."""
+        lk = self.act(self.lk_gn(self.lk_conv(x)))
+        sk = self.act(self.sk_gn(self.sk_conv(x)))
+        return x + lk + sk
+
+    def reparameterize(self):
+        """Merge small-kernel branch into large-kernel for deployment.
+
+        Fuses sk_conv weights into lk_conv via zero-padding, then merges
+        GroupNorm+conv for each branch. After calling this, sk_conv/sk_gn
+        can be removed to reduce inference cost.
+        """
+        sk_weight = self.sk_conv.weight.data
+        sk_bias = self.sk_conv.bias.data
+        lk_weight = self.lk_conv.weight.data
+        lk_bias = self.lk_conv.bias.data
+
+        sk_k = sk_weight.shape[-1]
+        lk_k = lk_weight.shape[-1]
+        pad = (lk_k - sk_k) // 2
+        sk_padded = F.pad(sk_weight, [pad] * 4)
+
+        self.lk_conv.weight.data.copy_(lk_weight + sk_padded)
+        self.lk_conv.bias.data.copy_(lk_bias + sk_bias)
+
+
 class RayCastDetect(Detect):
     """Polygon detection head replacing bounding-box regression with raycast.
 
@@ -71,6 +132,7 @@ class RayCastDetect(Detect):
         head_channel_scale: float = 0.5,
         head_channel_min: int = 64,
         use_centerness: bool = True,
+        refinement_kernel_size: int = 3,
     ):
         """Initialize polygon detection head.
 
@@ -83,6 +145,9 @@ class RayCastDetect(Detect):
             head_channel_scale: Fraction of input channels for head width.
             head_channel_min: Minimum head intermediate channels.
             use_centerness: Whether to add soft polar centerness branch.
+            refinement_kernel_size: Kernel size for polygon refinement block.
+                3 = standard RayRefinementBlock (default).
+                7 or 13 = LargeKernelRefinementBlock (LKCell-style, wider receptive field).
         """
         self.n_rays = n_rays
         self.raycast_dim = 2 + n_rays  # xy + rays
@@ -94,13 +159,21 @@ class RayCastDetect(Detect):
         # BUG-02 fix: override self.no from nc + reg_max*4 to nc + raycast_dim
         self.no = nc + self.raycast_dim
 
+        # Select refinement block based on kernel size
+        if refinement_kernel_size <= 3:
+            block_cls = RayRefinementBlock
+            block_kwargs = {}
+        else:
+            block_cls = LargeKernelRefinementBlock
+            block_kwargs = {'kernel_size': refinement_kernel_size}
+
         # Replace cv2 (box regression) with polygon regression stack
         c2 = max(head_channel_min, int(ch[0] * head_channel_scale))
         self.cv2 = nn.ModuleList(
             nn.Sequential(
                 Conv(x, c2, 3),
                 Conv(c2, c2, 3),
-                RayRefinementBlock(c2),
+                block_cls(c2, **block_kwargs),
                 nn.Conv2d(c2, self.raycast_dim, 1),
             )
             for x in ch
