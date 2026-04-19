@@ -273,7 +273,7 @@ class HungarianRayCastAssigner(RayCastAssigner):
         device = gt_bboxes.device
 
         target_labels = torch.full((bs, na), self.num_classes, dtype=torch.long, device=device)
-        target_bboxes = torch.zeros_like(pd_bboxes)
+        target_bboxes = torch.zeros(bs, na, gt_bboxes.shape[-1], dtype=gt_bboxes.dtype, device=device)
         target_scores = torch.zeros_like(pd_scores)
         fg_mask = torch.zeros(bs, na, dtype=torch.bool, device=device)
         target_gt_idx = torch.zeros(bs, na, dtype=torch.long, device=device)
@@ -287,9 +287,6 @@ class HungarianRayCastAssigner(RayCastAssigner):
 
             valid_gt_idx = valid_gt_mask.nonzero(as_tuple=False).squeeze(-1)
 
-            # Cost matrix: negative alignment metric (Hungarian minimises cost)
-            # Shape: (n_valid_gt, n_cand) — only consider candidate anchors
-            candidate_mask = mask_in_gts[b].any(dim=0) & mask_gt[b, :, 0].any()
             candidate_mask = mask_in_gts[b].any(dim=0)
 
             cand_idx = candidate_mask.nonzero(as_tuple=False).squeeze(-1)
