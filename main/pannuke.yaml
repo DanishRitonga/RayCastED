@@ -69,9 +69,10 @@ training:
   translate_augment: true    # random translation augmentation. Was false
   translate_range: 0.1       # fraction of crop_size
 
-  # Soft polar centerness (PolarMask++)
-  soft_polar_centerness: true  # centerness prediction branch. Was false (new)
-  centerness_weight: 1.0       # BCE loss weight for centerness
+  # Soft polar centerness → IoU-aware quality prediction
+  soft_polar_centerness: true  # Trained to predict Polar-IoU (not centered-ness)
+  centerness_weight: 1.0       # BCE loss weight for IoU quality prediction
+  inference_conf: 0.20         # Optimal threshold with IoU-aware scoring (was 0.25)
 
 datasets:
   PanNuke:

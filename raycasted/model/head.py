@@ -241,7 +241,8 @@ class RayCastDetect(Detect):
             b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (crop_size / self.stride[i]) ** 2)
         if 'ct_head' in o2m:
             for ct in o2m['ct_head']:
-                ct[-1].bias.data.fill_(2.0)
+                # IoU prediction: initial target ≈ 0.5 (mid-range), bias = logit(0.5) = 0.0
+                ct[-1].bias.data.fill_(0.0)
         if self._end2end_arg:
             o2o = self.one2one
             for i, (a, b) in enumerate(zip(o2o['box_head'], o2o['cls_head'])):
@@ -251,4 +252,4 @@ class RayCastDetect(Detect):
                 b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (crop_size / self.stride[i]) ** 2)
             if 'ct_head' in o2o:
                 for ct in o2o['ct_head']:
-                    ct[-1].bias.data.fill_(2.0)
+                    ct[-1].bias.data.fill_(0.0)
