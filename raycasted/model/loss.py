@@ -18,7 +18,7 @@ from ultralytics.utils.tal import make_anchors
 
 from raycasted.data.etl.ops.iou import polar_iou_torch
 from raycasted.data.etl.ops.loss import angular_smoothness_loss_torch
-from raycasted.model.tal import RayCastAssigner
+from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
 
 
 def _compute_soft_polar_centerness(gt_rays: torch.Tensor, n_rays: int) -> torch.Tensor:
@@ -62,6 +62,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         tal_topk: int = 13,
         tal_topk2: int | None = None,
         assigner_radius_scale: float = 1.5,
+        assigner_alpha: float = 0.5,
+        assigner_beta: float = 6.0,
         focal_loss: bool = False,
         focal_gamma: float = 2.0,
         centerness_weight: float = 1.0,
@@ -87,8 +89,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.assigner = RayCastAssigner(
             topk=tal_topk,
             num_classes=self.nc,
-            alpha=self.assigner.alpha,
-            beta=self.assigner.beta,
+            alpha=assigner_alpha,
+            beta=assigner_beta,
             stride=self.stride.tolist(),
             topk2=tal_topk2,  # Pass through topk2 for E2E one2one branch
             radius_scale=assigner_radius_scale,
@@ -314,16 +316,21 @@ class RayCastE2ELoss(E2ELoss):
         max_epochs: int = 200,
         tal_topk: int = 13,
         assigner_radius_scale: float = 1.5,
+        assigner_alpha: float = 0.5,
+        assigner_beta: float = 6.0,
         focal_loss: bool = False,
         focal_gamma: float = 2.0,
         centerness_weight: float = 1.0,
         quality_focal_loss: bool = False,
+        use_hungarian_o2o: bool = True,
     ):
         # Bind training config to RayCastDetectionLoss so E2ELoss passes it through
         loss_fn = partial(
             RayCastDetectionLoss,
             tal_topk=tal_topk,
             assigner_radius_scale=assigner_radius_scale,
+            assigner_alpha=assigner_alpha,
+            assigner_beta=assigner_beta,
             focal_loss=focal_loss,
             focal_gamma=focal_gamma,
             centerness_weight=centerness_weight,
@@ -337,6 +344,7 @@ class RayCastE2ELoss(E2ELoss):
         for branch in (self.one2many, self.one2one):
             if not hasattr(branch, 'hyp') or branch.hyp is None:
                 from ultralytics.cfg import get_cfg
+
                 branch.hyp = get_cfg()
             branch.hyp.epochs = max_epochs
 
@@ -355,14 +363,33 @@ class RayCastE2ELoss(E2ELoss):
         self.one2many.assigner.topk = tal_topk
         self.one2many.assigner.topk2 = tal_topk  # no secondary filtering
 
-        one2one_pool = max(tal_topk // 2, 7)  # candidate pool for one2one
-        self.one2one.assigner.topk = one2one_pool
-        self.one2one.assigner.topk2 = 1  # NMS-free: keep only 1 anchor per GT
+        if use_hungarian_o2o:
+            # Replace the one2one assigner with Hungarian matching for globally
+            # optimal 1:1 assignment — critical for dense touching-cell scenes
+            # where greedy TAL causes assignment collisions.
+            self.one2one.assigner = HungarianRayCastAssigner(
+                topk=1,
+                num_classes=self.one2one.assigner.num_classes,
+                alpha=assigner_alpha,
+                beta=assigner_beta,
+                stride=self.one2one.assigner.stride if hasattr(self.one2one.assigner, 'stride') else [8, 16, 32],
+                topk2=1,
+                radius_scale=assigner_radius_scale,
+            )
+        else:
+            one2one_pool = max(tal_topk // 2, 7)  # candidate pool for one2one
+            self.one2one.assigner.topk = one2one_pool
+            self.one2one.assigner.topk2 = 1  # NMS-free: keep only 1 anchor per GT
 
         # Validate E2E architecture integrity
-        assert self.one2one.assigner.topk2 == 1, (
-            f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
-        )
+        if use_hungarian_o2o:
+            assert isinstance(self.one2one.assigner, HungarianRayCastAssigner), (
+                'E2E violation: one2one assigner must be HungarianRayCastAssigner'
+            )
+        else:
+            assert self.one2one.assigner.topk2 == 1, (
+                f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
+            )
         assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
             f'E2E violation: one2many.topk2 ({self.one2many.assigner.topk2}) != topk ({self.one2many.assigner.topk})'
         )
@@ -377,16 +404,22 @@ class RayCastE2ELoss(E2ELoss):
 
         # Validate E2E integrity on first update (catches config drift)
         if self.updates == 1:
-            assert self.one2one.assigner.topk2 == 1, (
-                f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
-            )
+            is_hungarian = isinstance(self.one2one.assigner, HungarianRayCastAssigner)
+            if is_hungarian:
+                print(
+                    f'✓ E2E NMS-free: o2m.topk={self.one2many.assigner.topk}, '
+                    f'o2o=Hungarian (globally optimal 1:1 matching)'
+                )
+            else:
+                assert self.one2one.assigner.topk2 == 1, (
+                    f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
+                )
+                print(
+                    f'✓ E2E NMS-free: o2m.topk={self.one2many.assigner.topk}, '
+                    f'o2o.topk={self.one2one.assigner.topk}, o2o.topk2=1'
+                )
             assert self.one2many.assigner.topk == self.one2many.assigner.topk2, (
-                f'E2E violation: one2many topk={self.one2many.assigner.topk} '
-                f'!= topk2={self.one2many.assigner.topk2}'
-            )
-            print(
-                f'✓ E2E NMS-free: o2m.topk={self.one2many.assigner.topk}, '
-                f'o2o.topk={self.one2one.assigner.topk}, o2o.topk2=1'
+                f'E2E violation: one2many topk={self.one2many.assigner.topk} != topk2={self.one2many.assigner.topk2}'
             )
 
         delta = (self.smooth_start - self.smooth_end) / self.smooth_anneal_epochs

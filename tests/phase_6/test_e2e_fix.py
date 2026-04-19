@@ -1,18 +1,19 @@
 """E2E Dual-Assignment Fix Validation.
 
-Tests that the critical bug is fixed:
+Tests that the critical bugs are fixed:
 - one2many branch uses topk=13 (configurable)
-- one2one branch uses topk=1 (enforced)
-- Both branches use RayCastAssigner
+- one2one branch uses Hungarian matching (default) or topk2=1 (legacy TAL)
+- Both branches use RayCastAssigner or HungarianRayCastAssigner
 
 Run with: uv run python tests/phase_6/test_e2e_fix.py
 """
 
-import torch
 from unittest.mock import MagicMock
 
-from raycasted.model.loss import RayCastE2ELoss, RayCastDetectionLoss
-from raycasted.model.tal import RayCastAssigner
+import torch
+
+from raycasted.model.loss import RayCastDetectionLoss, RayCastE2ELoss
+from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
 
 
 def _make_mock_model(nc=4, reg_max=1):
@@ -36,30 +37,39 @@ def _make_mock_model(nc=4, reg_max=1):
     return model
 
 
-def test_e2e_topk_configuration():
-    """Verify one2one uses topk=1, one2many uses topk=13."""
+def test_e2e_hungarian_default():
+    """Verify default: one2one uses Hungarian matching."""
     model = _make_mock_model()
     e2e = RayCastE2ELoss(model, max_epochs=200, tal_topk=13)
 
     # Check branch types
-    assert isinstance(e2e.one2many, RayCastDetectionLoss), (
-        f'one2many should be RayCastDetectionLoss, got {type(e2e.one2many).__name__}'
-    )
-    assert isinstance(e2e.one2one, RayCastDetectionLoss), (
-        f'one2one should be RayCastDetectionLoss, got {type(e2e.one2one).__name__}'
-    )
+    assert isinstance(e2e.one2many, RayCastDetectionLoss)
+    assert isinstance(e2e.one2one, RayCastDetectionLoss)
 
     # Check assigner types
-    assert isinstance(e2e.one2many.assigner, RayCastAssigner), 'one2many should use RayCastAssigner'
-    assert isinstance(e2e.one2one.assigner, RayCastAssigner), 'one2one should use RayCastAssigner'
+    assert isinstance(e2e.one2many.assigner, RayCastAssigner)
+    assert isinstance(e2e.one2one.assigner, HungarianRayCastAssigner), (
+        f'one2one should use HungarianRayCastAssigner by default, got {type(e2e.one2one.assigner).__name__}'
+    )
 
-    # CRITICAL: Check topk/topk2 values
-    assert e2e.one2many.assigner.topk == 13, f'one2many.topk should be 13, got {e2e.one2many.assigner.topk}'
-    assert e2e.one2many.assigner.topk2 == 13, f'one2many.topk2 should be 13 (no secondary filter), got {e2e.one2many.assigner.topk2}'
-    assert e2e.one2one.assigner.topk == 7, f'one2one.topk should be 7 (candidate pool), got {e2e.one2one.assigner.topk}'
-    assert e2e.one2one.assigner.topk2 == 1, f'one2one.topk2 should be 1 (NMS-free), got {e2e.one2one.assigner.topk2}'
+    # Check one2many topk
+    assert e2e.one2many.assigner.topk == 13
+    assert e2e.one2many.assigner.topk2 == 13
 
-    print('PASS: E2E NMS-free — o2m.topk=13, o2o.topk=7→1')
+    print('PASS: E2E NMS-free — o2m.topk=13, o2o=Hungarian')
+
+
+def test_e2e_tal_fallback():
+    """Verify use_hungarian_o2o=False falls back to TAL topk2=1."""
+    model = _make_mock_model()
+    e2e = RayCastE2ELoss(model, max_epochs=200, tal_topk=13, use_hungarian_o2o=False)
+
+    assert isinstance(e2e.one2one.assigner, RayCastAssigner)
+    assert not isinstance(e2e.one2one.assigner, HungarianRayCastAssigner)
+    assert e2e.one2one.assigner.topk == 7
+    assert e2e.one2one.assigner.topk2 == 1
+
+    print('PASS: TAL fallback — o2o.topk=7, o2o.topk2=1')
 
 
 def test_e2e_custom_tal_topk():
@@ -69,12 +79,11 @@ def test_e2e_custom_tal_topk():
     # Test with custom topk=20
     e2e = RayCastE2ELoss(model, max_epochs=200, tal_topk=20)
 
-    assert e2e.one2many.assigner.topk == 20, f'one2many.topk should be 20, got {e2e.one2many.assigner.topk}'
-    assert e2e.one2many.assigner.topk2 == 20, f'one2many.topk2 should be 20, got {e2e.one2many.assigner.topk2}'
-    assert e2e.one2one.assigner.topk == 10, f'one2one.topk should be 10 (candidate pool), got {e2e.one2one.assigner.topk}'
-    assert e2e.one2one.assigner.topk2 == 1, f'one2one.topk2 should be 1 (NMS-free), got {e2e.one2one.assigner.topk2}'
+    assert e2e.one2many.assigner.topk == 20
+    assert e2e.one2many.assigner.topk2 == 20
+    assert isinstance(e2e.one2one.assigner, HungarianRayCastAssigner)
 
-    print('PASS: Custom tal_topk=20 — o2m.topk=20, o2o.topk=10→1')
+    print('PASS: Custom tal_topk=20 — o2m.topk=20, o2o=Hungarian')
 
 
 def test_e2e_assertions_trigger_on_bad_config():
@@ -95,6 +104,19 @@ def test_e2e_assertions_trigger_on_bad_config():
         print('PASS: Assertion catches one2many.topk=0 violation')
 
 
+def test_e2e_alpha_beta_configurable():
+    """Verify alpha/beta are passed through to assigners."""
+    model = _make_mock_model()
+    e2e = RayCastE2ELoss(model, max_epochs=200, assigner_alpha=0.25, assigner_beta=3.0)
+
+    assert e2e.one2many.assigner.alpha == 0.25, f'one2many alpha should be 0.25, got {e2e.one2many.assigner.alpha}'
+    assert e2e.one2many.assigner.beta == 3.0, f'one2many beta should be 3.0, got {e2e.one2many.assigner.beta}'
+    assert e2e.one2one.assigner.alpha == 0.25, f'one2one alpha should be 0.25, got {e2e.one2one.assigner.alpha}'
+    assert e2e.one2one.assigner.beta == 3.0, f'one2one beta should be 3.0, got {e2e.one2one.assigner.beta}'
+
+    print('PASS: alpha=0.25, beta=3.0 configured on both branches')
+
+
 def test_e2e_default_parameters_match_baseline():
     """Verify defaults match proven ablation baseline (Run 7)."""
     model = _make_mock_model()
@@ -103,7 +125,7 @@ def test_e2e_default_parameters_match_baseline():
     e2e = RayCastE2ELoss(model)
 
     # Check loss defaults (updated for dense cell optimization)
-    assert e2e.one2many.focal_loss == False, f'Default focal_loss should be False, got {e2e.one2many.focal_loss}'
+    assert not e2e.one2many.focal_loss, f'Default focal_loss should be False, got {e2e.one2many.focal_loss}'
     assert e2e.one2many.assigner.radius_scale == 1.5, (
         f'Default radius_scale should be 1.5, got {e2e.one2many.assigner.radius_scale}'
     )
@@ -112,13 +134,17 @@ def test_e2e_default_parameters_match_baseline():
     assert e2e.one2many.lambda_piou == 0.5, (
         f'Default lambda_piou should be 0.5 (minimal for topk=1), got {e2e.one2many.lambda_piou}'
     )
+    assert e2e.one2many.assigner.alpha == 0.5, f'Default alpha should be 0.5, got {e2e.one2many.assigner.alpha}'
+    assert e2e.one2many.assigner.beta == 6.0, f'Default beta should be 6.0, got {e2e.one2many.assigner.beta}'
 
     print('PASS: Default parameters match NMS-free + LSP-DETR loss configuration')
 
 
 if __name__ == '__main__':
-    test_e2e_topk_configuration()
+    test_e2e_hungarian_default()
+    test_e2e_tal_fallback()
     test_e2e_custom_tal_topk()
     test_e2e_assertions_trigger_on_bad_config()
+    test_e2e_alpha_beta_configurable()
     test_e2e_default_parameters_match_baseline()
     print('\n✓ All E2E fix validation passed!')

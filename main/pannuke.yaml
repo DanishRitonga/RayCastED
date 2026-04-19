@@ -49,6 +49,9 @@ training:
   # E2E dual-assignment (NMS-free)
   tal_topk: 13                # one2many positives per GT (was assigner_topk)
   assigner_radius_scale: 1.5  # containment radius multiplier
+  assigner_alpha: 0.5         # cls^alpha in alignment metric
+  assigner_beta: 6.0          # iou^beta in alignment metric (try 3.0-4.0 for dense scenes)
+  use_hungarian_o2o: true     # Hungarian matching for one2one branch (globally optimal)
 
   # Classification loss
   focal_loss: false          # BCE loss (baseline)

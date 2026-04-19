@@ -124,10 +124,13 @@ class _RayCastCriterionWrapper:
             max_epochs=self._max_epochs,
             tal_topk=tcfg.get('tal_topk', 13),
             assigner_radius_scale=tcfg.get('assigner_radius_scale', 1.5),
+            assigner_alpha=tcfg.get('assigner_alpha', 0.5),
+            assigner_beta=tcfg.get('assigner_beta', 6.0),
             focal_loss=tcfg.get('focal_loss', False),
             focal_gamma=tcfg.get('focal_gamma', 2.0),
             centerness_weight=tcfg.get('centerness_weight', 1.0),
             quality_focal_loss=tcfg.get('quality_focal_loss', False),
+            use_hungarian_o2o=tcfg.get('use_hungarian_o2o', True),
         )
 
 

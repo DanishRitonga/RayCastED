@@ -11,12 +11,12 @@ Validates:
 Run with: uv run python tests/phase_6/test_loss.py
 """
 
-import torch
 from unittest.mock import MagicMock
 
-from raycasted.model.loss import RayCastDetectionLoss, RayCastE2ELoss
-from raycasted.model.tal import RayCastAssigner
+import torch
 
+from raycasted.model.loss import RayCastDetectionLoss, RayCastE2ELoss
+from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -149,7 +149,7 @@ def test_preprocess_values():
 
 
 def test_preprocess_empty():
-    """preprocess handles empty targets."""
+    """Preprocess handles empty targets."""
     model = _make_mock_model()
     loss_fn = RayCastDetectionLoss(model)
 
@@ -179,7 +179,7 @@ def test_decode_pred_xy_range():
     # With sigmoid(0) = 0.5: (0.5 + 0.5) * 8 / 640 = 8/640 = 0.0125
     expected = (anchor_points + 0.5) * 8.0 / 640.0
     assert torch.allclose(xy_norm[0], expected, atol=1e-5), f'Expected {expected}, got {xy_norm[0]}'
-    print(f'PASS: decode_pred_xy — output in [0, 1], correct values')
+    print('PASS: decode_pred_xy — output in [0, 1], correct values')
 
 
 def test_decode_pred_xy_saturating():
@@ -260,7 +260,6 @@ def test_l1_correctness():
     """L_L1: uniform MAE on 32 rays gives correct value."""
     pred = torch.ones(1, 32) * 0.5
     gt = torch.ones(1, 32) * 0.3
-    expected = 0.2  # |0.5 - 0.3| = 0.2
     actual = (pred - gt).abs().mean(-1)
     assert torch.isclose(actual, torch.tensor(0.2), atol=1e-6), f'Expected 0.2, got {actual}'
     print('PASS: L_L1 correctness — uniform MAE = 0.2')
@@ -308,7 +307,7 @@ def test_smooth_nonzero_alternating():
 
 
 def test_e2e_constructor():
-    """RayCastE2ELoss creates two RayCastDetectionLoss branches with RayCastAssigner."""
+    """RayCastE2ELoss creates two RayCastDetectionLoss branches with correct assigners."""
     model = _make_mock_model()
     e2e = RayCastE2ELoss(model)
 
@@ -319,11 +318,11 @@ def test_e2e_constructor():
         f'one2one should be RayCastDetectionLoss, got {type(e2e.one2one).__name__}'
     )
     assert isinstance(e2e.one2many.assigner, RayCastAssigner)
-    assert isinstance(e2e.one2one.assigner, RayCastAssigner)
+    assert isinstance(e2e.one2one.assigner, HungarianRayCastAssigner), (
+        f'one2one should use HungarianRayCastAssigner, got {type(e2e.one2one.assigner).__name__}'
+    )
 
-    # CRITICAL: Check E2E topk/topk2 (NMS-free via topk2=1 secondary filtering)
-    assert e2e.one2one.assigner.topk == 7, f'one2one.topk should be 7 (candidate pool), got {e2e.one2one.assigner.topk}'
-    assert e2e.one2one.assigner.topk2 == 1, f'one2one.topk2 should be 1 (NMS-free), got {e2e.one2one.assigner.topk2}'
+    # CRITICAL: Check E2E topk/topk2
     assert e2e.one2many.assigner.topk == 13, f'one2many.topk should be 13, got {e2e.one2many.assigner.topk}'
     assert e2e.one2many.assigner.topk2 == 13, f'one2many.topk2 should be 13, got {e2e.one2many.assigner.topk2}'
 
@@ -332,7 +331,7 @@ def test_e2e_constructor():
     assert e2e.smooth_start == 0.05
     assert e2e.smooth_end == 0.0
     assert e2e.smooth_anneal_epochs == 60  # 200 * 0.3 = 60
-    print('PASS: E2E constructor — both branches are RayCastDetectionLoss')
+    print('PASS: E2E constructor — o2m uses RayCastAssigner, o2o uses HungarianRayCastAssigner')
 
 
 def test_smoothness_annealing():
@@ -341,7 +340,7 @@ def test_smoothness_annealing():
     e2e = RayCastE2ELoss(model)
 
     # Initial value
-    assert e2e.one2many.lambda_smooth == 0.05, f'Initial λ should be 0.05'
+    assert e2e.one2many.lambda_smooth == 0.05, 'Initial λ should be 0.05'
 
     # After 60 updates (full annealing period)
     for _ in range(60):

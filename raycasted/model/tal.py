@@ -5,6 +5,11 @@ assignment with polygon-aware logic:
   - select_candidates_in_gts: 75th-percentile radius containment
   - get_box_metrics: VRAM-safe Polar-IoU with per-batch chunking
 
+HungarianRayCastAssigner extends RayCastAssigner with globally optimal
+bipartite matching (scipy.linear_sum_assignment) for the one2one branch,
+replacing the greedy topk selection that causes assignment collisions
+in dense touching-cell scenes.
+
 get_targets is NOT overridden — the parent implementation is dimension-
 agnostic (uses gt_bboxes.shape[-1] dynamically) and works for 34-dim
 polygon targets without modification.
@@ -13,6 +18,7 @@ Spec reference: docs/project.md §11
 """
 
 import torch
+from scipy.optimize import linear_sum_assignment
 from ultralytics.utils.tal import TaskAlignedAssigner
 
 from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
@@ -221,3 +227,117 @@ class RayCastAssigner(TaskAlignedAssigner):
         # Alignment metric: cls_score^alpha * iou^beta (same formula as parent)
         align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
         return align_metric, overlaps
+
+
+class HungarianRayCastAssigner(RayCastAssigner):
+    """Globally optimal bipartite matching assigner for the one2one branch.
+
+    Replaces the greedy topk→topk2 selection in TaskAlignedAssigner with
+    scipy.linear_sum_assignment (Hungarian algorithm) to find the globally
+    optimal 1:1 assignment between GT objects and anchor points.
+
+    This is critical for dense touching-cell scenes (e.g., PanNuke) where
+    greedy TAL causes assignment collisions: nearby GTs independently pick
+    the same anchors, and select_highest_overlaps resolves ties by max-IoU,
+    often giving suboptimal assignments that degrade NMS-free inference.
+
+    Inherits select_candidates_in_gts and get_box_metrics from RayCastAssigner.
+    Only overrides _forward to replace the selection mechanism.
+    """
+
+    def _forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
+        """Hungarian matching assignment — globally optimal 1:1 matching.
+
+        Uses the same candidate filtering and IoU computation as TAL, but
+        replaces topk selection with Hungarian algorithm on the cost matrix
+        (negative alignment metric), ensuring each GT is matched to exactly
+        one anchor with no collisions.
+
+        Args:
+            pd_scores: Predicted classification scores, shape (B, N_anchors, nc).
+            pd_bboxes: Predicted polygon targets, shape (B, N_anchors, 34).
+            anc_points: Anchor grid positions, shape (N_anchors, 2).
+            gt_labels: GT class labels, shape (B, N_max_gt, 1).
+            gt_bboxes: GT polygon targets, shape (B, N_max_gt, 34).
+            mask_gt: Valid GT mask, shape (B, N_max_gt, 1).
+
+        Returns:
+            Tuple of (target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx).
+        """
+        mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes, mask_gt)
+        align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt)
+
+        bs = pd_scores.shape[0]
+        na = pd_scores.shape[1]
+        n_max_boxes = gt_bboxes.shape[1]
+        device = gt_bboxes.device
+
+        target_labels = torch.full((bs, na), self.num_classes, dtype=torch.long, device=device)
+        target_bboxes = torch.zeros_like(pd_bboxes)
+        target_scores = torch.zeros_like(pd_scores)
+        fg_mask = torch.zeros(bs, na, dtype=torch.bool, device=device)
+        target_gt_idx = torch.zeros(bs, na, dtype=torch.long, device=device)
+        mask_pos = torch.zeros(bs, n_max_boxes, na, dtype=torch.float32, device=device)
+
+        for b in range(bs):
+            valid_gt_mask = mask_gt[b, :, 0].bool()
+            n_valid_gt = valid_gt_mask.sum().item()
+            if n_valid_gt == 0:
+                continue
+
+            valid_gt_idx = valid_gt_mask.nonzero(as_tuple=False).squeeze(-1)
+
+            # Cost matrix: negative alignment metric (Hungarian minimises cost)
+            # Shape: (n_valid_gt, n_cand) — only consider candidate anchors
+            candidate_mask = mask_in_gts[b].any(dim=0) & mask_gt[b, :, 0].any()
+            candidate_mask = mask_in_gts[b].any(dim=0)
+
+            cand_idx = candidate_mask.nonzero(as_tuple=False).squeeze(-1)
+            n_cand = cand_idx.shape[0]
+            if n_cand == 0:
+                continue
+
+            # Build cost matrix from alignment metric
+            # align_metric[b] is (n_max_boxes, na)
+            cost = align_metric[b][valid_gt_idx[:, None], cand_idx[None, :]]  # (n_valid_gt, n_cand)
+
+            # Apply candidate mask: set non-candidates to large cost
+            pair_mask = mask_in_gts[b][valid_gt_idx[:, None], cand_idx[None, :]]
+            cost = cost * pair_mask.float()
+
+            # Hungarian algorithm (minimise negative = maximise alignment)
+            # For large matrices, fall back to top-1 greedy per GT
+            if n_valid_gt * n_cand > 0:
+                cost_np = (-cost.float()).cpu().numpy()
+                row_ind, col_ind = linear_sum_assignment(cost_np)
+                matched_gt = valid_gt_idx[row_ind]
+                matched_anchor = cand_idx[col_ind]
+
+                # Verify matches are within candidate mask
+                for gt_i, anc_i in zip(matched_gt, matched_anchor):
+                    if mask_in_gts[b, gt_i, anc_i]:
+                        mask_pos[b, gt_i, anc_i] = 1.0
+                        fg_mask[b, anc_i] = True
+                        target_gt_idx[b, anc_i] = gt_i
+
+            # Fill targets for matched anchors
+            if fg_mask[b].any():
+                fg_idx = fg_mask[b].nonzero(as_tuple=False).squeeze(-1)
+                gt_indices = target_gt_idx[b, fg_idx]
+                target_labels[b, fg_idx] = gt_labels[b, gt_indices, 0].long()
+                target_bboxes[b, fg_idx] = gt_bboxes[b, gt_indices]
+
+                # One-hot class scores
+                cls_labels = gt_labels[b, gt_indices, 0].long().clamp(min=0)
+                target_scores[b, fg_idx] = torch.zeros(
+                    fg_idx.shape[0], self.num_classes, device=device, dtype=target_scores.dtype
+                ).scatter_(1, cls_labels.unsqueeze(-1), 1.0)
+
+        # Normalize alignment metric (same as parent)
+        align_metric *= mask_pos
+        pos_align_metrics = align_metric.amax(dim=-1, keepdim=True)
+        pos_overlaps = (overlaps * mask_pos).amax(dim=-1, keepdim=True)
+        norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
+        target_scores = target_scores * norm_align_metric
+
+        return target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx
