@@ -231,10 +231,13 @@ class RayCastTrainer(DetectionTrainer):
     def get_validator(self):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
         self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'piou_loss', 'smooth_loss', 'ct_loss')
+        args_copy = copy.copy(self.args)
+        if self.training_config and 'inference_conf' in self.training_config:
+            args_copy.conf = self.training_config['inference_conf']
         return RayCastValidator(
             self.test_loader,
             save_dir=self.save_dir,
-            args=copy.copy(self.args),
+            args=args_copy,
             _callbacks=self.callbacks,
         )
 

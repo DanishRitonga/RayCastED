@@ -49,7 +49,7 @@ def load_model(weights_path: str, device: torch.device):
     return model
 
 
-def run_inference(model, dataloader, device, conf_threshold=0.25):
+def run_inference(model, dataloader, device, conf_threshold=0.20):
     """Run inference over all tiles, collecting predictions and GT.
 
     Returns:
@@ -99,13 +99,16 @@ def run_inference(model, dataloader, device, conf_threshold=0.25):
                 if det.shape[0] > 0:
                     pred_poly = det[:, :raycast_dim]  # [N_pred, raycast_dim]
                     pred_cls = det[:, raycast_dim + 1].astype(int)
+                    pred_confs = det[:, raycast_dim]  # confidence score
                 else:
                     pred_poly = np.zeros((0, raycast_dim), dtype=np.float32)
                     pred_cls = np.array([], dtype=int)
+                    pred_confs = np.array([], dtype=np.float32)
 
                 results.append(
                     {
                         'pred_polys': pred_poly,
+                        'pred_confs': pred_confs,
                         'gt_polys': gt_poly,
                         'pred_cls': pred_cls,
                         'gt_cls': gt_cls.astype(int),
@@ -325,7 +328,7 @@ def main():
     parser.add_argument('--output', default=None, help='Output dir (required with --config)')
     parser.add_argument('--batch', type=int, default=16, help='Batch size')
     parser.add_argument('--device', default='0', help='Device (cpu, 0, 0,1)')
-    parser.add_argument('--conf', type=float, default=0.25, help='Confidence threshold')
+    parser.add_argument('--conf', type=float, default=0.20, help='Confidence threshold')
     parser.add_argument('--workers', type=int, default=8, help='DataLoader workers')
     parser.add_argument('--debug', action='store_true', help='Print diagnostic info for first 10 images')
     args = parser.parse_args()
@@ -463,7 +466,7 @@ def main():
 
     # GFLOPs — model_info returns (n_layers, n_params, n_grads, gflops)
     try:
-        _, _, _, gflops = model_info(model, imgsz=crop_size, verbose=False)
+        _, _, _, gflops = model_info(model, imgsz=crop_size, verbose=True)
     except Exception:
         gflops = 0.0
 
