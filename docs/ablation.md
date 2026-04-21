@@ -24,6 +24,7 @@ Tracking the effect of each config change on detection quality.
 | 10 | same as Run 7 but QFL (quality focal loss) replaces BCE | 0.529 | 0.243 | 0.134 | 0.379 | 0.740 | 0.480 | 0.370 | 0.669 | 0.477 |
 | **11** ⭐ | **E2E Fix + Hungarian matching (tal_topk=13, beta=3.0, o2o.topk=1)** | **0.558** | **0.428** | **0.250** | **0.543** | **0.746** | **0.682** | **0.685** | **0.598** | **0.639** |
 | 12 | P3-P5 + Large Kernel (refinement_kernel_size=7) | 0.561 | 0.425 | 0.248 | 0.545 | 0.749 | 0.683 | 0.686 | 0.598 | 0.639 |
+| 12b | P3-P5 + Pretrained Backbone (yolo26s.pt, COCO) | ? | ? | ? | ? | ? | ? | ? | ? | ? |
 
 ---
 
@@ -93,18 +94,27 @@ Replace PANet downsampling conv with Daubechies-2 DWT in the neck only.
 Purpose: Test if preserving high-frequency details during feature fusion helps DQ.
 Expected: +0.01-0.04 mAP if neck is the bottleneck.
 
-### Run 13 — P2-P4 Scale (Standard 3×3 Head) 🔄 IN PROGRESS
+### Run 12b — P3-P5 + Pretrained Backbone (COCO) 🔄 IN PROGRESS
+Same as Run 11 but with COCO-pretrained backbone (layers 0-10):
+```yaml
+  pretrained_backbone: "yolo26s.pt"  # 5.46M backbone params from COCO
+  # Neck and head remain randomly initialised
+```
+Purpose: Test if transfer learning from COCO backbone closes the DQ gap.
+240/240 backbone keys compatible (identical architecture).
+Status: Config updated, ready to train.
+
+### Run 13 — P2-P4 Scale (Standard 3×3 Head) — PENDING
 Same as Run 11 but with P2-P4 scales (P5 removed):
 ```yaml
 global_settings:
-  model: "yolo26s-p2p4.yaml"  # P2/4, P3/8, P4/16 — no P5
+  model: "raycasted/cfg/yolo26s-p2p4.yaml"  # P2/4, P3/8, P4/16 — no P5
 
 training:
   refinement_kernel_size: 3  # Standard head (isolate P2 effect)
 ```
 Purpose: Isolate P2's contribution. Run 9 tested P2-P5 (with P5 noise), this tests P2-P4 only.
 7.06M params, 25.6 GFLOPs (vs 10.01M/22.8 GFLOPs baseline).
-Status: Config updated, ready to train.
 
 ---
 
@@ -176,8 +186,9 @@ Status: Config updated, ready to train.
 | # | Config | Expected Impact | Evidence | Priority |
 |---|--------|----------------|----------|----------|
 | ~~12~~ | ~~P3-P5 + Large Kernel (refinement_kernel_size=7)~~ | ~~+0.03-0.06 mAP~~ | ~~RepLKNet +4.2% AP~~ | ✅ DONE: Negligible |
-| 12b | P3-P5 + DWT Neck (DB2 downsampling) | +0.01-0.04 mAP | DWT-UNet +3.2% Dice | HIGH |
-| 13 | P2-P4 scale (yolo26s-p2p4.yaml) | +0.03-0.08 mAP | P2 provides finer resolution | HIGH |
-| 14 | P2-P4 + DCN only (ablation) | +0.03-0.08 mAP | Deformable DETR +8.3% AP | MEDIUM |
-| 15 | P2-P4 + DCN + DWT Neck | +0.05-0.12 mAP | Combined neck improvements | MEDIUM |
+| **12b** | **P3-P5 + Pretrained Backbone (COCO)** | **+0.05-0.15 mAP** | **Transfer learning from COCO** | **HIGH** |
+| 13 | P2-P4 scale (yolo26s-p2p4.yaml) | +0.03-0.08 mAP | P2 provides finer resolution | MEDIUM |
+| 12c | P2-P4 + Pretrained Backbone | +0.08-0.18 mAP | Combined | MEDIUM |
+| 14 | P2-P4 + DWT Neck (DB2 downsampling) | +0.01-0.04 mAP | DWT-UNet +3.2% Dice | MEDIUM |
+| 15 | P2-P4 + DCN only (ablation) | +0.03-0.08 mAP | Deformable DETR +8.3% AP | LOW |
 | 16 | P2-P4 + DCN + DWT + BiFPN | +0.08-0.15 mAP | BiFPN +2-3% AP (ablation) | LOW |

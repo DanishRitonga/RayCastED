@@ -1,7 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"        # YOLO26 variant: n, s, m, l, x
-  model: "raycasted/cfg/yolo26s-p2p4.yaml"  # P2-P4 scales, P5 removed (Run 13)
+  # model: "raycasted/cfg/yolo26s-p2p4.yaml"  # Uncomment for P2-P4 (Run 13)
   n_rays: 64          # Number of radial rays for polygon parameterization
   max_size: 256
   crop_size: 256
@@ -82,6 +82,9 @@ training:
                                # 3 = standard RayRefinementBlock (Run 11 baseline)
                                # 7 = LargeKernelRefinementBlock — tested in Run 12, negligible impact
                                # Conclusion: bottleneck is in neck, not head
+
+  # Pretrained backbone (COCO weights, layers 0-10 only)
+  pretrained_backbone: "yolo26s.pt"  # Path to pretrained .pt file. Set null to disable.
 
 datasets:
   PanNuke:

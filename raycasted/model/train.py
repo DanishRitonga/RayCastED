@@ -50,6 +50,39 @@ def _extract_neck_channels(head) -> tuple:
     return tuple(head.cv2[i][0].conv.in_channels for i in range(head.nl))
 
 
+def _load_backbone_weights(model, weights_path: str) -> None:
+    """Load pretrained backbone weights, skipping neck and head.
+
+    Loads only layers 0-10 (backbone: P1/2 through P5/32 + SPPF + C2PSA).
+    Neck and head are left randomly initialised so they can have any
+    architecture (P2-P4, DWT, etc.) without weight mismatch.
+
+    Args:
+        model: DetectionModel (returned by super().get_model()).
+        weights_path: Path to pretrained .pt file (e.g. 'yolo26s.pt').
+    """
+    from ultralytics import YOLO
+
+    pretrained = YOLO(weights_path)
+    pretrained_state = pretrained.model.state_dict()
+    backbone_prefixes = tuple(f'model.{i}.' for i in range(11))
+    backbone_state = {k: v for k, v in pretrained_state.items() if k.startswith(backbone_prefixes)}
+
+    model_state = model.state_dict()
+    matched = {k: v for k, v in backbone_state.items() if k in model_state and model_state[k].shape == v.shape}
+    skipped = {k: v for k, v in backbone_state.items() if k not in matched}
+
+    model_state.update(matched)
+    model.load_state_dict(model_state)
+
+    n_matched = sum(v.numel() for v in matched.values())
+    n_skipped = sum(v.numel() for v in skipped.values())
+    print(
+        f'Pretrained backbone: {len(matched)}/{len(backbone_state)} keys loaded '
+        f'({n_matched:,} params), {len(skipped)} skipped ({n_skipped:,} params)'
+    )
+
+
 def _raycast_collate_fn(batch: list) -> dict:
     """Collate (image, labels) tuples into a batch dict for training.
 
@@ -225,6 +258,14 @@ class RayCastTrainer(DetectionTrainer):
         model.init_criterion = _RayCastCriterionWrapper(
             model, max_epochs=max_epochs, training_config=self.training_config
         )
+
+        # Load pretrained backbone weights if configured.
+        # Only loads backbone layers (0-10), skipping neck/head so they
+        # initialise randomly. This enables transfer learning from COCO
+        # while allowing full freedom in neck/head architecture.
+        bb_weights = (self.training_config or {}).get('pretrained_backbone')
+        if bb_weights:
+            _load_backbone_weights(model, bb_weights)
 
         return model
 
