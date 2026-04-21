@@ -22,8 +22,8 @@ Tracking the effect of each config change on detection quality.
 | 8 | same as Run 7 but scale/translate augment OFF | 0.553 | 0.374 | 0.164 | 0.550 | 0.730 | 0.709 | 0.642 | 0.624 | 0.633 |
 | 9 | same as Run 7 but yolo26s-p2 (4-scale, stride 4/8/16/32) | 0.538 | 0.381 | 0.135 | 0.520 | 0.722 | 0.675 | 0.684 | 0.588 | 0.632 |
 | 10 | same as Run 7 but QFL (quality focal loss) replaces BCE | 0.529 | 0.243 | 0.134 | 0.379 | 0.740 | 0.480 | 0.370 | 0.669 | 0.477 |
-| 11 | E2E Fix + LSP-DETR loss (tal_topk=13, o2o.topk=1) | ? | ? | ? | ? | ? | ? | ? | ? | ? |
-| 11b | E2E Fix + LSP-DETR loss + QFL (with fixed E2E) | ? | ? | ? | ? | ? | ? | ? | ? | ? |
+| 11 | E2E Fix + Hungarian matching (tal_topk=13, beta=3.0, o2o.topk=1) | 0.558 | 0.428 | 0.250 | 0.543 | 0.746 | 0.682 | 0.685 | 0.598 | 0.639 |
+| 12 | P3-P5 + Large Kernel (refinement_kernel_size=7) | ? | ? | ? | ? | ? | ? | ? | ? | ? |
 
 ---
 
@@ -72,6 +72,36 @@ Same as Run 4 but:
 ```
 Result: full recovery to baseline. Focal loss confirmed harmful.
 
+### Run 11 — E2E Fix + Hungarian Matching
+Same as Run 7 but:
+```yaml
+  tal_topk: 13              # Controls one2many branch
+  use_hungarian_o2o: true   # Hungarian matching for one2one branch (globally optimal)
+  assigner_beta: 3.0        # Lowered from 6.0 for better dense cell handling
+```
+Result: mAP@0.5 +0.039, mAP@0.75 +0.076. Significant improvement at stricter thresholds.
+
+### Run 12 — P3-P5 + Large Kernel (Phase 1) 🔄 IN PROGRESS
+Quick test with existing P3-P5 scales:
+```yaml
+  refinement_kernel_size: 7  # Add to Run 11 config
+```
+Purpose: Validate large kernel helps before investing in P2 model.
+Expected: +0.03-0.06 mAP (RepLKNet: +4.2% AP on small objects)
+Status: Config updated in main/pannuke.yaml, ready to train
+
+### Run 13 — P2-P4 + Large Kernel (Super-P2) — PENDING
+```yaml
+global_settings:
+  model: "yolo26s-p2.yaml"  # Create P2-enabled model
+
+training:
+  refinement_kernel_size: 7
+  # P5 removed (too coarse for cells)
+```
+Purpose: Combine P2's fine resolution with large kernel's RF.
+Expected: +0.05-0.10 mAP
+
 ---
 
 ## Observations
@@ -85,3 +115,16 @@ Result: full recovery to baseline. Focal loss confirmed harmful.
 - **Run 8 vs Run 7:** Removing scale/translate augmentation hurt precision by 5 points (0.695→0.642) with mAP@0.5 dropping -0.015. Earlier comparison (Run 5 vs Run 2) falsely suggested augmentations were neutral — it was confounded by the wide head addition. **Conclusion: scale and translate augmentation are beneficial (+0.015 mAP, +0.053 precision). Must be kept enabled.**
 - **Run 9 vs Run 7:** P2 detection scale (stride 4/8/16/32, 5440 anchors) regressed across all metrics vs 3-scale (stride 8/16/32, 1344 anchors). mAP@0.75 dropped -0.039. At 256px/0.25 MPP, cells are ~28px diameter — already well-covered by P3 stride-8 anchors. The extra 4096 stride-4 anchors add noise without useful signal. **Conclusion: P2 is harmful for cell detection at this image size. Standard 3-scale is optimal.**
 - **Run 10 vs Run 7:** Quality focal loss (QFL) caused severe precision collapse (0.695→0.370), even worse than standard focal loss (Run 3: 0.331). mAP@0.5 dropped -0.146. The root cause: YOLO's RayCastAssigner already uses IoU for anchor selection and regression weighting. Using IoU as classification targets creates circular dependency — the classifier is asked to predict what the assigner already selected. **Conclusion: QFL is fundamentally incompatible with IoU-based YOLO assignment. BCE remains the correct choice.**
+- **Run 11 vs Run 7:** E2E Fix with Hungarian matching (tal_topk=13, beta=3.0, o2o.topk=1) improved mAP@0.5 by +0.039 (0.389→0.428) and mAP@0.75 by +0.076 (0.174→0.250). DQ remained stable (-0.004) while SQ improved +0.010. The Hungarian matcher provides globally optimal assignment for the one2one branch, enabling NMS-free inference. Lower beta (3.0 vs default 6.0) makes alignment metric less extreme, helping dense touching cells. **Conclusion: E2E Fix with Hungarian matching is a significant improvement, especially at stricter IoU thresholds.**
+
+---
+
+## Upcoming Runs
+
+| # | Config | Expected Impact | Evidence |
+|---|--------|----------------|----------|
+| 12 | P3-P5 + Large Kernel (refinement_kernel_size=7) | +0.03-0.06 mAP | RepLKNet +4.2% AP on small objects |
+| 13 | P2-P4 + Large Kernel (Super-P2) | +0.05-0.10 mAP | Fine resolution + large RF |
+| 14 | P2-P4 + DCN only (ablation) | +0.03-0.08 mAP | Deformable DETR +8.3% AP |
+| 15 | P2-P4 + Large Kernel + DCN | +0.08-0.15 mAP | Combined approach |
+| 16 | P2-P4 + Large Kernel + DCN + BiFPN | +0.10-0.18 mAP | BiFPN +2-3% AP (ablation) |

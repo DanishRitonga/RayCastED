@@ -1,6 +1,6 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
-  variant: "m"        # YOLO26 variant: n, s, m, l, x
+  variant: "s"        # YOLO26 variant: n, s, m, l, x
   n_rays: 64          # Number of radial rays for polygon parameterization
   max_size: 256
   crop_size: 256
@@ -76,6 +76,12 @@ training:
   soft_polar_centerness: true  # Trained to predict Polar-IoU (not centered-ness)
   centerness_weight: 1.0       # BCE loss weight for IoU quality prediction
   inference_conf: 0.20         # Optimal threshold with IoU-aware scoring (was 0.25)
+
+  # Large kernel refinement (Run 12: P3-P5 + Large Kernel)
+  refinement_kernel_size: 7    # Kernel size for polygon refinement block
+                               # 3 = standard RayRefinementBlock (Run 11 baseline)
+                               # 7 = LargeKernelRefinementBlock (LKCell-style, wider RF)
+                               # 13 = Extra large kernel (maximum receptive field)
 
 datasets:
   PanNuke:

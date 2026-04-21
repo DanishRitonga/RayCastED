@@ -17,6 +17,7 @@ polygon targets without modification.
 Spec reference: docs/project.md §11
 """
 
+import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
 from ultralytics.utils.tal import TaskAlignedAssigner
@@ -306,6 +307,7 @@ class HungarianRayCastAssigner(RayCastAssigner):
             # For large matrices, fall back to top-1 greedy per GT
             if n_valid_gt * n_cand > 0:
                 cost_np = (-cost.float()).cpu().numpy()
+                cost_np = np.nan_to_num(cost_np, nan=0.0, posinf=0.0, neginf=0.0)
                 row_ind, col_ind = linear_sum_assignment(cost_np)
                 matched_gt = valid_gt_idx[row_ind]
                 matched_anchor = cand_idx[col_ind]
