@@ -22,8 +22,8 @@ Tracking the effect of each config change on detection quality.
 | 8 | same as Run 7 but scale/translate augment OFF | 0.553 | 0.374 | 0.164 | 0.550 | 0.730 | 0.709 | 0.642 | 0.624 | 0.633 |
 | 9 | same as Run 7 but yolo26s-p2 (4-scale, stride 4/8/16/32) | 0.538 | 0.381 | 0.135 | 0.520 | 0.722 | 0.675 | 0.684 | 0.588 | 0.632 |
 | 10 | same as Run 7 but QFL (quality focal loss) replaces BCE | 0.529 | 0.243 | 0.134 | 0.379 | 0.740 | 0.480 | 0.370 | 0.669 | 0.477 |
-| 11 | E2E Fix + Hungarian matching (tal_topk=13, beta=3.0, o2o.topk=1) | 0.558 | 0.428 | 0.250 | 0.543 | 0.746 | 0.682 | 0.685 | 0.598 | 0.639 |
-| 12 | P3-P5 + Large Kernel (refinement_kernel_size=7) | ? | ? | ? | ? | ? | ? | ? | ? | ? |
+| **11** ⭐ | **E2E Fix + Hungarian matching (tal_topk=13, beta=3.0, o2o.topk=1)** | **0.558** | **0.428** | **0.250** | **0.543** | **0.746** | **0.682** | **0.685** | **0.598** | **0.639** |
+| 12 | P3-P5 + Large Kernel (refinement_kernel_size=7) | 0.561 | 0.425 | 0.248 | 0.545 | 0.749 | 0.683 | 0.686 | 0.598 | 0.639 |
 
 ---
 
@@ -81,26 +81,30 @@ Same as Run 7 but:
 ```
 Result: mAP@0.5 +0.039, mAP@0.75 +0.076. Significant improvement at stricter thresholds.
 
-### Run 12 — P3-P5 + Large Kernel (Phase 1) 🔄 IN PROGRESS
-Quick test with existing P3-P5 scales:
+### Run 12 — P3-P5 + Large Kernel (Phase 1) ✅ COMPLETE
+Same as Run 11 but:
 ```yaml
-  refinement_kernel_size: 7  # Add to Run 11 config
+  refinement_kernel_size: 7  # LargeKernelRefinementBlock in detection head
 ```
-Purpose: Validate large kernel helps before investing in P2 model.
-Expected: +0.03-0.06 mAP (RepLKNet: +4.2% AP on small objects)
-Status: Config updated in main/pannuke.yaml, ready to train
+Result: **Negligible improvement.** mAP@0.5 -0.003 (0.428→0.425), SQ +0.003 (0.746→0.749), DQ +0.001 (0.682→0.683). Large kernel in the head does NOT address the bottleneck.
 
-### Run 13 — P2-P4 + Large Kernel (Super-P2) — PENDING
+### Run 12b — P3-P5 + DWT Neck (Phase 1b) — PENDING
+Replace PANet downsampling conv with Daubechies-2 DWT in the neck only.
+Purpose: Test if preserving high-frequency details during feature fusion helps DQ.
+Expected: +0.01-0.04 mAP if neck is the bottleneck.
+
+### Run 13 — P2-P4 Scale (Standard 3×3 Head) 🔄 IN PROGRESS
+Same as Run 11 but with P2-P4 scales (P5 removed):
 ```yaml
 global_settings:
-  model: "yolo26s-p2.yaml"  # Create P2-enabled model
+  model: "yolo26s-p2p4.yaml"  # P2/4, P3/8, P4/16 — no P5
 
 training:
-  refinement_kernel_size: 7
-  # P5 removed (too coarse for cells)
+  refinement_kernel_size: 3  # Standard head (isolate P2 effect)
 ```
-Purpose: Combine P2's fine resolution with large kernel's RF.
-Expected: +0.05-0.10 mAP
+Purpose: Isolate P2's contribution. Run 9 tested P2-P5 (with P5 noise), this tests P2-P4 only.
+7.06M params, 25.6 GFLOPs (vs 10.01M/22.8 GFLOPs baseline).
+Status: Config updated, ready to train.
 
 ---
 
@@ -116,15 +120,64 @@ Expected: +0.05-0.10 mAP
 - **Run 9 vs Run 7:** P2 detection scale (stride 4/8/16/32, 5440 anchors) regressed across all metrics vs 3-scale (stride 8/16/32, 1344 anchors). mAP@0.75 dropped -0.039. At 256px/0.25 MPP, cells are ~28px diameter — already well-covered by P3 stride-8 anchors. The extra 4096 stride-4 anchors add noise without useful signal. **Conclusion: P2 is harmful for cell detection at this image size. Standard 3-scale is optimal.**
 - **Run 10 vs Run 7:** Quality focal loss (QFL) caused severe precision collapse (0.695→0.370), even worse than standard focal loss (Run 3: 0.331). mAP@0.5 dropped -0.146. The root cause: YOLO's RayCastAssigner already uses IoU for anchor selection and regression weighting. Using IoU as classification targets creates circular dependency — the classifier is asked to predict what the assigner already selected. **Conclusion: QFL is fundamentally incompatible with IoU-based YOLO assignment. BCE remains the correct choice.**
 - **Run 11 vs Run 7:** E2E Fix with Hungarian matching (tal_topk=13, beta=3.0, o2o.topk=1) improved mAP@0.5 by +0.039 (0.389→0.428) and mAP@0.75 by +0.076 (0.174→0.250). DQ remained stable (-0.004) while SQ improved +0.010. The Hungarian matcher provides globally optimal assignment for the one2one branch, enabling NMS-free inference. Lower beta (3.0 vs default 6.0) makes alignment metric less extreme, helping dense touching cells. **Conclusion: E2E Fix with Hungarian matching is a significant improvement, especially at stricter IoU thresholds.**
+- **Run 12 vs Run 11:** Large kernel (7×7) in the detection head produced negligible improvement: mAP@0.5 -0.003 (0.428→0.425), SQ +0.003 (0.746→0.749), DQ +0.001 (0.682→0.683). F1 unchanged (0.639). The head-level refinement is NOT the bottleneck — the problem lies further upstream in the feature pyramid / neck. Each detection head already receives features from the PANet neck, so widening the head's receptive field cannot compensate for information lost during neck-level downsampling and fusion. **Conclusion: The bottleneck is in the neck (PANet feature pyramid), not the head. Neck modifications (DWT downsampling, P2 scale, BiFPN fusion) should be prioritized over head modifications.**
+
+---
+
+## 📊 Key Finding: Segmentation vs Detection Quality Gap
+
+### **Run 11 vs LSP-DETR Baseline Comparison**
+
+| Metric | RayCastED (Run 11) | LSP-DETR | Gap | Relative |
+|--------|-------------------|----------|-----|----------|
+| **SQ** (Segmentation Quality) | **0.746** | 0.811 | -0.065 | **-8.0%** ✅ |
+| **DQ** (Detection Quality) | **0.682** | 0.810 | -0.128 | **-15.8%** ❌ |
+| mAP@0.5 | 0.428 | 0.691 | -0.263 | -38.1% |
+| mAP@0.75 | 0.250 | 0.563 | -0.313 | -55.5% |
+| F1 | 0.639 | 0.825 | -0.186 | -22.5% |
+
+### **Thesis Statement**
+
+> **"The segmentation quality is comparable to LSP-DETR but detection quality is severely lacking. Even after changing the matcher to use Hungarian matching for the one2one branch (Run 11), the results don't increase significantly. This might be due to the limitation of relying on YOLO26's original implementation and thus needing further modification in the neck or even the backbone."**
+
+### **Analysis**
+
+1. **SQ Gap (-8.0%)**: RayCastED's polygon shape prediction is competitive
+   - SQ = 0.746 (Run 11) vs 0.811 (LSP-DETR)
+   - Only 8% gap → geometry prediction is working well
+   - Centroid and ray regression are accurate
+
+2. **DQ Gap (-15.8%)**: Detection quality is the bottleneck
+   - DQ = 0.682 (Run 11) vs 0.810 (LSP-DETR)
+   - 16% gap → assignment/detection is missing cells
+   - Problem: Finding cells (DQ) vs drawing accurate polygons (SQ)
+
+3. **Hungarian Matching Impact** (Run 11 vs Run 7):
+   - mAP@0.5: +0.039 (9% relative improvement)
+   - mAP@0.75: +0.076 (44% relative improvement)
+   - DQ: -0.004 (essentially unchanged)
+   - **Conclusion:** Hungarian matching helps polygon quality but doesn't fix detection
+
+4. **Root Cause Hypothesis:**
+   - YOLO26's feature pyramid (P3-P5) designed for general objects
+   - Cell sizes (15-30μm @ 0.25MPP = 60-120px) need specialized scales
+   - Current strides (8/16/32) may not capture fine-grained details
+   - **Solution direction:** Neck/backbone modifications (P2 scale, large kernels, DWT)
+
+5. **Next Steps:**
+   - **Run 12b:** DWT in neck → test if neck downsampling is the bottleneck
+   - **Run 13:** P2-P4 scale → finer spatial resolution in the neck
+   - **Goal:** Close DQ gap while maintaining SQ advantage
 
 ---
 
 ## Upcoming Runs
 
-| # | Config | Expected Impact | Evidence |
-|---|--------|----------------|----------|
-| 12 | P3-P5 + Large Kernel (refinement_kernel_size=7) | +0.03-0.06 mAP | RepLKNet +4.2% AP on small objects |
-| 13 | P2-P4 + Large Kernel (Super-P2) | +0.05-0.10 mAP | Fine resolution + large RF |
-| 14 | P2-P4 + DCN only (ablation) | +0.03-0.08 mAP | Deformable DETR +8.3% AP |
-| 15 | P2-P4 + Large Kernel + DCN | +0.08-0.15 mAP | Combined approach |
-| 16 | P2-P4 + Large Kernel + DCN + BiFPN | +0.10-0.18 mAP | BiFPN +2-3% AP (ablation) |
+| # | Config | Expected Impact | Evidence | Priority |
+|---|--------|----------------|----------|----------|
+| ~~12~~ | ~~P3-P5 + Large Kernel (refinement_kernel_size=7)~~ | ~~+0.03-0.06 mAP~~ | ~~RepLKNet +4.2% AP~~ | ✅ DONE: Negligible |
+| 12b | P3-P5 + DWT Neck (DB2 downsampling) | +0.01-0.04 mAP | DWT-UNet +3.2% Dice | HIGH |
+| 13 | P2-P4 scale (yolo26s-p2p4.yaml) | +0.03-0.08 mAP | P2 provides finer resolution | HIGH |
+| 14 | P2-P4 + DCN only (ablation) | +0.03-0.08 mAP | Deformable DETR +8.3% AP | MEDIUM |
+| 15 | P2-P4 + DCN + DWT Neck | +0.05-0.12 mAP | Combined neck improvements | MEDIUM |
+| 16 | P2-P4 + DCN + DWT + BiFPN | +0.08-0.15 mAP | BiFPN +2-3% AP (ablation) | LOW |

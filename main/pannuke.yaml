@@ -1,6 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"        # YOLO26 variant: n, s, m, l, x
+  model: "raycasted/cfg/yolo26s-p2p4.yaml"  # P2-P4 scales, P5 removed (Run 13)
   n_rays: 64          # Number of radial rays for polygon parameterization
   max_size: 256
   crop_size: 256
@@ -77,11 +78,10 @@ training:
   centerness_weight: 1.0       # BCE loss weight for IoU quality prediction
   inference_conf: 0.20         # Optimal threshold with IoU-aware scoring (was 0.25)
 
-  # Large kernel refinement (Run 12: P3-P5 + Large Kernel)
-  refinement_kernel_size: 7    # Kernel size for polygon refinement block
+  refinement_kernel_size: 3    # Kernel size for polygon refinement block
                                # 3 = standard RayRefinementBlock (Run 11 baseline)
-                               # 7 = LargeKernelRefinementBlock (LKCell-style, wider RF)
-                               # 13 = Extra large kernel (maximum receptive field)
+                               # 7 = LargeKernelRefinementBlock — tested in Run 12, negligible impact
+                               # Conclusion: bottleneck is in neck, not head
 
 datasets:
   PanNuke:
