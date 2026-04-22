@@ -244,9 +244,9 @@ def test_transform_orchestrator_e2e():
 
             # Unpadded tiles: content_h == image.shape[0]
             if content_h < 256:
-                assert content_h == img_out.shape[0], f'Unpadded tile content_h mismatch'
+                assert content_h == img_out.shape[0], 'Unpadded tile content_h mismatch'
             if content_w < 256:
-                assert content_w == img_out.shape[1], f'Unpadded tile content_w mismatch'
+                assert content_w == img_out.shape[1], 'Unpadded tile content_w mismatch'
 
             # Padded image is 256x256
             assert img_out.shape[0] == 256, f'Output image height should be 256, got {img_out.shape[0]}'

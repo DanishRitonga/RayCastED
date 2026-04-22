@@ -64,17 +64,13 @@ class LargeKernelRefinementBlock(nn.Module):
         assert kernel_size % 2 == 1, f'kernel_size must be odd, got {kernel_size}'
         padding = kernel_size // 2
 
-        self.lk_conv = nn.Conv2d(
-            channels, channels, kernel_size, padding=padding, groups=channels
-        )
+        self.lk_conv = nn.Conv2d(channels, channels, kernel_size, padding=padding, groups=channels)
         self.lk_gn = nn.GroupNorm(num_groups, channels)
 
         # Small auxiliary kernel: use 5 for large kernels, 3 for kernel_size=7
         small_k = 5 if kernel_size >= 11 else 3
         small_pad = small_k // 2
-        self.sk_conv = nn.Conv2d(
-            channels, channels, small_k, padding=small_pad, groups=channels
-        )
+        self.sk_conv = nn.Conv2d(channels, channels, small_k, padding=small_pad, groups=channels)
         self.sk_gn = nn.GroupNorm(num_groups, channels)
 
         self.act = nn.SiLU(inplace=True)

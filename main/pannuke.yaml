@@ -1,7 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"        # YOLO26 variant: n, s, m, l, x
-  # model: "raycasted/cfg/yolo26s-p2p4.yaml"  # Uncomment for P2-P4 (Run 13)
+  model: "raycasted/cfg/yolo26s-p2p4.yaml"  # P2-P4 neck (strides 4/8/16, 5376 anchors)
   n_rays: 64          # Number of radial rays for polygon parameterization
   max_size: 256
   crop_size: 256

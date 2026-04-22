@@ -9,18 +9,19 @@ Run with: uv run python tests/phase_3/test_visual_augmentations.py
 
 from pathlib import Path
 
-import numpy as np
 import matplotlib
+import numpy as np
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from shapely.affinity import rotate as shapely_rotate, scale as shapely_scale, translate as shapely_translate
+from shapely.affinity import rotate as shapely_rotate
+from shapely.affinity import scale as shapely_scale
+from shapely.affinity import translate as shapely_translate
 from shapely.geometry import Point
 
 from raycasted.data.etl.ops.augment import flip_horizontal, flip_vertical, rotate_90
 from raycasted.data.etl.ops.convert import decode_to_vertices, polygon_to_raycast
 from raycasted.data.etl.utils.constants import CX_IDX, CY_IDX, RAY_END_IDX, RAY_START_IDX
-
 
 CROP = 400
 

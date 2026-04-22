@@ -9,12 +9,12 @@ Validates:
   - L_PolarIoU decreasing monotonically over 10 synthetic epochs
 """
 
+from unittest.mock import MagicMock
+
 import torch
 
 from raycasted.model.loss import RayCastDetectionLoss
 from tests.phase_6.test_loss import _make_batch, _make_preds
-
-from unittest.mock import MagicMock
 
 
 def _make_mock_model_cuda(nc=4, reg_max=1):

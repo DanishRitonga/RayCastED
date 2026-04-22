@@ -173,7 +173,7 @@ def test_end_to_end_pipeline():
         puma_ingested = ingested_dir / 'PUMA'
         assert puma_ingested.exists(), f'PUMA ingested dir not found: {puma_ingested}'
         npz_files = list(puma_ingested.rglob('*.npz'))
-        assert len(npz_files) > 0, f'No .npz files in ingested output'
+        assert len(npz_files) > 0, 'No .npz files in ingested output'
         print(f'\n  Ingestion: {len(npz_files)} .npz ROI files')
 
         # --- Reorganize transformed tiles into train/val ---

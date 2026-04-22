@@ -9,7 +9,7 @@ Run with: uv run python tests/phase_4/test_visual_activations.py
 import torch
 import torch.nn.functional as F
 
-from raycasted.model.head import RAYCAST_DIM, RayCastDetect
+from raycasted.model.head import RayCastDetect
 
 NC = 4
 REG_MAX = 16
@@ -25,8 +25,9 @@ def generate_activation_plots():
     import matplotlib
 
     matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
     from pathlib import Path
+
+    import matplotlib.pyplot as plt
 
     head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
     head.eval()

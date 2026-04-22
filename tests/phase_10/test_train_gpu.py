@@ -246,7 +246,6 @@ def test_lambda_smooth_annealing():
     if not _check_cuda():
         return
 
-    from raycasted.model.loss import RayCastDetectionLoss
     from tests.phase_6.test_loss import _make_mock_model
 
     model = _make_mock_model()
@@ -268,7 +267,7 @@ def test_lambda_smooth_annealing():
     for i in range(1, len(values)):
         assert values[i] <= values[i - 1] + 1e-9, f'Non-monotonic at step {i}: {values[i - 1]} -> {values[i]}'
 
-    print(f'PASS: lambda_smooth annealing — 0.05 -> 0.0 over 50 epochs (monotonic)')
+    print('PASS: lambda_smooth annealing — 0.05 -> 0.0 over 50 epochs (monotonic)')
 
 
 def test_checkpoint_save_and_load():

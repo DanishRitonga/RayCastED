@@ -5,23 +5,20 @@ augmentation, and polygon overlay correctness for asymmetric shapes.
 Run with: uv run python tests/phase_3/test_visual_ovals.py
 """
 
-import math
 import tempfile
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.data.etl.ops.convert import decode_to_vertices, polygon_to_raycast
 from raycasted.data.etl.utils.constants import CX_IDX, CY_IDX, RAY_END_IDX, RAY_START_IDX
 
-import matplotlib
-
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from shapely.affinity import rotate
 from shapely.geometry import Point
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -111,8 +108,6 @@ def _create_tile_with_ovals(
 
 def _plot_crops(ds, ax_idx_offset, axes_flat, crop_size):
     """Plot augmented crops on the given axes."""
-    from shapely.geometry import Polygon as ShapelyPolygon
-
     for i, ax in enumerate(axes_flat):
         img_tensor, labels = ds[0]
 
@@ -144,7 +139,7 @@ def _plot_crops(ds, ax_idx_offset, axes_flat, crop_size):
         ax.set_xlim(0, crop_size)
         ax.set_ylim(crop_size, 0)
         panel_num = ax_idx_offset + i + 1
-        edge_info = f', near-edge in red' if n_cells > 0 else ''
+        edge_info = ', near-edge in red' if n_cells > 0 else ''
         ax.set_title(f'Panel {panel_num}: {n_cells} cells{edge_info}', fontsize=9)
         ax.tick_params(labelsize=6)
 

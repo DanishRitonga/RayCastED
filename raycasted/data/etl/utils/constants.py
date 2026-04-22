@@ -14,7 +14,6 @@ Use ``configure_rays(n_rays)`` to change the ray count at runtime
 
 import numpy as np
 
-
 # =============================================================================
 # RAY GEOMETRY CONSTANTS  (mutable — use configure_rays() to change)
 # =============================================================================

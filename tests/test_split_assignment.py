@@ -14,7 +14,6 @@ import pytest
 from raycasted.data.etl.ingestors._base import BaseDataIngestor
 from raycasted.data.etl.utils.config import DatasetConfig, SplitArgs
 
-
 # ---------------------------------------------------------------------------
 # Concrete stub — BaseDataIngestor is abstract
 # ---------------------------------------------------------------------------

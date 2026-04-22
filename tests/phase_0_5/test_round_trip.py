@@ -31,7 +31,7 @@ def _circle_polygon(cx: float, cy: float, radius: float, n_pts: int = 64) -> Pol
 
 
 def _round_trip_iou(poly: Polygon) -> float:
-    """polygon → raycast → shapely polygon → Shapely IoU."""
+    """Polygon → raycast → shapely polygon → Shapely IoU."""
     ann = polygon_to_raycast(poly, class_id=0)
     assert ann is not None, 'polygon_to_raycast returned None for a valid polygon'
 
