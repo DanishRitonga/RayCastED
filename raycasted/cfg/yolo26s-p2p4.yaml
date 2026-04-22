@@ -1,8 +1,8 @@
 # Ultralytics AGPL-3.0 License - https://ultralytics.com/license
 
-# Custom YOLO26 model with P2/4 - P4/16 outputs (P5 removed from detection).
-# Designed for small object detection (cells, histopathology) where P5/32 is
-# too coarse. Keeps full backbone for feature quality; head only fuses P2-P4.
+# YOLO26 P2-P4 neck: top-down starts from P4 (layer 6), NOT P5 (layer 10).
+# Prevents blurring P5 features through 3× upsampling to P2.
+# P4/16 has enough receptive field (~64px) for cell detection at 256px crop.
 
 # Parameters
 nc: 80 # number of classes
@@ -16,7 +16,7 @@ scales: # model compound scaling constants
   l: [1.00, 1.00, 512]
   x: [1.00, 1.50, 512]
 
-# YOLO26n backbone (unchanged — produces P2/4 through P5/32)
+# YOLO26n backbone (produces P2/4 through P5/32 — P5 built for pretrained weights but unused in neck)
 backbone:
   # [from, repeats, module, args]
   - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
@@ -31,26 +31,23 @@ backbone:
   - [-1, 1, SPPF, [1024, 5, 3, True]] # 9
   - [-1, 2, C2PSA, [1024]] # 10
 
-# YOLO26n head (P2-P4 only — P5 backbone features used for context only)
+# YOLO26n head (P2-P4, top-down from P4 layer 6 — NOT from P5 layer 10)
+# This prevents blurring P5 features through 3× upsampling to P2
 head:
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
-  - [[-1, 6], 1, Concat, [1]] # cat backbone P4
-  - [-1, 2, C3k2, [512, True]] # 13
-
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [6, 1, nn.Upsample, [None, 2, "nearest"]]  # upsample P4→P3
   - [[-1, 4], 1, Concat, [1]] # cat backbone P3
-  - [-1, 2, C3k2, [256, True]] # 16 (P3/8-small)
+  - [-1, 2, C3k2, [256, True]] # 13 (P3/8-small)
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # upsample P3→P2
   - [[-1, 2], 1, Concat, [1]] # cat backbone P2
-  - [-1, 2, C3k2, [128, True]] # 19 (P2/4-xsmall)
+  - [-1, 2, C3k2, [128, True]] # 16 (P2/4-xsmall)
 
   - [-1, 1, Conv, [128, 3, 2]]
-  - [[-1, 16], 1, Concat, [1]] # cat head P3
-  - [-1, 2, C3k2, [256, True]] # 22 (P3/8-small)
+  - [[-1, 13], 1, Concat, [1]] # cat head P3
+  - [-1, 2, C3k2, [256, True]] # 19 (P3/8-small)
 
   - [-1, 1, Conv, [256, 3, 2]]
-  - [[-1, 13], 1, Concat, [1]] # cat head P4
-  - [-1, 2, C3k2, [512, True]] # 25 (P4/16-medium)
+  - [[-1, 6], 1, Concat, [1]] # cat backbone P4
+  - [-1, 2, C3k2, [512, True]] # 22 (P4/16-medium)
 
-  - [[19, 22, 25], 1, Detect, [nc]] # Detect(P2, P3, P4)
+  - [[16, 19, 22], 1, Detect, [nc]] # Detect(P2, P3, P4)
