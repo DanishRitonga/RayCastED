@@ -75,6 +75,19 @@ class TrainingSettings(BaseModel):
     soft_polar_centerness: bool = True  # add centerness prediction branch
     centerness_weight: float = 1.0  # BCE loss weight for centerness term
 
+    inference_conf: float = 0.20  # confidence threshold at inference
+
+    refinement_kernel_size: int = 3  # kernel size for polygon refinement block
+
+    # E2E dual-assignment (NMS-free)
+    tal_topk: int = 13  # one2many positives per GT
+    assigner_alpha: float = 0.5  # cls^alpha in alignment metric
+    assigner_beta: float = 6.0  # iou^beta in alignment metric
+    use_hungarian_o2o: bool = False  # Hungarian matching for one2one branch
+
+    # Pretrained backbone
+    pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
+
 
 # === GLOBAL SETTINGS ===
 class GlobalSettings(BaseModel):
