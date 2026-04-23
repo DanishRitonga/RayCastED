@@ -1,8 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"        # YOLO26 variant: n, s, m, l, x
-  # Default YOLO26s model (P3/8, P4/16, P5/32)
-  # Note: P5/32 is coarse for 256px crops, but keeps pretrained backbone compatibility
+  model: "raycasted/cfg/yolo26s-p2p4-c2psa.yaml"  # P2-P4 neck with C2PSA@P4 (avoid 3× upsampling from P5)
   n_rays: 64          # Number of radial rays for polygon parameterization
   max_size: 256
   crop_size: 256
