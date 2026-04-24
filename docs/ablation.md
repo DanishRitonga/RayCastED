@@ -24,7 +24,9 @@ Tracking the effect of each config change on detection quality.
 | 10 | same as Run 7 but QFL (quality focal loss) replaces BCE | 0.529 | 0.243 | 0.134 | 0.379 | 0.740 | 0.480 | 0.370 | 0.669 | 0.477 |
 | **11** ⭐ | **E2E Fix + Hungarian matching (tal_topk=13, beta=3.0, o2o.topk=1)** | **0.558** | **0.428** | **0.250** | **0.543** | **0.746** | **0.682** | **0.685** | **0.598** | **0.639** |
 | 12 | P3-P5 + Large Kernel (refinement_kernel_size=7) | 0.561 | 0.425 | 0.248 | 0.545 | 0.749 | 0.683 | 0.686 | 0.598 | 0.639 |
-| 12b | P3-P5 + Pretrained Backbone (yolo26s.pt, COCO) | ? | ? | ? | ? | ? | ? | ? | ? | ? |
+| 12b | P3-P5 + Pretrained Backbone (yolo26s.pt, COCO) | 0.547 | 0.409 | 0.225 | 0.530 | 0.739 | **0.671** | 0.665 | 0.582 | 0.621 |
+| 13 | P2-P4 + C2PSA@P4 (dummy P5, pretrained) | 0.551 | 0.423 | 0.214 | 0.531 | 0.734 | **0.678** | 0.676 | 0.602 | 0.637 |
+| 13b | P2-P4 + C2PSA@P4 (dummy P5, scratch) | 🔄 | ? | ? | ? | ? | ? | ? | ? | ? |
 
 ---
 
@@ -89,32 +91,37 @@ Same as Run 11 but:
 ```
 Result: **Negligible improvement.** mAP@0.5 -0.003 (0.428→0.425), SQ +0.003 (0.746→0.749), DQ +0.001 (0.682→0.683). Large kernel in the head does NOT address the bottleneck.
 
-### Run 12b — P3-P5 + DWT Neck (Phase 1b) — PENDING
+### Run 12b — P3-P5 + ResoConv Neck (Phase 1b) — PENDING
 Replace PANet downsampling conv with Daubechies-2 DWT in the neck only.
 Purpose: Test if preserving high-frequency details during feature fusion helps DQ.
 Expected: +0.01-0.04 mAP if neck is the bottleneck.
 
-### Run 12b — P3-P5 + Pretrained Backbone (COCO) 🔄 IN PROGRESS
+### Run 12b — P3-P5 + Pretrained Backbone (COCO) ✅ COMPLETE
 Same as Run 11 but with COCO-pretrained backbone (layers 0-10):
 ```yaml
   pretrained_backbone: "yolo26s.pt"  # 5.46M backbone params from COCO
   # Neck and head remain randomly initialised
 ```
-Purpose: Test if transfer learning from COCO backbone closes the DQ gap.
-240/240 backbone keys compatible (identical architecture).
-Status: Config updated, ready to train.
+Result: **Negligible improvement vs Run 11.** DQ -0.011 (0.682→0.671), mAP@0.5 -0.019 (0.428→0.409). All metrics regressed slightly. **Conclusion: COCO pretrained backbone is NOT helpful for histopathology cell detection.** Domain gap (natural images → medical images) negates transfer learning benefits.
 
-### Run 13 — P2-P4 Scale (Standard 3×3 Head) — PENDING
-Same as Run 11 but with P2-P4 scales (P5 removed):
+### Run 13 — P2-P4 + C2PSA@P4 (dummy P5, pretrained) ✅ COMPLETE
 ```yaml
 global_settings:
-  model: "raycasted/cfg/yolo26s-p2p4.yaml"  # P2/4, P3/8, P4/16 — no P5
+  model: "raycasted/cfg/yolo26s-p2p4-c2psa.yaml"  # Custom P2-P4 neck
+  # C2PSA moves from P5/32 (1024ch) to P4/16 (512ch)
+  # Dummy P5 layers 9-10 built but unused in neck
 
 training:
-  refinement_kernel_size: 3  # Standard head (isolate P2 effect)
+  pretrained_backbone: "yolo26s.pt"  # Layers 0-6 load, 7-10 skip
 ```
-Purpose: Isolate P2's contribution. Run 9 tested P2-P5 (with P5 noise), this tests P2-P4 only.
-7.06M params, 25.6 GFLOPs (vs 10.01M/22.8 GFLOPs baseline).
+Result: **Modest improvement over Run 12b.** DQ +0.007 (0.671→0.678), mAP@0.5 +0.014 (0.409→0.423), F1 +0.016 (0.621→0.637). Params: 6.65M, GFLOPs: 7.15. **Conclusion: P2 density provides small but real benefit.** However, the gain is insufficient to close the DQ gap to LSP-DETR (0.678 vs 0.810). Bottleneck remains in backbone receptive field, not just anchor density.
+
+### Run 13b — P2-P4 + C2PSA@P4 (dummy P5, scratch) 🔄 IN PROGRESS
+Same as Run 13 but without pretrained backbone:
+```yaml
+  pretrained_backbone: null  # Train from scratch
+```
+Purpose: Measure pretrained weight impact. If scratch DQ ≥ 0.65, custom backbone viable. If scratch DQ < 0.60, pretrained essential → proceed to UniRepLKNet (domain-specific pretrained).
 
 ---
 
@@ -131,6 +138,8 @@ Purpose: Isolate P2's contribution. Run 9 tested P2-P5 (with P5 noise), this tes
 - **Run 10 vs Run 7:** Quality focal loss (QFL) caused severe precision collapse (0.695→0.370), even worse than standard focal loss (Run 3: 0.331). mAP@0.5 dropped -0.146. The root cause: YOLO's RayCastAssigner already uses IoU for anchor selection and regression weighting. Using IoU as classification targets creates circular dependency — the classifier is asked to predict what the assigner already selected. **Conclusion: QFL is fundamentally incompatible with IoU-based YOLO assignment. BCE remains the correct choice.**
 - **Run 11 vs Run 7:** E2E Fix with Hungarian matching (tal_topk=13, beta=3.0, o2o.topk=1) improved mAP@0.5 by +0.039 (0.389→0.428) and mAP@0.75 by +0.076 (0.174→0.250). DQ remained stable (-0.004) while SQ improved +0.010. The Hungarian matcher provides globally optimal assignment for the one2one branch, enabling NMS-free inference. Lower beta (3.0 vs default 6.0) makes alignment metric less extreme, helping dense touching cells. **Conclusion: E2E Fix with Hungarian matching is a significant improvement, especially at stricter IoU thresholds.**
 - **Run 12 vs Run 11:** Large kernel (7×7) in the detection head produced negligible improvement: mAP@0.5 -0.003 (0.428→0.425), SQ +0.003 (0.746→0.749), DQ +0.001 (0.682→0.683). F1 unchanged (0.639). The head-level refinement is NOT the bottleneck — the problem lies further upstream in the feature pyramid / neck. Each detection head already receives features from the PANet neck, so widening the head's receptive field cannot compensate for information lost during neck-level downsampling and fusion. **Conclusion: The bottleneck is in the neck (PANet feature pyramid), not the head. Neck modifications (DWT downsampling, P2 scale, BiFPN fusion) should be prioritized over head modifications.**
+- **Run 12b vs Run 11:** COCO pretrained backbone regressed all metrics vs the trained-from-scratch Run 11: DQ -0.011 (0.682→0.671), mAP@0.5 -0.019 (0.428→0.409). **Conclusion: Pretrained weights from natural images (COCO) hurt histopathology cell detection.** The domain gap (RGB natural images → H&E stained tissue) is too large. The backbone features learned for general object detection don't transfer to cell detection. **Transfer learning requires domain-specific pretrained weights (e.g., UniRepLKNet trained on PanNuke/MoNuSeg).**
+- **Run 13 vs Run 12b:** P2-P4 neck with C2PSA@P4 (with pretrained) improved over Run 12b: DQ +0.007 (0.671→0.678), mAP@0.5 +0.014 (0.409→0.423). **P2 anchor density provides measurable benefit (+1.0% DQ, +3.4% mAP).** However, the gain is modest — DQ remains far from LSP-DETR's 0.810. **Conclusion: P2 density helps but is NOT sufficient.** The bottleneck is backbone receptive field at P2 (~16px from YOLO26s). P2 anchors exist but lack the spatial context to distinguish touching cells. Large-kernel backbone (UniRepLKNet) is needed to give P2 anchors meaningful receptive field.
 
 ---
 
@@ -174,21 +183,32 @@ Purpose: Isolate P2's contribution. Run 9 tested P2-P5 (with P5 noise), this tes
    - Current strides (8/16/32) may not capture fine-grained details
    - **Solution direction:** Neck/backbone modifications (P2 scale, large kernels, DWT)
 
-5. **Next Steps:**
-   - **Run 12b:** DWT in neck → test if neck downsampling is the bottleneck
-   - **Run 13:** P2-P4 scale → finer spatial resolution in the neck
-   - **Goal:** Close DQ gap while maintaining SQ advantage
+ 5. **Next Steps:**
+     - **Run 13b (IN PROGRESS):** P2-P4 without pretrained → measure pretrained weight impact
+       - If scratch DQ ≥ 0.65: Pretrained not essential → custom backbone viable
+       - If scratch DQ < 0.60: Pretrained essential → must use domain-specific pretrained (UniRepLKNet)
+     - **Run 14:** P2-P4 + ResoConv only → isolate DWT high-freq preservation effect
+     - **Run 15:** P2-P4 + C3k2_LK neck only → isolate neck large-kernel receptive field effect
+     - **Run 16:** P2-P4 + C3k2_LK backbone only → isolate backbone large-kernel receptive field effect
+     - **Runs 17-19:** Factorial combinations of ResoConv + C3k2_LK. See `docs/backbone_neck_modification.md`
+     - **Goal:** Close DQ gap (target: 0.75+) while maintaining SQ advantage
 
 ---
 
 ## Upcoming Runs
 
+See `docs/backbone_neck_modification.md` for the full architecture plan and YAML configs.
+
 | # | Config | Expected Impact | Evidence | Priority |
 |---|--------|----------------|----------|----------|
 | ~~12~~ | ~~P3-P5 + Large Kernel (refinement_kernel_size=7)~~ | ~~+0.03-0.06 mAP~~ | ~~RepLKNet +4.2% AP~~ | ✅ DONE: Negligible |
-| **12b** | **P3-P5 + Pretrained Backbone (COCO)** | **+0.05-0.15 mAP** | **Transfer learning from COCO** | **HIGH** |
-| 13 | P2-P4 scale (yolo26s-p2p4.yaml) | +0.03-0.08 mAP | P2 provides finer resolution | MEDIUM |
-| 12c | P2-P4 + Pretrained Backbone | +0.08-0.18 mAP | Combined | MEDIUM |
-| 14 | P2-P4 + DWT Neck (DB2 downsampling) | +0.01-0.04 mAP | DWT-UNet +3.2% Dice | MEDIUM |
-| 15 | P2-P4 + DCN only (ablation) | +0.03-0.08 mAP | Deformable DETR +8.3% AP | LOW |
-| 16 | P2-P4 + DCN + DWT + BiFPN | +0.08-0.15 mAP | BiFPN +2-3% AP (ablation) | LOW |
+| ~~12b~~ | ~~P3-P5 + Pretrained Backbone (COCO)~~ | ~~+0.05-0.15 mAP~~ | ~~Transfer learning from COCO~~ | ✅ DONE: Regression (-1.9% mAP) |
+| ~~13~~ | ~~P2-P4 + C2PSA@P4 (pretrained)~~ | ~~+0.03-0.08 mAP~~ | ~~P2 provides finer resolution~~ | ✅ DONE: +1.4% mAP |
+| **13b** | **P2-P4 + C2PSA@P4 (scratch)** | **Pretrained impact measurement** | **If DQ ≥ 0.65 → custom backbone viable** | **HIGH: In Progress** |
+| **14** | **P2-P4 + ResoConv (all downsampling)** | **+0.03-0.08 mAP** | **LKCell SOTA PanNuke, WaveCNet +AP** | **HIGH** |
+| **15** | **P2-P4 + C3k2_LK neck only** | **+0.02-0.05 mAP** | **UniRepLKNet large kernels** | **HIGH** |
+| **16** | **P2-P4 + C3k2_LK backbone only** | **+0.02-0.06 mAP** | **Receptive field at P2/P3** | **HIGH** |
+| 17 | P2-P4 + ResoConv + C3k2_LK neck | +0.05-0.10 mAP | If Run 14 or 15 positive | HIGH |
+| 18 | P2-P4 + ResoConv + C3k2_LK backbone | +0.05-0.10 mAP | If Run 14 or 16 positive | HIGH |
+| 19 | P2-P4 + ResoConv + C3k2_LK everywhere | +0.08-0.15 mAP | Full combined architecture | HIGH |
+| 20 | UniRepLKNet-S backbone + P2-P4 neck | +0.08-0.15 mAP | Domain-specific pretrained | MEDIUM |
