@@ -33,8 +33,8 @@ from ultralytics.utils.torch_utils import initialize_weights
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.data.etl.utils import constants as _const
+from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.builder import raycasted_parse_model
-from raycasted.model.head import RayCastDetect
 from raycasted.model.loss import RayCastE2ELoss
 from raycasted.model.register import register_raycast_head
 from raycasted.model.val import RayCastValidator

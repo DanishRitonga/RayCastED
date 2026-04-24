@@ -6,7 +6,7 @@ detectors with the Ultralytics YOLO framework.
 """
 
 from .annotate import RayCastAnnotator
-from .head import RayCastDetect, RayRefinementBlock
+from .blocks.head import RayCastDetect, RayRefinementBlock
 from .loss import RayCastDetectionLoss, RayCastE2ELoss
 from .predict import RayCastPredictor
 from .register import register_raycast_head

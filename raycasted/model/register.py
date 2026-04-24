@@ -30,7 +30,7 @@ def register_raycast_head() -> None:
     import ultralytics.nn.modules as modules
     import ultralytics.nn.tasks as tasks
 
-    from raycasted.model.head import RayCastDetect, RayRefinementBlock
+    from raycasted.model.blocks.head import RayCastDetect, RayRefinementBlock
 
     # Inject into ultralytics.nn.modules namespace
     setattr(modules, 'RayCastDetect', RayCastDetect)

@@ -38,9 +38,11 @@ from ultralytics.nn.modules import (
 from ultralytics.nn.modules.head import Detect
 from ultralytics.utils.ops import make_divisible
 
+from raycasted.model.blocks.head import RayCastDetect
+from raycasted.model.blocks.resoconv import ResoConv
+
 # TODO: Import custom blocks once implemented
-# from raycasted.model.resoconv import ResoConv
-# from raycasted.model.lk_block import C3k2_LK
+# from raycasted.model.blocks.lk_block import C3k2_LK
 
 BASE_MODULES = frozenset(
     {
@@ -51,7 +53,7 @@ BASE_MODULES = frozenset(
         Bottleneck,
         DWConvTranspose2d,
         # Custom modules — add new blocks here:
-        # ResoConv,
+        ResoConv,
         # C3k2_LK,
     }
 )
@@ -125,15 +127,16 @@ def raycasted_parse_model(d, ch, verbose=True):
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
         elif m is torch.nn.Upsample:
-            c2 = ch[f]
+            c2 = ch[f] if isinstance(f, int) else ch[f[0]]
         elif m in frozenset(
             {
                 Detect,
+                RayCastDetect,
             }
         ):
             args = [nc, reg_max, end2end, [ch[x] for x in f]]
         else:
-            c2 = ch[f]
+            c2 = ch[f] if isinstance(f, int) else ch[f[0]]
 
         m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)
         t = str(m)[8:-2].replace('__main__.', '')
