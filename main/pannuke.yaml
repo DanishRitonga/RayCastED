@@ -84,7 +84,7 @@ training:
                                # Conclusion: bottleneck is in neck, not head
 
   # Pretrained backbone (COCO weights, layers 0-10 only)
-  pretrained_backbone: "yolo26s.pt"  # Path to pretrained .pt file. Set null to disable.
+  pretrained_backbone: null  # DISABLED for scratch training experiment
 
 datasets:
   PanNuke:

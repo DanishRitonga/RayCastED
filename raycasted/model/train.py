@@ -20,15 +20,20 @@ Usage:
 """
 
 import copy
+from copy import deepcopy
 
 import numpy as np
 import torch
 from ultralytics.data.build import InfiniteDataLoader
 from ultralytics.models.yolo.detect.train import DetectionTrainer
+from ultralytics.nn.modules.head import Detect
+from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils import DEFAULT_CFG
+from ultralytics.utils.torch_utils import initialize_weights
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.data.etl.utils import constants as _const
+from raycasted.model.builder import raycasted_parse_model
 from raycasted.model.head import RayCastDetect
 from raycasted.model.loss import RayCastE2ELoss
 from raycasted.model.register import register_raycast_head
@@ -167,6 +172,74 @@ class _RayCastCriterionWrapper:
         )
 
 
+class RayCastDetectionModel(DetectionModel):
+    """Custom DetectionModel using raycasted_parse_model builder.
+
+    Replaces ultralytics' parse_model() with our custom builder that
+    supports custom blocks (ResoConv, C3k2_LK) without monkey-patching.
+
+    All other DetectionModel behavior (stride computation, bias_init,
+    init_criterion, etc.) is preserved via inheritance from BaseModel.
+    """
+
+    def __init__(self, cfg='yolo26s.yaml', ch=3, nc=None, verbose=True):
+        """Initialize the YOLO detection model with custom builder.
+
+        Args:
+            cfg (str | dict): Model configuration file path or dictionary.
+            ch (int): Number of input channels.
+            nc (int, optional): Number of classes.
+            verbose (bool): Whether to display model information.
+        """
+        from ultralytics.nn.tasks import yaml_model_load
+        from ultralytics.utils import LOGGER
+
+        super(DetectionModel, self).__init__()  # BaseModel.__init__ only — skip parse_model
+
+        self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
+        if self.yaml['backbone'][0][2] == 'Silence':
+            LOGGER.warning(
+                'YOLOv9 Silence module is deprecated in favor of torch.nn.Identity. '
+                'Please delete local *.pt file and re-download the latest model checkpoint.'
+            )
+            self.yaml['backbone'][0][2] = 'nn.Identity'
+
+        self.yaml['channels'] = ch
+        if nc and nc != self.yaml['nc']:
+            LOGGER.info(f'Overriding model.yaml nc={self.yaml["nc"]} with nc={nc}')
+            self.yaml['nc'] = nc
+
+        self.model, self.save = raycasted_parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)
+        self.names = {i: f'{i}' for i in range(self.yaml['nc'])}
+        self.inplace = self.yaml.get('inplace', True)
+
+        # Build strides (same logic as DetectionModel.__init__)
+        m = self.model[-1]
+        if isinstance(m, Detect):
+            s = 256
+            m.inplace = self.inplace
+
+            def _forward(x):
+                output = self.forward(x)
+                if self.end2end:
+                    output = output['one2many']
+                return output['feats']
+
+            self.model.eval()
+            m.training = True
+            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])
+            self.stride = m.stride
+            self.model.train()
+            m.bias_init()
+        else:
+            self.stride = torch.Tensor([32])
+
+        initialize_weights(self)
+        if verbose:
+            self.info()
+            LOGGER.info('')
+
+
 class RayCastTrainer(DetectionTrainer):
     """Training pipeline for RayCastED polygon detection model.
 
@@ -204,9 +277,9 @@ class RayCastTrainer(DetectionTrainer):
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Create YOLO model with RayCastDetect head and RayCastE2ELoss.
 
-        Loads a standard YOLO architecture, then replaces the Detect head
-        with RayCastDetect and patches init_criterion to return
-        RayCastE2ELoss (handles both initial creation and resume).
+        Uses RayCastDetectionModel (custom builder) instead of standard
+        DetectionModel. Replaces the Detect head with RayCastDetect and
+        patches init_criterion to return RayCastE2ELoss.
 
         Args:
             cfg: Model config path or YAML name.
@@ -214,10 +287,10 @@ class RayCastTrainer(DetectionTrainer):
             verbose: Print model info.
 
         Returns:
-            DetectionModel with RayCastDetect head.
+            RayCastDetectionModel with RayCastDetect head.
         """
         register_raycast_head()
-        model = super().get_model(cfg, weights, verbose)
+        model = RayCastDetectionModel(cfg, ch=3, nc=None, verbose=verbose)
 
         # Replace Detect head → RayCastDetect
         old_head = model.model[-1]

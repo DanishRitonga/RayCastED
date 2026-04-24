@@ -15,7 +15,7 @@ scales:
   l: [1.00, 1.00, 512]
   x: [1.00, 1.50, 512]
 
-# YOLO26n backbone with C2PSA at P4 (layer 7) instead of P5
+# YOLO26n backbone with C2PSA at P4 (no P5 — saves compute)
 backbone:
   - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
   - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
@@ -27,26 +27,22 @@ backbone:
   - [-1, 1, SPPF, [512, 5, 3, True]] # 7 - SPPF at P4
   - [-1, 2, C2PSA, [512]] # 8 - C2PSA at P4/16 (NOT P5/32)
 
-  # P5 still built for pretrained weight compatibility, but unused in neck
-  - [-1, 1, Conv, [1024, 3, 2]] # 9-P5/32
-  - [-1, 2, C3k2, [1024, True]]
-
 # YOLO26n head (P2-P4, top-down from C2PSA at layer 8)
 head:
   - [8, 1, nn.Upsample, [None, 2, "nearest"]]  # upsample C2PSA@P4 → P3
   - [[-1, 4], 1, Concat, [1]] # cat backbone P3
-  - [-1, 2, C3k2, [256, True]] # 13 (P3/8-small)
+  - [-1, 2, C3k2, [256, True]] # 11 (P3/8-small)
 
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]  # upsample P3 → P2
   - [[-1, 2], 1, Concat, [1]] # cat backbone P2
-  - [-1, 2, C3k2, [128, True]] # 16 (P2/4-xsmall)
+  - [-1, 2, C3k2, [128, True]] # 14 (P2/4-xsmall)
 
   - [-1, 1, Conv, [128, 3, 2]]
-  - [[-1, 13], 1, Concat, [1]] # cat head P3
-  - [-1, 2, C3k2, [256, True]] # 19 (P3/8-small)
+  - [[-1, 11], 1, Concat, [1]] # cat head P3
+  - [-1, 2, C3k2, [256, True]] # 17 (P3/8-small)
 
   - [-1, 1, Conv, [256, 3, 2]]
   - [[-1, 8], 1, Concat, [1]] # cat C2PSA@P4
-  - [-1, 2, C3k2, [512, True]] # 22 (P4/16-medium)
+  - [-1, 2, C3k2, [512, True]] # 20 (P4/16-medium)
 
-  - [[16, 19, 22], 1, Detect, [nc]] # Detect(P2, P3, P4)
+  - [[14, 17, 20], 1, Detect, [nc]] # Detect(P2, P3, P4)
