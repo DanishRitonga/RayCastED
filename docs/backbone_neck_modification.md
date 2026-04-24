@@ -42,9 +42,9 @@ Daubechies-2 (DB2) DWT provides:
 
 | Source | Finding | Relevance |
 |--------|---------|-----------|
-| **LKCell** (Cui et al., 2024) | Large-kernel + wavelet decoder achieves SOTA on PanNuke (mPQ 0.508) with 78.4% FLOPs reduction vs CellViT-SAM-H | Same dataset, same cell detection task |
 | **WaveCNet** (Williams & Li, CVPR 2020) | Replacing max/avg pooling with DWT improves COCO detection AP with Faster R-CNN and RetinaNet | DWT downsampling proven for detection |
 | **DWT-UNet** | DWT downsampling in U-Net gives +3.2% Dice on medical segmentation | High-freq preservation directly improves boundary quality |
+| **LKCell** (Cui et al., 2024) | Large-kernel depthwise conv + dilated reparameterization achieves SOTA on PanNuke (mPQ 0.508) with 78.4% FLOPs reduction vs CellViT-SAM-H | Same dataset, same cell detection task — reference for C3k2_LK only |
 | **Run 12b** (this project) | COCO pretrained backbone regressed all metrics (-1.9% mAP) | Pretrained weights unhelpful, custom downsampling viable |
 
 ### Why Backbone + Neck
@@ -108,9 +108,11 @@ Input [B, C_in, H, W]
 
 `C3k2_LK` is a drop-in replacement for standard `C3k2` that uses large-kernel depthwise convolutions instead of standard 3x3 Bottleneck sub-blocks. It inherits the C2f split/merge structure but replaces the inner `Bottleneck(c, c, k=(3,3))` with an `LKBottleneck` that provides much larger receptive field per block.
 
+**Reference:** UniRepLKNet (Ding et al., 2023) for the dilated reparameterization design, and LKCell (Cui et al., 2024) for the scale-adaptive kernel sizing for cell detection.
+
 #### Motivation
 
-YOLO26s at P2/4 has an effective receptive field of only ~16px. At 0.25 MPP, cells span 28-40px diameter (7-10 feature pixels at P2). Standard 3x3 convolutions cannot distinguish touching cells in dense TIL fields. `C3k2_LK` uses scale-adaptive kernel sizes derived from **LKCell's receptive field analysis** (arXiv:2407.18054):
+YOLO26s at P2/4 has an effective receptive field of only ~16px. At 0.25 MPP, cells span 28-40px diameter (7-10 feature pixels at P2). Standard 3x3 convolutions cannot distinguish touching cells in dense TIL fields. `C3k2_LK` uses scale-adaptive kernel sizes derived from **LKCell's receptive field analysis** (arXiv:2407.18054, Section 3.1):
 
 > A cell detection kernel should cover at least one full cell diameter in feature space.
 

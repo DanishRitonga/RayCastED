@@ -39,10 +39,8 @@ from ultralytics.nn.modules.head import Detect
 from ultralytics.utils.ops import make_divisible
 
 from raycasted.model.blocks.head import RayCastDetect
+from raycasted.model.blocks.lk_block import C3k2_LK
 from raycasted.model.blocks.resoconv import ResoConv
-
-# TODO: Import custom blocks once implemented
-# from raycasted.model.blocks.lk_block import C3k2_LK
 
 BASE_MODULES = frozenset(
     {
@@ -52,9 +50,8 @@ BASE_MODULES = frozenset(
         C2PSA,
         Bottleneck,
         DWConvTranspose2d,
-        # Custom modules — add new blocks here:
         ResoConv,
-        # C3k2_LK,
+        C3k2_LK,
     }
 )
 
@@ -62,8 +59,7 @@ REPEAT_MODULES = frozenset(
     {
         C3k2,
         C2PSA,
-        # Custom repeat modules — add here:
-        # C3k2_LK,  # C3k2_LK has repeat count like C3k2
+        C3k2_LK,
     }
 )
 

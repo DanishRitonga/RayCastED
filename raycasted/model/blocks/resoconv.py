@@ -111,7 +111,7 @@ class DWT2D(nn.Module):
         self.register_buffer('dwt_weight', filters_tiled, persistent=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply 2D DWT via depthwise conv2d.
+        """Apply 2D DWT via depthwise conv2d with reflection padding.
 
         Args:
             x: Input tensor [B, C, H, W].
@@ -119,12 +119,13 @@ class DWT2D(nn.Module):
         Returns:
             Wavelet sub-bands [B, 4*C, H/2, W/2].
         """
+        x = F.pad(x, (1, 1, 1, 1), mode='reflect')
         return F.conv2d(
             x,
             self.dwt_weight,
             bias=None,
             stride=2,
-            padding=1,
+            padding=0,
             groups=self.in_channels,
         )
 
@@ -180,6 +181,3 @@ class ResoConv(nn.Module):
 
         return self.proj(x_cat)
 
-
-# Alias for compatibility with RWCM naming in literature
-RWCM = ResoConv
