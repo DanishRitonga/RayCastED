@@ -50,8 +50,8 @@ def test_dwt2d_forward_shape():
     dwt = DWT2D(C)
     x_dwt = dwt(x)
 
-    # Expected: [B, 4*C, H, W] (upsampled back to original size)
-    expected_shape = (B, 4 * C, H, W)
+    # Expected: [B, 4*C, H//2, W//2] (DWT halves spatial resolution)
+    expected_shape = (B, 4 * C, H // 2, W // 2)
     assert x_dwt.shape == expected_shape, f'Expected {expected_shape}, got {x_dwt.shape}'
 
     print(f'✓ DWT2D forward pass shape correct: {x_dwt.shape}')
@@ -59,38 +59,36 @@ def test_dwt2d_forward_shape():
 
 
 def test_resoconv_forward_shape():
-    """Test ResoConv preserves spatial resolution."""
+    """Test ResoConv halves spatial resolution (DWT downsampling)."""
     torch.manual_seed(42)
     from raycasted.model.blocks.resoconv import ResoConv
 
-    # Create test input
     B, C_in, H, W, C_out = 2, 64, 32, 32, 128
     x = torch.randn(B, C_in, H, W)
 
-    # Apply ResoConv
     reso = ResoConv(C_in, C_out, shortcut=True)
     x_out = reso(x)
 
-    # Expected: [B, C_out, H, W] (same spatial size)
-    expected_shape = (B, C_out, H, W)
+    expected_shape = (B, C_out, H // 2, W // 2)
     assert x_out.shape == expected_shape, f'Expected {expected_shape}, got {x_out.shape}'
 
     print(f'✓ ResoConv forward pass shape correct: {x_out.shape}')
     print(f'  Input:  {(B, C_in, H, W)}')
-    print(f'  Output: {(B, C_out, H, W)} (spatial size preserved)')
+    print(f'  Output: {(B, C_out, H // 2, W // 2)} (spatial size halved)')
     return True
 
 
 def test_filters_are_frozen():
-    """Test that DWT2D filters are frozen (no gradient)."""
+    """Test that DWT2D filters are a buffer (no gradient)."""
     from raycasted.model.blocks.resoconv import DWT2D
 
     dwt = DWT2D(16)
 
-    # Check that weights don't require gradients
-    assert not dwt.dwt.weight.requires_grad, 'DWT filters should be frozen'
+    assert not dwt.dwt_weight.requires_grad, 'DWT weight buffer should not require grad'
+    assert isinstance(dwt.dwt_weight, torch.Tensor), 'DWT weight should be a buffer, not a Parameter'
+    assert 'dwt_weight' in dict(dwt.named_buffers()), 'DWT weight should be registered buffer'
 
-    print('✓ DWT2D filters are frozen (no gradient computation)')
+    print('✓ DWT2D filters are registered buffer (no gradient, unfreeze-safe)')
     return True
 
 

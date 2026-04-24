@@ -1,15 +1,15 @@
-"""ResoConv: Resolution-preserving convolution via wavelet transform.
+"""ResoConv: Wavelet-based downsampling convolution via DB2 DWT.
 
-Based on WaveMix / WCM / RWCM designs from medical image literature:
+Replaces strided 3x3 Conv in backbone/neck with DWT-based downsampling:
 - DB2 (Daubechies-2) DWT splits input into 4 sub-bands (LL, LH, HL, HH)
-- Concatenate sub-bands → 1×1 Conv projects to target channels
-- Preserves spatial resolution while extracting multi-scale features
-- Pure PyTorch implementation with fixed DB2 filters (ONNX-friendly)
+- Concatenate sub-bands with identity shortcut → 1x1 Conv projection
+- Output is at half spatial resolution (H/2 x W/2) — same as strided Conv
+- Explicitly preserves high-frequency information in LH, HL, HH sub-bands
 
-Key differences from WCM:
-- Uses pywavelets by default; hardcoded fallback when pywt is unavailable
-- No learnable wavelet parameters (avoid deployment complexity)
-- Simplified architecture: DWT → concat → 1×1 Conv (no DW+PW cascade)
+Key differences from standard strided Conv:
+- Anti-aliasing by design (DB2 has 2 vanishing moments)
+- Explicit frequency decomposition (4 sub-bands vs single mixed output)
+- Fewer parameters (1x1 conv for channel mixing, not spatial)
 
 Wavelet filter generation:
 - Uses pywt.Wavelet('db2').dec_lo / dec_hi if pywavelets is installed (default)
@@ -17,13 +17,13 @@ Wavelet filter generation:
 - Both paths produce identical filter values (verified)
 
 References:
-- WaveMix: "WaveMix: A Novel Framework for Network Architecture"
-- WCM: "Wavelet-based Convolutional Module for Medical Image Segmentation"
-- RWCM: "Receptive Field Wavelet-based Convolutional Module"
+- WaveCNet: Williams & Li, "Wavelet-based Pooling for Deep CNNs", CVPR 2020
+- DWT-UNet: DWT downsampling in U-Net for medical segmentation
 """
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from ultralytics.nn.modules.conv import Conv
 
 # DB2 (Daubechies-2) wavelet decomposition filters
@@ -105,110 +105,79 @@ class DWT2D(nn.Module):
         super().__init__()
         self.in_channels = in_channels
 
-        # Create depthwise conv: each input channel gets its own 4 filters
-        # We want depthwise convolution: each of the C_in input channels produces
-        # 4 output channels (LL, LH, HL, HH) using the same DB2 filters.
-        # Weight shape: [4*C_in, 1, 4, 4] for depthwise operation
-        filters = _create_db2_filters(device='cpu', dtype=torch.float32)  # [4, 1, 4, 4]
-        filters_tiled = filters.repeat(in_channels, 1, 1, 1)  # [in_channels*4, 1, 4, 4]
+        filters = _create_db2_filters(device='cpu', dtype=torch.float32)
+        filters_tiled = filters.repeat(in_channels, 1, 1, 1)
 
-        self.register_buffer(
-            'filters',
-            filters_tiled,  # [in_channels*4, 1, 4, 4]
-            persistent=False,
-        )
-
-        # Depthwise conv: groups=in_channels means each input channel has its own
-        # set of filters. But we want 4 filters per input channel, so we use
-        # groups=in_channels and out_channels=in_channels*4.
-        # This creates a depthwise conv where each input channel produces 4 outputs.
-        self.dwt = nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=in_channels * 4,
-            kernel_size=4,
-            stride=2,
-            padding=0,  # Valid padding (no padding)
-            groups=in_channels,  # Depthwise: each input channel has its own filters
-            bias=False,
-        )
-
-        # Initialize with DB2 filters and freeze
-        self.dwt.weight.data.copy_(filters_tiled)
-        self.dwt.weight.requires_grad_(False)
+        self.register_buffer('dwt_weight', filters_tiled, persistent=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply DWT and upsample back to original resolution.
+        """Apply 2D DWT via depthwise conv2d.
 
         Args:
             x: Input tensor [B, C, H, W].
 
         Returns:
-            Wavelet sub-bands [B, 4*C, H/2, W/2] → upsampled to [B, 4*C, H, W].
+            Wavelet sub-bands [B, 4*C, H/2, W/2].
         """
-        # Apply DWT: halves resolution
-        x_dwt = self.dwt(x)  # [B, 4*C, H/2, W/2]
-
-        # Upsample back to original size (nearest neighbor)
-        x_upsampled = nn.functional.interpolate(
-            x_dwt,
-            size=x.shape[2:],
-            mode='nearest',
+        return F.conv2d(
+            x,
+            self.dwt_weight,
+            bias=None,
+            stride=2,
+            padding=1,
+            groups=self.in_channels,
         )
-        return x_upsampled
 
 
 class ResoConv(nn.Module):
-    """Resolution-preserving convolution via wavelet transform.
+    """Wavelet-based downsampling convolution via DB2 DWT.
 
-    Architecture:
+    Replaces strided 3x3 Conv with DWT-based 2x downsampling:
         Input [B, C_in, H, W]
           ↓
-        DWT2D (DB2 filters) → [B, 4*C_in, H, W] (upsampled)
+        DWT2D (DB2 filters, stride=2) → [B, 4*C_in, H/2, W/2]
           ↓
-        Concat with identity shortcut → [B, 5*C_in, H, W]
+        Concat with downsampled identity shortcut → [B, 5*C_in, H/2, W/2]
           ↓
-        1×1 Conv projection → [B, C_out, H, W]
+        1×1 Conv projection → [B, C_out, H/2, W/2]
 
-    This design:
-    - Preserves spatial resolution (no downsampling)
-    - Extracts multi-scale wavelet features (LL, LH, HL, HH)
-    - Maintains gradient flow via identity shortcut
-    - Uses only standard Conv2d operations (ONNX-friendly)
+    This replaces Conv [C_out, 3, 2] in backbone/neck with:
+    - Explicit frequency decomposition (LL, LH, HL, HH)
+    - Anti-aliased downsampling (DB2 vanishing moments)
+    - Gradient flow via identity shortcut
 
     Args:
         c1: Input channels.
         c2: Output channels.
-        shortcut: Whether to add identity shortcut before projection.
+        shortcut: Whether to add downsampled identity shortcut before projection.
     """
 
     def __init__(self, c1: int, c2: int, shortcut: bool = True):
         super().__init__()
         self.shortcut = shortcut
 
-        # Wavelet decomposition: 1 channel → 4 sub-bands
         self.dwt = DWT2D(c1)
 
-        # Projection: 5*c1 (input + 4*dwt) → c2
-        # Use ultralytics Conv wrapper (Conv2d + BN + SiLU)
         in_proj = c1 * 5 if shortcut else c1 * 4
         self.proj = Conv(in_proj, c2, k=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply ResoConv forward pass.
+        """Apply ResoConv: DWT downsample → concat shortcut → 1x1 project.
 
         Args:
             x: Input tensor [B, c1, H, W].
 
         Returns:
-            Output tensor [B, c2, H, W] — same spatial size as input.
+            Output tensor [B, c2, H/2, W/2] — half spatial resolution.
         """
-        # Wavelet decomposition (upsampled to original size)
-        x_dwt = self.dwt(x)  # [B, 4*c1, H, W]
+        x_dwt = self.dwt(x)  # [B, 4*c1, H/2, W/2]
 
-        # Concatenate with identity shortcut
-        x_cat = torch.cat([x, x_dwt], dim=1) if self.shortcut else x_dwt
+        if self.shortcut:
+            x_down = F.avg_pool2d(x, kernel_size=2, stride=2)
+            x_cat = torch.cat([x_down, x_dwt], dim=1)
+        else:
+            x_cat = x_dwt
 
-        # Project to target channels
         return self.proj(x_cat)
 
 
