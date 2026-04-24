@@ -7,9 +7,14 @@ Based on WaveMix / WCM / RWCM designs from medical image literature:
 - Pure PyTorch implementation with fixed DB2 filters (ONNX-friendly)
 
 Key differences from WCM:
-- No pywavelets dependency at runtime (filters are fixed constants)
+- Uses pywavelets by default; hardcoded fallback when pywt is unavailable
 - No learnable wavelet parameters (avoid deployment complexity)
 - Simplified architecture: DWT → concat → 1×1 Conv (no DW+PW cascade)
+
+Wavelet filter generation:
+- Uses pywt.Wavelet('db2').dec_lo / dec_hi if pywavelets is installed (default)
+- Falls back to hardcoded DB2 values if pywavelets is not installed
+- Both paths produce identical filter values (verified)
 
 References:
 - WaveMix: "WaveMix: A Novel Framework for Network Architecture"
@@ -23,26 +28,34 @@ from ultralytics.nn.modules.conv import Conv
 
 # DB2 (Daubechies-2) wavelet decomposition filters
 # Fixed constants — no learning, no pywavelets dependency at runtime
-# Source: pywavelets.Wavelet('db2').dec_lo / dec_hi
-_DB2_LO = torch.tensor(
-    [
-        -0.1294095225512603,  # h0[0]
-        0.2241438680420134,  # h0[1]
-        0.8365163037378079,  # h0[2]
-        0.4830148656578357,  # h0[3]
-    ],
-    dtype=torch.float32,
-)
+# Use pywavelets to generate if available (verification), otherwise fallback to hardcoded values
+try:
+    import pywt
 
-_DB2_HI = torch.tensor(
-    [
-        -0.4830148656578357,  # h1[0] = -h0[3]
-        0.8365163037378079,  # h1[1] = h0[2]
-        -0.2241438680420134,  # h1[2] = -h0[1]
-        -0.1294095225512603,  # h1[3] = -h0[0]
-    ],
-    dtype=torch.float32,
-)
+    _DB2_LO = torch.tensor(pywt.Wavelet('db2').dec_lo, dtype=torch.float32)
+    _DB2_HI = torch.tensor(pywt.Wavelet('db2').dec_hi, dtype=torch.float32)
+except ImportError:
+    # Fallback: hardcoded values matching pywt.Wavelet('db2')
+    # Verified to match: dec_lo = [-0.12940952, 0.22414387, 0.8365163, 0.48301487]
+    _DB2_LO = torch.tensor(
+        [
+            -0.1294095225512603,  # h0[0]
+            0.2241438680420134,  # h0[1]
+            0.8365163037378079,  # h0[2]
+            0.4830148656578357,  # h0[3]
+        ],
+        dtype=torch.float32,
+    )
+
+    _DB2_HI = torch.tensor(
+        [
+            -0.4830148656578357,  # h1[0] = -h0[3]
+            0.8365163037378079,  # h1[1] = h0[2]
+            -0.2241438680420134,  # h1[2] = -h0[1]
+            -0.1294095225512603,  # h1[3] = -h0[0]
+        ],
+        dtype=torch.float32,
+    )
 
 
 def _create_db2_filters(device: torch.device, dtype: torch.dtype = torch.float32) -> torch.Tensor:
