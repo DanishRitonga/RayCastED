@@ -1,6 +1,6 @@
 # Run 16b: C3k2_LK backbone + neck (no DWT)
-# Tests: Do large-kernel blocks compound positively when applied everywhere?
-# Hypothesis: LK neck bottleneck may suppress LK backbone's spatial detail gains.
+# Tests: Does LK everywhere compound positively without ResoConv?
+# Motivation: LK backbone alone may be bottlenecked by standard 3x3 neck fusion.
 
 nc: 80
 end2end: True

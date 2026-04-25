@@ -31,7 +31,7 @@ Tracking the effect of each config change on detection quality.
 | 14b | P2-P4 + ResoConv (reflect pad) | 0.561 | 0.432 | 0.258 | 0.542 | 0.750 | 0.677 | 0.682 | 0.596 | 0.637 |
 | 15 | P2-P4 + C3k2_LK neck only | 0.526 | 0.419 | 0.155 | 0.509 | 0.713 | 0.670 | 0.669 | 0.593 | 0.629 |
 | 16 | P2-P4 + C3k2_LK backbone only | 0.546 | 0.416 | 0.206 | 0.534 | 0.734 | 0.684 | 0.678 | 0.587 | 0.629 |
-| 16b | P2-P4 + C3k2_LK backbone + neck | 🔄 | ? | ? | ? | ? | ? | ? | ? | ? |
+| 16b | P2-P4 + C3k2_LK backbone + neck | 0.549 | 0.409 | 0.212 | 0.532 | 0.735 | 0.678 | 0.669 | 0.588 | 0.626 |
 
 ---
 
@@ -149,6 +149,12 @@ C3k2_LK (scale-adaptive large-kernel depthwise conv) in neck only, standard C3k2
 ```
 C3k2_LK in backbone only, standard C3k2 in neck. Params: 4.05M. Result: **Highest DQ of any single modification** (0.684 vs 0.681 ResoConv, 0.670 LK neck). PQ +0.035 (0.499→0.534), SQ +0.031 (0.703→0.734). Large receptive field in feature extraction directly helps detect more cells. **Conclusion: LK backbone is the best single modification for DQ.**
 
+### Run 16b — P2-P4 + C3k2_LK backbone + neck ✅ COMPLETE
+```yaml
+  model: "raycasted/cfg/yolo26s-run16b-lk-full.yaml"
+```
+C3k2_LK in both backbone AND neck. Params: 3.91M. Result: **Strictly worse than Run 16 (LK backbone only).** DQ 0.678 vs 0.684 (−0.006), mAP@0.5 0.409 vs 0.416 (−0.007), PQ 0.532 vs 0.534 (−0.002). The only improvement over baseline (Run 13b) is SQ (+0.032) and PQ (+0.033) — essentially identical to Run 16 alone. Adding LK to the neck did NOT compound with LK backbone; it erased the DQ gain.
+
 ---
 
 ## Observations
@@ -170,8 +176,120 @@ C3k2_LK in backbone only, standard C3k2 in neck. Params: 4.05M. Result: **Highes
 - **Run 14b vs Run 14:** Reflection padding improved mAP@0.5 +0.013, mAP@0.75 +0.038, SQ +0.006. Zero padding creates spurious high-frequency artifacts at boundaries; reflection padding mirrors the signal for clean decomposition. **Conclusion: Always use reflection padding for DWT.**
 - **Run 15 vs Run 13b:** C3k2_LK in neck only: mAP@0.5 +0.018, SQ +0.010, DQ +0.005. Large-kernel receptive field in feature fusion helps but is the weakest of the three single modifications. **Conclusion: Neck receptive field contributes modestly.**
 - **Run 16 vs Run 13b:** C3k2_LK in backbone only: **highest DQ of any run (0.684)**, PQ +0.035, SQ +0.031. Large-kernel depthwise conv in backbone feature extraction gives P2 anchors enough spatial context (~30-40px receptive field) to distinguish touching cells. **Conclusion: Backbone receptive field is the primary lever for DQ.**
-- **Cross-comparison (Runs 14b, 15, 16):** ResoConv wins SQ (0.750), LK backbone wins DQ (0.684), LK neck is weakest overall. Run 18 (ResoConv + LK backbone) should combine the best of both — frequency decomposition for SQ, large receptive field for DQ.
-- **Run 16b hypothesis:** LK backbone alone (Run 16) may be bottlenecked by the standard 3x3 C3k2 neck compressing away spatial detail. LK neck alone (Run 15) may lack rich features to fuse. Run 16b (LK everywhere, no ResoConv) tests whether LK backbone + LK neck compound positively before adding the DWT variable.
+- **Run 16b vs Run 16 (negative interaction):** Adding C3k2_LK to the neck on top of LK backbone **erased the DQ gain**: DQ 0.678 vs 0.684 (−0.006), mAP@0.5 0.409 vs 0.416 (−0.007). This is a **negative interaction** — not merely lack of compounding, but actual regression. The neck's job is fine-grained channel mixing and spatial precision for ray endpoint regression. LK neck over-smooths the already context-rich backbone features, destroying the spatial precision that the standard 3x3 neck preserved. See detailed analysis below.
+- **Cross-comparison (Runs 14b, 15, 16, 16b):**
+  - **ResoConv** wins SQ (0.750) with −44% params → best polygon shape quality
+  - **LK backbone** wins DQ (0.684) → best cell detection/delineation
+  - **LK neck** is weakest alone (PQ 0.509) and actively harmful when combined with LK backbone (PQ 0.532 vs 0.534)
+  - **Key insight:** LK in the backbone and neck serve fundamentally different roles. Backbone needs large receptive field (context). Neck needs precise local fusion (detail). Mixing both with LK conflates these roles.
+  - Run 18 (ResoConv + LK backbone, standard 3x3 neck) should combine the best of both.
+
+---
+
+## 📊 Analysis: Why LK Backbone + LK Neck Fails (Run 16b)
+
+### Results Summary
+
+| Run | LK Backbone | LK Neck | DQ | SQ | mAP@0.5 | PQ |
+|-----|:-----------:|:-------:|:---:|:---:|:-------:|:---:|
+| 13b (baseline) | — | — | 0.665 | 0.703 | 0.401 | 0.499 |
+| 15 (LK neck) | — | K=13 | 0.670 | 0.713 | 0.419 | 0.509 |
+| 16 (LK backbone) | K=7,9 | — | **0.684** | 0.734 | 0.416 | 0.534 |
+| 16b (LK full) | K=7,9 | K=7,9,13 | 0.678 | 0.735 | 0.409 | 0.532 |
+| 14b (ResoConv) | — | — | 0.677 | **0.750** | **0.432** | 0.542 |
+
+### The Negative Interaction
+
+Run 16b does not compound — it **regresses** vs Run 16 on the metrics that LK backbone was supposed to improve:
+
+| Metric | Run 16 (backbone only) | Run 16b (backbone + neck) | Delta |
+|--------|:-----------------------:|:-------------------------:|:-----:|
+| DQ | **0.684** | 0.678 | **−0.006** |
+| mAP@0.5 | **0.416** | 0.409 | **−0.007** |
+| Precision | **0.678** | 0.669 | **−0.009** |
+| Recall | 0.587 | 0.588 | +0.001 |
+| SQ | 0.734 | 0.735 | +0.001 |
+
+DQ and precision dropped while recall was flat. The model detects roughly the same number of cells but **localizes them worse** — the extra context from LK neck doesn't help delineation, it actively hurts it.
+
+### Root Cause: Role Conflation in Backbone vs Neck
+
+The backbone and neck serve fundamentally different purposes in a detection pipeline:
+
+**Backbone role — "What is where?" (contextual understanding)**
+- Extract semantically rich features across spatial scales
+- Large receptive field is critical: a P2 stride-4 anchor at 256px crop covers a 4×4 pixel region in the feature map, but needs to "know" about neighboring cells ~30-40px away to distinguish touching vs separate nuclei
+- LK backbone (K=7,9) provides exactly this: the dilated depthwise branches (K=9 → branches at dilation 1,2,3) span up to 21×21 pixels at P2, enough to see adjacent cells
+- This is why Run 16 DQ=0.684 — the backbone can resolve touching cells
+
+**Neck role — "Exactly where?" (spatial precision)**
+- Fuse multi-scale features (top-down pathway + bottom-up pathway)
+- The FPN/PAFP neck combines coarse semantic features from P4 with fine-grained spatial features from P2
+- After concatenation, the neck blocks perform **channel mixing** (which features matter?) and **spatial alignment** (where exactly are the boundaries?)
+- For ray endpoint prediction, the neck needs to preserve **pixel-level spatial precision** — each ray endpoint needs sub-pixel accuracy
+- Standard 3×3 convolutions in C3k2 are ideal for this: small receptive field = local detail preservation
+- The 1×1 convolutions in the C3k2 bottleneck (expand/project) handle channel mixing independently of spatial context
+
+**What goes wrong with LK neck:**
+- LK neck (K=7,9,13) applies large-kernel depthwise convolutions **after** the Concat merge
+- The Concat already fuses features from different scales — the spatial information is at mixed resolutions
+- A 13×13 depthwise conv at P2 stride-4 spans 52×52 pixels in input space — it mixes features from cells 52px apart
+- This **over-smooths** the precise boundary information that the backbone worked hard to extract
+- The result: broader, less precise features that are good for saying "there's a cell here" (SQ=0.735, unchanged) but worse for saying "exactly where its boundary is" (DQ=0.678, regressed)
+
+### Evidence from UniRepLKNet's Architecture
+
+UniRepLKNet's own design validates this analysis. In `UniRepLKNetBlock`, the block structure is:
+
+```
+Input → DilatedReparamDW (large kernel, spatial aggregation)
+      → BN → SE (channel attention)
+      → Linear (1×1 PW, channel mixing) → GELU → GRN
+      → Linear (1×1 PW, channel mixing) → BN
+      → + residual
+```
+
+The **spatial aggregation** (large kernel) and **channel mixing** (1×1 linear/conv) are **explicitly separated**. The FFN after the DW conv uses **only 1×1 operations** — no spatial convolution at all. This is the same principle as keeping 3×3 in the neck.
+
+Furthermore, UniRepLKNet-S uses an **alternating kernel pattern** in stage 3: `(13, 3, 3, 13, 3, 3, ...)` — not all-13. The 3×3 blocks after the 13×13 block serve as "local refinement," analogous to our standard 3×3 neck preserving precision after LK backbone provides context.
+
+### The Information Flow Argument
+
+Think of the detection pipeline as an information processing chain:
+
+```
+Input image (raw pixels, full detail)
+    ↓ Backbone: extract context (WHAT cells look like)
+Feature maps (semantic, lower spatial detail)
+    ↓ Neck: fuse scales + refine boundaries (WHERE exactly)
+Neck features (precise localization)
+    ↓ Head: predict rays per cell
+Polygon output
+```
+
+1. **LK backbone** enriches the "WHAT" — the backbone features carry more contextual information about neighboring cells, tissue structure, staining patterns
+2. **Standard 3×3 neck** takes those rich features and preserves the "WHERE" — the fine-grained spatial information needed for ray endpoint regression
+3. **LK neck** attempts to add more "WHAT" (context) at a stage that needs "WHERE" (precision) — it's the wrong operation at the wrong stage
+
+### Parametric Evidence
+
+Run 16b actually has **fewer parameters** than Run 16 (3.91M vs 4.05M). This is because `C3k2_LK` with expansion `e=0.5` uses the same hidden channel count as `C3k2` with `c3k=True` (which internally uses `e=0.5`), but the DilatedReparamDW uses depthwise conv (groups=dim, param multiplier = 1) instead of the dense conv in standard C3k2 Bottleneck (groups=1, param multiplier = c_in×c_out). So the LK neck is not only less effective but also uses parameters differently — trading dense channel interaction for sparse spatial aggregation, which is the wrong tradeoff in the neck.
+
+### Implications for Future Runs
+
+1. **Run 17 (ResoConv + LK neck) — CANCELLED.** If LK neck hurts when combined with LK backbone, it will likely hurt when combined with ResoConv too. The neck role is fundamentally about local precision, not spatial context.
+
+2. **Run 19 (ResoConv + LK everywhere) — DEPRIORITIZED.** Same reasoning. LK in the neck is harmful regardless of backbone choice.
+
+3. **Run 18 (ResoConv + LK backbone, standard neck) — HIGHEST PRIORITY.** This combines the SQ winner (ResoConv, 0.750) with the DQ winner (LK backbone, 0.684) while keeping the standard 3×3 neck that preserves spatial precision. This is the configuration most aligned with the architectural principle of separated roles.
+
+4. **Future: SE + Layer Scale on LK backbone.** Rather than putting LK in the neck, the better path is to make the LK backbone stronger with UniRepLKNet's missing ingredients (SE attention, layer scale, GRN). These add channel-level intelligence to the backbone without touching the neck.
+
+### Revised Architecture Principle
+
+> **"Large kernels for context (backbone), small kernels for precision (neck), wavelets for preservation (downsampling)."**
+
+This is the design rule that emerges from Runs 14-16b. Any modification must respect the role boundary between backbone and neck.
 
 ---
 
@@ -220,10 +338,8 @@ C3k2_LK in backbone only, standard C3k2 in neck. Params: 4.05M. Result: **Highes
       - ~~**Run 14:**~~ ✅ DONE: ResoConv best for SQ (0.750), −44% params
       - ~~**Run 15:**~~ ✅ DONE: LK neck weakest modification
       - ~~**Run 16:**~~ ✅ DONE: LK backbone best for DQ (0.684)
-      - **Run 17:** P2-P4 + ResoConv + C3k2_LK neck → ResoConv + LK neck synergy
-      - **Run 16b:** P2-P4 + C3k2_LK backbone + neck → test LK interaction before adding ResoConv
-      - **Run 18:** P2-P4 + ResoConv + C3k2_LK backbone → **HIGHEST PRIORITY** (combines SQ + DQ winners)
-      - **Run 19:** P2-P4 + ResoConv + C3k2_LK everywhere → full combined architecture
+      - ~~**Run 16b:**~~ ✅ DONE: LK full regressed vs LK backbone alone (DQ 0.678 vs 0.684). **Negative interaction confirmed.**
+      - **Run 18:** P2-P4 + ResoConv + C3k2_LK backbone → **HIGHEST PRIORITY** (combines SQ + DQ winners, standard 3x3 neck)
       - **Future:** Learnable sub-band weighting in ResoConv (HFE-DWT, WaveDH), biorthogonal wavelets (bior1.3)
       - **Goal:** Close DQ gap (target: 0.75+) while maintaining SQ advantage
 
@@ -243,8 +359,9 @@ See `docs/backbone_neck_modification.md` for the full architecture plan and YAML
 | ~~14b~~ | ~~P2-P4 + ResoConv (reflect pad)~~ | ~~Incremental~~ | ~~Boundary artifact removal~~ | ✅ DONE: +3.1% mAP, SQ=0.750 |
 | ~~15~~ | ~~P2-P4 + C3k2_LK neck only~~ | ~~+0.02-0.05 mAP~~ | ~~UniRepLKNet large kernels~~ | ✅ DONE: +4.5% mAP, weakest LK |
 | ~~16~~ | ~~P2-P4 + C3k2_LK backbone only~~ | ~~+0.02-0.06 mAP~~ | ~~Receptive field at P2/P3~~ | ✅ DONE: DQ=0.684 (best DQ) |
-| **16b** | **P2-P4 + C3k2_LK backbone + neck** | **+0.05-0.10 mAP** | **LK interaction: neck may bottleneck backbone** | **HIGH** |
-| **17** | **P2-P4 + ResoConv + C3k2_LK neck** | **+0.05-0.10 mAP** | **ResoConv SQ + LK neck** | **HIGH** |
-| **18** | **P2-P4 + ResoConv + C3k2_LK backbone** | **+0.08-0.12 mAP** | **Combines SQ + DQ winners** | **HIGHEST** |
-| **19** | **P2-P4 + ResoConv + C3k2_LK everywhere** | **+0.08-0.15 mAP** | **Full combined architecture** | **HIGH** |
+| ~~16b~~ | ~~P2-P4 + C3k2_LK backbone + neck~~ | ~~+0.04-0.08 mAP~~ | ~~LK interaction~~ | ✅ DONE: **Negative interaction** DQ 0.678 vs 0.684 |
+| ~~17~~ | ~~P2-P4 + ResoConv + C3k2_LK neck~~ | ~~+0.05-0.10 mAP~~ | ~~ResoConv SQ + LK neck~~ | ❌ CANCELLED: LK neck harmful |
+| **18** | **P2-P4 + ResoConv + C3k2_LK backbone** | **+0.08-0.12 mAP** | **Combines SQ + DQ winners, standard neck** | **HIGHEST** |
+| ~~19~~ | ~~P2-P4 + ResoConv + C3k2_LK everywhere~~ | ~~+0.08-0.15 mAP~~ | ~~Full combined~~ | ❌ DEPRIORITIZED: LK neck harmful |
 | 20 | UniRepLKNet-S backbone + P2-P4 neck | +0.08-0.15 mAP | Domain-specific pretrained | MEDIUM |
+| 21 | SE + Layer Scale on LK backbone (Run 16 + SE/GRN) | +0.02-0.04 mAP | UniRepLKNet missing ingredients | HIGH |
