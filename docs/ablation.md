@@ -26,7 +26,12 @@ Tracking the effect of each config change on detection quality.
 | 12 | P3-P5 + Large Kernel (refinement_kernel_size=7) | 0.561 | 0.425 | 0.248 | 0.545 | 0.749 | 0.683 | 0.686 | 0.598 | 0.639 |
 | 12b | P3-P5 + Pretrained Backbone (yolo26s.pt, COCO) | 0.547 | 0.409 | 0.225 | 0.530 | 0.739 | **0.671** | 0.665 | 0.582 | 0.621 |
 | 13 | P2-P4 + C2PSA@P4 (dummy P5, pretrained) | 0.551 | 0.423 | 0.214 | 0.531 | 0.734 | **0.678** | 0.676 | 0.602 | 0.637 |
-| 13b | P2-P4 + C2PSA@P4 (dummy P5, scratch) | 🔄 | ? | ? | ? | ? | ? | ? | ? | ? |
+| 13b | P2-P4 + C2PSA@P4 (dummy P5, scratch) | 0.511 | 0.401 | 0.128 | 0.499 | 0.703 | 0.665 | 0.662 | 0.581 | 0.619 |
+| 14 | P2-P4 + ResoConv (zero pad) | 0.561 | 0.419 | 0.220 | 0.540 | 0.744 | 0.681 | 0.673 | 0.595 | 0.632 |
+| 14b | P2-P4 + ResoConv (reflect pad) | 0.561 | 0.432 | 0.258 | 0.542 | 0.750 | 0.677 | 0.682 | 0.596 | 0.637 |
+| 15 | P2-P4 + C3k2_LK neck only | 0.526 | 0.419 | 0.155 | 0.509 | 0.713 | 0.670 | 0.669 | 0.593 | 0.629 |
+| 16 | P2-P4 + C3k2_LK backbone only | 0.546 | 0.416 | 0.206 | 0.534 | 0.734 | 0.684 | 0.678 | 0.587 | 0.629 |
+| 16b | P2-P4 + C3k2_LK backbone + neck | 🔄 | ? | ? | ? | ? | ? | ? | ? | ? |
 
 ---
 
@@ -116,12 +121,33 @@ training:
 ```
 Result: **Modest improvement over Run 12b.** DQ +0.007 (0.671→0.678), mAP@0.5 +0.014 (0.409→0.423), F1 +0.016 (0.621→0.637). Params: 6.65M, GFLOPs: 7.15. **Conclusion: P2 density provides small but real benefit.** However, the gain is insufficient to close the DQ gap to LSP-DETR (0.678 vs 0.810). Bottleneck remains in backbone receptive field, not just anchor density.
 
-### Run 13b — P2-P4 + C2PSA@P4 (dummy P5, scratch) 🔄 IN PROGRESS
+### Run 13b — P2-P4 + C2PSA@P4 (scratch) ✅ COMPLETE
 Same as Run 13 but without pretrained backbone:
 ```yaml
   pretrained_backbone: null  # Train from scratch
 ```
-Purpose: Measure pretrained weight impact. If scratch DQ ≥ 0.65, custom backbone viable. If scratch DQ < 0.60, pretrained essential → proceed to UniRepLKNet (domain-specific pretrained).
+Result: All metrics regressed vs Run 13 (pretrained): DQ -0.013 (0.678→0.665), mAP@0.5 -0.022 (0.423→0.401), SQ -0.031 (0.734→0.703). **Conclusion: Pretrained weights help but are not essential** (scratch DQ=0.665 ≥ 0.65 threshold). Custom backbone viable for domain-specific architectures.
+
+### Run 14 — P2-P4 + ResoConv (zero pad) ✅ COMPLETE
+```yaml
+  model: "raycasted/cfg/yolo26s-resoconv-p2p4.yaml"
+```
+All 5 backbone + 2 neck strided Convs replaced with ResoConv (DB2 DWT + 1x1 projection). Params: 3.73M (−44% vs 6.65M baseline). Result: **Improved every metric vs Run 13b.** mAP@0.5 +0.018 (0.401→0.419), SQ +0.041 (0.703→0.744), F1 +0.013 (0.619→0.632). DWT frequency decomposition preserves high-frequency boundary information that strided conv destroys. **Conclusion: ResoConv is the single most effective modification — better polygons with half the parameters.**
+
+### Run 14b — P2-P4 + ResoConv (reflect pad) ✅ COMPLETE
+Same as Run 14 but with reflection padding instead of zero padding in DWT. Result: mAP@0.5 +0.013 (0.419→0.432), mAP@0.75 +0.038 (0.220→0.258), SQ +0.006 (0.744→0.750). Reflection padding eliminates spurious high-frequency artifacts at tile boundaries. DQ dipped slightly (-0.004) but overall quality improved. **Conclusion: Reflection padding is the correct choice for DWT downsampling.**
+
+### Run 15 — P2-P4 + C3k2_LK neck only ✅ COMPLETE
+```yaml
+  model: "raycasted/cfg/yolo26s-run15-lk-neck.yaml"
+```
+C3k2_LK (scale-adaptive large-kernel depthwise conv) in neck only, standard C3k2 in backbone. Params: 4.02M. Result: Improved over Run 13b baseline: mAP@0.5 +0.018 (0.401→0.419), SQ +0.010 (0.703→0.713), DQ +0.005 (0.665→0.670). **Conclusion: Large-kernel neck helps but less than ResoConv.**
+
+### Run 16 — P2-P4 + C3k2_LK backbone only ✅ COMPLETE
+```yaml
+  model: "raycasted/cfg/yolo26s-run16-lk-backbone.yaml"
+```
+C3k2_LK in backbone only, standard C3k2 in neck. Params: 4.05M. Result: **Highest DQ of any single modification** (0.684 vs 0.681 ResoConv, 0.670 LK neck). PQ +0.035 (0.499→0.534), SQ +0.031 (0.703→0.734). Large receptive field in feature extraction directly helps detect more cells. **Conclusion: LK backbone is the best single modification for DQ.**
 
 ---
 
@@ -139,7 +165,13 @@ Purpose: Measure pretrained weight impact. If scratch DQ ≥ 0.65, custom backbo
 - **Run 11 vs Run 7:** E2E Fix with Hungarian matching (tal_topk=13, beta=3.0, o2o.topk=1) improved mAP@0.5 by +0.039 (0.389→0.428) and mAP@0.75 by +0.076 (0.174→0.250). DQ remained stable (-0.004) while SQ improved +0.010. The Hungarian matcher provides globally optimal assignment for the one2one branch, enabling NMS-free inference. Lower beta (3.0 vs default 6.0) makes alignment metric less extreme, helping dense touching cells. **Conclusion: E2E Fix with Hungarian matching is a significant improvement, especially at stricter IoU thresholds.**
 - **Run 12 vs Run 11:** Large kernel (7×7) in the detection head produced negligible improvement: mAP@0.5 -0.003 (0.428→0.425), SQ +0.003 (0.746→0.749), DQ +0.001 (0.682→0.683). F1 unchanged (0.639). The head-level refinement is NOT the bottleneck — the problem lies further upstream in the feature pyramid / neck. Each detection head already receives features from the PANet neck, so widening the head's receptive field cannot compensate for information lost during neck-level downsampling and fusion. **Conclusion: The bottleneck is in the neck (PANet feature pyramid), not the head. Neck modifications (DWT downsampling, P2 scale, BiFPN fusion) should be prioritized over head modifications.**
 - **Run 12b vs Run 11:** COCO pretrained backbone regressed all metrics vs the trained-from-scratch Run 11: DQ -0.011 (0.682→0.671), mAP@0.5 -0.019 (0.428→0.409). **Conclusion: Pretrained weights from natural images (COCO) hurt histopathology cell detection.** The domain gap (RGB natural images → H&E stained tissue) is too large. The backbone features learned for general object detection don't transfer to cell detection. **Transfer learning requires domain-specific pretrained weights (e.g., UniRepLKNet trained on PanNuke/MoNuSeg).**
-- **Run 13 vs Run 12b:** P2-P4 neck with C2PSA@P4 (with pretrained) improved over Run 12b: DQ +0.007 (0.671→0.678), mAP@0.5 +0.014 (0.409→0.423). **P2 anchor density provides measurable benefit (+1.0% DQ, +3.4% mAP).** However, the gain is modest — DQ remains far from LSP-DETR's 0.810. **Conclusion: P2 density helps but is NOT sufficient.** The bottleneck is backbone receptive field at P2 (~16px from YOLO26s). P2 anchors exist but lack the spatial context to distinguish touching cells. Large-kernel backbone (UniRepLKNet) is needed to give P2 anchors meaningful receptive field.
+- **Run 13b vs Run 13:** Training from scratch (no pretrained) regressed vs pretrained: DQ -0.013 (0.678→0.665), mAP@0.5 -0.022 (0.423→0.401), SQ -0.031 (0.734→0.703). Scratch DQ=0.665 ≥ 0.65 threshold → custom backbone viable. **Conclusion: Pretrained COCO weights help but are not essential. Custom architectures trained from scratch can match or exceed pretrained baseline.**
+- **Run 14 vs Run 13b:** ResoConv (DB2 DWT downsampling) improved every metric: mAP@0.5 +0.018, SQ +0.041, F1 +0.013, with −44% params (3.73M vs 6.65M). The wavelet frequency decomposition explicitly preserves LH/HL/HH sub-bands (edges, boundaries) that strided conv destroys. **Conclusion: DWT downsampling is the most effective single modification for polygon quality (SQ).**
+- **Run 14b vs Run 14:** Reflection padding improved mAP@0.5 +0.013, mAP@0.75 +0.038, SQ +0.006. Zero padding creates spurious high-frequency artifacts at boundaries; reflection padding mirrors the signal for clean decomposition. **Conclusion: Always use reflection padding for DWT.**
+- **Run 15 vs Run 13b:** C3k2_LK in neck only: mAP@0.5 +0.018, SQ +0.010, DQ +0.005. Large-kernel receptive field in feature fusion helps but is the weakest of the three single modifications. **Conclusion: Neck receptive field contributes modestly.**
+- **Run 16 vs Run 13b:** C3k2_LK in backbone only: **highest DQ of any run (0.684)**, PQ +0.035, SQ +0.031. Large-kernel depthwise conv in backbone feature extraction gives P2 anchors enough spatial context (~30-40px receptive field) to distinguish touching cells. **Conclusion: Backbone receptive field is the primary lever for DQ.**
+- **Cross-comparison (Runs 14b, 15, 16):** ResoConv wins SQ (0.750), LK backbone wins DQ (0.684), LK neck is weakest overall. Run 18 (ResoConv + LK backbone) should combine the best of both — frequency decomposition for SQ, large receptive field for DQ.
+- **Run 16b hypothesis:** LK backbone alone (Run 16) may be bottlenecked by the standard 3x3 C3k2 neck compressing away spatial detail. LK neck alone (Run 15) may lack rich features to fuse. Run 16b (LK everywhere, no ResoConv) tests whether LK backbone + LK neck compound positively before adding the DWT variable.
 
 ---
 
@@ -183,15 +215,17 @@ Purpose: Measure pretrained weight impact. If scratch DQ ≥ 0.65, custom backbo
    - Current strides (8/16/32) may not capture fine-grained details
    - **Solution direction:** Neck/backbone modifications (P2 scale, large kernels, DWT)
 
- 5. **Next Steps:**
-     - **Run 13b (IN PROGRESS):** P2-P4 without pretrained → measure pretrained weight impact
-       - If scratch DQ ≥ 0.65: Pretrained not essential → custom backbone viable
-       - If scratch DQ < 0.60: Pretrained essential → must use domain-specific pretrained (UniRepLKNet)
-     - **Run 14:** P2-P4 + ResoConv only → isolate DWT high-freq preservation effect
-     - **Run 15:** P2-P4 + C3k2_LK neck only → isolate neck large-kernel receptive field effect
-     - **Run 16:** P2-P4 + C3k2_LK backbone only → isolate backbone large-kernel receptive field effect
-     - **Runs 17-19:** Factorial combinations of ResoConv + C3k2_LK. See `docs/backbone_neck_modification.md`
-     - **Goal:** Close DQ gap (target: 0.75+) while maintaining SQ advantage
+  5. **Next Steps:**
+      - ~~**Run 13b:**~~ ✅ DONE: Scratch DQ=0.665, custom backbone viable
+      - ~~**Run 14:**~~ ✅ DONE: ResoConv best for SQ (0.750), −44% params
+      - ~~**Run 15:**~~ ✅ DONE: LK neck weakest modification
+      - ~~**Run 16:**~~ ✅ DONE: LK backbone best for DQ (0.684)
+      - **Run 17:** P2-P4 + ResoConv + C3k2_LK neck → ResoConv + LK neck synergy
+      - **Run 16b:** P2-P4 + C3k2_LK backbone + neck → test LK interaction before adding ResoConv
+      - **Run 18:** P2-P4 + ResoConv + C3k2_LK backbone → **HIGHEST PRIORITY** (combines SQ + DQ winners)
+      - **Run 19:** P2-P4 + ResoConv + C3k2_LK everywhere → full combined architecture
+      - **Future:** Learnable sub-band weighting in ResoConv (HFE-DWT, WaveDH), biorthogonal wavelets (bior1.3)
+      - **Goal:** Close DQ gap (target: 0.75+) while maintaining SQ advantage
 
 ---
 
@@ -204,11 +238,13 @@ See `docs/backbone_neck_modification.md` for the full architecture plan and YAML
 | ~~12~~ | ~~P3-P5 + Large Kernel (refinement_kernel_size=7)~~ | ~~+0.03-0.06 mAP~~ | ~~RepLKNet +4.2% AP~~ | ✅ DONE: Negligible |
 | ~~12b~~ | ~~P3-P5 + Pretrained Backbone (COCO)~~ | ~~+0.05-0.15 mAP~~ | ~~Transfer learning from COCO~~ | ✅ DONE: Regression (-1.9% mAP) |
 | ~~13~~ | ~~P2-P4 + C2PSA@P4 (pretrained)~~ | ~~+0.03-0.08 mAP~~ | ~~P2 provides finer resolution~~ | ✅ DONE: +1.4% mAP |
-| **13b** | **P2-P4 + C2PSA@P4 (scratch)** | **Pretrained impact measurement** | **If DQ ≥ 0.65 → custom backbone viable** | **HIGH: In Progress** |
-| **14** | **P2-P4 + ResoConv (all downsampling)** | **+0.03-0.08 mAP** | **LKCell SOTA PanNuke, WaveCNet +AP** | **HIGH** |
-| **15** | **P2-P4 + C3k2_LK neck only** | **+0.02-0.05 mAP** | **UniRepLKNet large kernels** | **HIGH** |
-| **16** | **P2-P4 + C3k2_LK backbone only** | **+0.02-0.06 mAP** | **Receptive field at P2/P3** | **HIGH** |
-| 17 | P2-P4 + ResoConv + C3k2_LK neck | +0.05-0.10 mAP | If Run 14 or 15 positive | HIGH |
-| 18 | P2-P4 + ResoConv + C3k2_LK backbone | +0.05-0.10 mAP | If Run 14 or 16 positive | HIGH |
-| 19 | P2-P4 + ResoConv + C3k2_LK everywhere | +0.08-0.15 mAP | Full combined architecture | HIGH |
+| ~~13b~~ | ~~P2-P4 + C2PSA@P4 (scratch)~~ | ~~Pretrained impact measurement~~ | ~~If DQ ≥ 0.65 → custom backbone viable~~ | ✅ DONE: DQ=0.665, viable |
+| ~~14~~ | ~~P2-P4 + ResoConv (zero pad)~~ | ~~+0.03-0.08 mAP~~ | ~~LKCell SOTA PanNuke, WaveCNet +AP~~ | ✅ DONE: +4.5% mAP, SQ=0.744 |
+| ~~14b~~ | ~~P2-P4 + ResoConv (reflect pad)~~ | ~~Incremental~~ | ~~Boundary artifact removal~~ | ✅ DONE: +3.1% mAP, SQ=0.750 |
+| ~~15~~ | ~~P2-P4 + C3k2_LK neck only~~ | ~~+0.02-0.05 mAP~~ | ~~UniRepLKNet large kernels~~ | ✅ DONE: +4.5% mAP, weakest LK |
+| ~~16~~ | ~~P2-P4 + C3k2_LK backbone only~~ | ~~+0.02-0.06 mAP~~ | ~~Receptive field at P2/P3~~ | ✅ DONE: DQ=0.684 (best DQ) |
+| **16b** | **P2-P4 + C3k2_LK backbone + neck** | **+0.05-0.10 mAP** | **LK interaction: neck may bottleneck backbone** | **HIGH** |
+| **17** | **P2-P4 + ResoConv + C3k2_LK neck** | **+0.05-0.10 mAP** | **ResoConv SQ + LK neck** | **HIGH** |
+| **18** | **P2-P4 + ResoConv + C3k2_LK backbone** | **+0.08-0.12 mAP** | **Combines SQ + DQ winners** | **HIGHEST** |
+| **19** | **P2-P4 + ResoConv + C3k2_LK everywhere** | **+0.08-0.15 mAP** | **Full combined architecture** | **HIGH** |
 | 20 | UniRepLKNet-S backbone + P2-P4 neck | +0.08-0.15 mAP | Domain-specific pretrained | MEDIUM |
