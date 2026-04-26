@@ -95,15 +95,17 @@ class DWT2D(nn.Module):
     - HH: High-high (diagonal edges)
 
     Filters are initialized from DB2 constants and frozen (no gradient).
-    Output channels = 4 × input_channels (one set per input channel).
+    Output channels = 3*C (drop_hh=True) or 4*C × input_channels (one set per input channel).
 
     Args:
         in_channels: Number of input channels.
+        drop_hh: If True, discard HH sub-band (diagonal noise) and return 3 sub-bands only.
     """
 
-    def __init__(self, in_channels: int):
+    def __init__(self, in_channels: int, drop_hh: bool = False):
         super().__init__()
         self.in_channels = in_channels
+        self.drop_hh = drop_hh
 
         filters = _create_db2_filters(device='cpu', dtype=torch.float32)
         filters_tiled = filters.repeat(in_channels, 1, 1, 1)
@@ -117,10 +119,10 @@ class DWT2D(nn.Module):
             x: Input tensor [B, C, H, W].
 
         Returns:
-            Wavelet sub-bands [B, 4*C, H/2, W/2].
+            Wavelet sub-bands [B, 3*C, H/2, W/2] (drop_hh) or [B, 4*C, H/2, W/2].
         """
         x = F.pad(x, (1, 1, 1, 1), mode='reflect')
-        return F.conv2d(
+        out = F.conv2d(
             x,
             self.dwt_weight,
             bias=None,
@@ -128,6 +130,10 @@ class DWT2D(nn.Module):
             padding=0,
             groups=self.in_channels,
         )
+        if self.drop_hh:
+            n_c = self.in_channels
+            out = torch.cat([out[:, :n_c], out[:, n_c : 3 * n_c]], dim=1)
+        return out
 
 
 class ResoConv(nn.Module):
@@ -136,14 +142,14 @@ class ResoConv(nn.Module):
     Replaces strided 3x3 Conv with DWT-based 2x downsampling:
         Input [B, C_in, H, W]
           ↓
-        DWT2D (DB2 filters, stride=2) → [B, 4*C_in, H/2, W/2]
+        DWT2D (DB2 filters, stride=2) → [B, n_sub*C_in, H/2, W/2]
           ↓
-        Concat with downsampled identity shortcut → [B, 5*C_in, H/2, W/2]
+        Concat with downsampled identity shortcut (optional) → [B, in_proj, H/2, W/2]
           ↓
         1×1 Conv projection → [B, C_out, H/2, W/2]
 
     This replaces Conv [C_out, 3, 2] in backbone/neck with:
-    - Explicit frequency decomposition (LL, LH, HL, HH)
+    - Explicit frequency decomposition (LL, LH, HL, optionally HH)
     - Anti-aliased downsampling (DB2 vanishing moments)
     - Gradient flow via identity shortcut
 
@@ -151,15 +157,17 @@ class ResoConv(nn.Module):
         c1: Input channels.
         c2: Output channels.
         shortcut: Whether to add downsampled identity shortcut before projection.
+        drop_hh: If True, discard HH sub-band (diagonal noise) before projection.
     """
 
-    def __init__(self, c1: int, c2: int, shortcut: bool = True):
+    def __init__(self, c1: int, c2: int, shortcut: bool = True, drop_hh: bool = False):
         super().__init__()
         self.shortcut = shortcut
 
-        self.dwt = DWT2D(c1)
+        self.dwt = DWT2D(c1, drop_hh=drop_hh)
 
-        in_proj = c1 * 5 if shortcut else c1 * 4
+        n_sub = 3 if drop_hh else 4
+        in_proj = c1 * (1 + n_sub) if shortcut else c1 * n_sub
         self.proj = Conv(in_proj, c2, k=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -180,4 +188,3 @@ class ResoConv(nn.Module):
             x_cat = x_dwt
 
         return self.proj(x_cat)
-
