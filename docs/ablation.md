@@ -32,6 +32,10 @@ Tracking the effect of each config change on detection quality.
 | 15 | P2-P4 + C3k2_LK neck only | 0.526 | 0.419 | 0.155 | 0.509 | 0.713 | 0.670 | 0.669 | 0.593 | 0.629 |
 | 16 | P2-P4 + C3k2_LK backbone only | 0.546 | 0.416 | 0.206 | 0.534 | 0.734 | 0.684 | 0.678 | 0.587 | 0.629 |
 | 16b | P2-P4 + C3k2_LK backbone + neck | 0.549 | 0.409 | 0.212 | 0.532 | 0.735 | 0.678 | 0.669 | 0.588 | 0.626 |
+| **18** ⭐ | **ResoConv + LK backbone (reflect), std neck** | **0.555** | **0.405** | **0.219** | **0.540** | **0.745** | **0.680** | **0.675** | **0.582** | **0.625** |
+| 20 | ResoConv no-shortcut + LK backbone (reflect), std neck | 0.558 | 0.414 | 0.249 | 0.540 | 0.751 | 0.674 | 0.672 | 0.582 | 0.624 |
+| 21 | ResoConv no-HH + LK backbone (reflect), std neck | 0.555 | 0.414 | 0.245 | 0.535 | 0.747 | 0.670 | 0.675 | 0.583 | 0.626 |
+| 22 | bior2.2 + ResoConv + LK backbone (reflect), std neck | 0.551 | 0.421 | 0.239 | 0.527 | 0.744 | 0.663 | 0.681 | 0.580 | 0.626 |
 
 ---
 
@@ -182,7 +186,12 @@ C3k2_LK in both backbone AND neck. Params: 3.91M. Result: **Strictly worse than 
   - **LK backbone** wins DQ (0.684) → best cell detection/delineation
   - **LK neck** is weakest alone (PQ 0.509) and actively harmful when combined with LK backbone (PQ 0.532 vs 0.534)
   - **Key insight:** LK in the backbone and neck serve fundamentally different roles. Backbone needs large receptive field (context). Neck needs precise local fusion (detail). Mixing both with LK conflates these roles.
-  - Run 18 (ResoConv + LK backbone, standard 3x3 neck) should combine the best of both.
+  - ~~Run 18 (ResoConv + LK backbone, standard 3x3 neck) should combine the best of both.~~ **Result (Run 18): Did NOT compound.** See updated analysis below.
+- **Run 18 vs Run 14b (ResoConv + LK backbone):** Combined the SQ winner with the DQ winner — but **regressed on BOTH**. SQ 0.745 vs 0.750 (−0.005), DQ 0.680 vs 0.684 (−0.004), mAP@0.5 0.405 vs 0.432 (−0.027). The LK backbone's spatial smoothing partially destroys the frequency decomposition that ResoConv provides. **Conclusion: ResoConv and LK backbone have negative interference.**
+- **Run 20 vs Run 18 (no-shortcut):** Removing the ResoConv shortcut connection improved mAP@0.75 (0.219→0.249, **best of any run**) and SQ (0.745→0.751) at the cost of DQ (0.680→0.674). The pure DWT signal (no identity blending) is cleaner for shape quality but loses spatial localization. **Conclusion: No-shortcut variant is better for polygon precision.**
+- **Run 21 vs Run 18 (no-HH sub-band):** Dropping the HH (diagonal) sub-band saved 0.21M params with negligible quality loss. mAP@0.5 0.414 (same as Run 20), SQ 0.747, DQ 0.670. **Conclusion: HH contributes negligibly to cell boundary detection.**
+- **Run 22 vs Run 18 (bior2.2 wavelet):** Biorthogonal 2.2 achieved highest mAP@0.5 among ResoConv+LK runs (0.421) but lowest DQ (0.663). The symmetric wavelet helps alignment but doesn't match H&E edge characteristics as well as DB2. **Conclusion: Wavelet choice is minor; DB2 remains default.**
+- **Cross-comparison (Runs 14b, 18, 20, 21, 22):** **Run 14b (ResoConv alone) remains the best overall architecture.** LK backbone consistently hurts ResoConv — the frequency preservation and large-kernel context compete for the same information budget. The no-shortcut variant (Run 20) is promising for mAP@0.75 but can't close the detection gap.
 
 ---
 
@@ -284,6 +293,42 @@ Run 16b actually has **fewer parameters** than Run 16 (3.91M vs 4.05M). This is 
 3. **Run 18 (ResoConv + LK backbone, standard neck) — HIGHEST PRIORITY.** This combines the SQ winner (ResoConv, 0.750) with the DQ winner (LK backbone, 0.684) while keeping the standard 3×3 neck that preserves spatial precision. This is the configuration most aligned with the architectural principle of separated roles.
 
 4. **Future: SE + Layer Scale on LK backbone.** Rather than putting LK in the neck, the better path is to make the LK backbone stronger with UniRepLKNet's missing ingredients (SE attention, layer scale, GRN). These add channel-level intelligence to the backbone without touching the neck.
+
+### Run 18 — ResoConv + LK backbone (reflect), std neck ✅ COMPLETE
+```yaml
+  model: "raycasted/cfg/yolo26s-run18-resoconv-lk-backbone.yaml"
+```
+Combines ResoConv (SQ winner, Run 14b) with LK backbone (DQ winner, Run 16), keeping standard 3×3 neck. Params: 3.63M. Result: **Disappointing — did NOT compound.** SQ 0.745 vs 0.750 (Run 14b, −0.005), DQ 0.680 vs 0.684 (Run 16, −0.004), mAP@0.5 0.405 vs 0.432 (Run 14b, −0.027). The combined architecture regressed on BOTH dimensions. **Conclusion: ResoConv and LK backbone interfere with each other.** Both modifications enrich features in different ways but compete for the same information budget. ResoConv preserves high-frequency detail (edges, boundaries) while LK backbone expands receptive field (context). When combined, the LK backbone's spatial smoothing may partially destroy the frequency decomposition that ResoConv works to preserve.
+
+### Run 20 — ResoConv no-shortcut + LK backbone ✅ COMPLETE
+```yaml
+  model: "raycasted/cfg/yolo26s-run20-resoconv-no-shortcut-lk-backbone.yaml"
+```
+Same as Run 18 but ResoConv without the shortcut (residual) connection — the DWT output goes directly through the 1×1 projection without additive skip. Params: 3.52M (−0.11M vs Run 18). Result: **Best mAP@0.75 of any run (0.249).** mAP@0.5 +0.009 (0.405→0.414), SQ +0.006 (0.745→0.751), but DQ −0.006 (0.680→0.674). Removing the shortcut eliminates the identity path that blends pre-DWT features (spatial) with post-DWT features (frequency). The pure DWT signal is cleaner for shape quality but loses some spatial localization. **Conclusion: No-shortcut ResoConv improves polygon precision (SQ, mAP@0.75) at the cost of detection quality (DQ).**
+
+### Run 21 — ResoConv no-HH + LK backbone ✅ COMPLETE
+```yaml
+  model: "raycasted/cfg/yolo26s-run21-resoconv-no-hh-lk-backbone.yaml"
+```
+Same as Run 18 but ResoConv drops the HH (diagonal) sub-band — only keeps LL (approximation) and LH/HL (horizontal/vertical edges). Params: 3.42M (−0.21M vs Run 18). Result: **Similar to Run 20.** mAP@0.5 0.414 (same as Run 20), SQ 0.747, DQ 0.670 (−0.010 vs Run 18). Removing HH removes ~33% of the DWT channels but the diagonal edge information has marginal value for cell boundaries. **Conclusion: HH sub-band contributes negligibly. Potential for channel-efficient ResoConv variant.**
+
+### Run 22 — bior2.2 + ResoConv + LK backbone ✅ COMPLETE
+```yaml
+  model: "raycasted/cfg/yolo26s-run22-bior22-resoconv-lk-backbone.yaml"
+```
+Same as Run 18 but Daubechies-2 wavelet replaced with biorthogonal 2.2 (bior2.2). Params: 3.52M. Result: **Highest mAP@0.5 of the ResoConv+LK runs (0.421)** but lower AJI (0.551 vs 0.558) and PQ (0.527 vs 0.540). The biorthogonal wavelet is symmetric (linear phase) which may help reconstruction quality but doesn't match the edge characteristics of H&E cell boundaries as well as DB2. **Conclusion: Wavelet choice has minor but measurable impact. DB2 remains the default.**
+
+### Cross-comparison: ResoConv + LK Backbone Ablations (Runs 18, 20, 21, 22)
+
+| Run | ResoConv Variant | AJI | mAP@0.5 | mAP@0.75 | PQ | SQ | DQ | Params |
+|-----|-----------------|-----|---------|----------|-----|-----|-----|--------|
+| 14b | ResoConv (reflect), no LK | **0.561** | **0.432** | 0.258 | **0.542** | **0.750** | 0.677 | 3.73M |
+| 18 | ResoConv + LK backbone | 0.555 | 0.405 | 0.219 | 0.540 | 0.745 | 0.680 | 3.63M |
+| 20 | ResoConv no-shortcut + LK | **0.558** | 0.414 | **0.249** | 0.540 | **0.751** | 0.674 | 3.52M |
+| 21 | ResoConv no-HH + LK | 0.555 | 0.414 | 0.245 | 0.535 | 0.747 | 0.670 | 3.42M |
+| 22 | bior2.2 + LK | 0.551 | **0.421** | 0.239 | 0.527 | 0.744 | 0.663 | 3.52M |
+
+**Key finding: LK backbone consistently hurts ResoConv.** Run 14b (ResoConv alone) outperforms ALL ResoConv+LK combinations on mAP@0.5 (0.432 vs best 0.421) and PQ (0.542 vs best 0.540). The LK backbone's large receptive field interferes with the frequency decomposition that ResoConv provides. The no-shortcut variant (Run 20) recovers some ground (best mAP@0.75=0.249, SQ=0.751) but still can't match ResoConv alone on detection metrics.
 
 ### Revised Architecture Principle
 

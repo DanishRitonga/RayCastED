@@ -40,7 +40,7 @@ from ultralytics.utils.ops import make_divisible
 
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.blocks.lk_block import C3k2_LK
-from raycasted.model.blocks.resoconv import ResoConv
+from raycasted.model.blocks.resoconv import HFResidual, ResoConv, ResoConvDS
 
 BASE_MODULES = frozenset(
     {
@@ -51,6 +51,7 @@ BASE_MODULES = frozenset(
         Bottleneck,
         DWConvTranspose2d,
         ResoConv,
+        ResoConvDS,
         C3k2_LK,
     }
 )
@@ -131,10 +132,17 @@ def raycasted_parse_model(d, ch, verbose=True):
             }
         ):
             args = [nc, reg_max, end2end, [ch[x] for x in f]]
+        elif m is HFResidual:
+            source_idx = int(args[0])
+            source_c2 = ch[source_idx]
+            c2 = ch[f] if isinstance(f, int) else ch[f[0]]
+            m_ = HFResidual(c2, source_c2)
+            m_._source = layers[source_idx]
         else:
             c2 = ch[f] if isinstance(f, int) else ch[f[0]]
 
-        m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)
+        if m is not HFResidual:
+            m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)
         t = str(m)[8:-2].replace('__main__.', '')
         m_.np = sum(x.numel() for x in m_.parameters())
         m_.i, m_.f, m_.type = i, f, t
