@@ -40,7 +40,7 @@ from ultralytics.utils.ops import make_divisible
 
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.blocks.lk_block import C3k2_LK
-from raycasted.model.blocks.resoconv import HFResidual, ResoConv, ResoConvDS
+from raycasted.model.blocks.resoconv import DWT_HF, DWT_LL, HFResidual, ResoConv, ResoConvDS
 
 BASE_MODULES = frozenset(
     {
@@ -132,6 +132,18 @@ def raycasted_parse_model(d, ch, verbose=True):
             }
         ):
             args = [nc, reg_max, end2end, [ch[x] for x in f]]
+        elif m is DWT_LL:
+            c1 = ch[f] if isinstance(f, int) else ch[f[0]]
+            c2 = c1
+            wavelet_type = args[0] if len(args) > 0 else 'bior2.2'
+            m_ = DWT_LL(c1, wavelet_type=wavelet_type)
+        elif m is DWT_HF:
+            c1 = ch[f] if isinstance(f, int) else ch[f[0]]
+            drop_hh = args[0] if len(args) > 0 else False
+            wavelet_type = args[1] if len(args) > 1 else 'bior2.2'
+            n_hf = 2 if drop_hh else 3
+            c2 = c1 * n_hf
+            m_ = DWT_HF(c1, drop_hh=drop_hh, wavelet_type=wavelet_type)
         elif m is HFResidual:
             source_idx = int(args[0])
             source_c2 = ch[source_idx]
@@ -141,7 +153,7 @@ def raycasted_parse_model(d, ch, verbose=True):
         else:
             c2 = ch[f] if isinstance(f, int) else ch[f[0]]
 
-        if m is not HFResidual:
+        if m not in (DWT_LL, DWT_HF, HFResidual):
             m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)
         t = str(m)[8:-2].replace('__main__.', '')
         m_.np = sum(x.numel() for x in m_.parameters())

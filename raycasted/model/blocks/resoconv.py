@@ -188,6 +188,50 @@ class DWT2D(nn.Module):
         return out
 
 
+class DWT_LL(nn.Module):
+    """Extract LL (low-low approximation) sub-band from DWT.
+
+    Runs DWT and returns only the LL sub-band (low-pass approximation).
+    Output channels = input channels, spatial = H/2 x W/2.
+
+    Args:
+        c1: Input channels.
+        wavelet_type: Wavelet family ('db2', 'bior2.2').
+    """
+
+    def __init__(self, c1: int, wavelet_type: str = 'bior2.2'):
+        super().__init__()
+        self.dwt = DWT2D(c1, drop_hh=False, wavelet_type=wavelet_type)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply DWT and return LL sub-band only."""
+        x_dwt = self.dwt(x)
+        return x_dwt[:, : self.dwt.in_channels]
+
+
+class DWT_HF(nn.Module):
+    """Extract HF (LH, HL, HH) sub-bands from DWT.
+
+    Runs DWT and returns only the high-frequency sub-bands.
+    Output channels = 3*C_in (or 2*C_in if drop_hh), spatial = H/2 x W/2.
+
+    Args:
+        c1: Input channels.
+        drop_hh: If True, discard HH and return only LH+HL.
+        wavelet_type: Wavelet family ('db2', 'bior2.2').
+    """
+
+    def __init__(self, c1: int, drop_hh: bool = False, wavelet_type: str = 'bior2.2'):
+        super().__init__()
+        self.dwt = DWT2D(c1, drop_hh=drop_hh, wavelet_type=wavelet_type)
+        self.n_hf = 2 if drop_hh else 3
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply DWT and return HF sub-bands only."""
+        x_dwt = self.dwt(x)
+        return x_dwt[:, self.dwt.in_channels :]
+
+
 class ResoConv(nn.Module):
     """Wavelet-based downsampling convolution via bior2.2 DWT (single-stream).
 
