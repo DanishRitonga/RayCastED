@@ -321,6 +321,20 @@ class ResoConvDS(nn.Module):
         ll_out = self.ll_proj(F.silu(self.ll_bn(self.ll_conv(ll))))
         return ll_out
 
+    def __deepcopy__(self, memo):
+        """Skip deepcopy of _hf (non-leaf tensor set during forward)."""
+        import copy
+
+        cls = self.__class__
+        result = cls.__new__(cls)
+        memo[id(self)] = result
+        for k, v in self.__dict__.items():
+            if k == '_hf':
+                setattr(result, k, None)
+            else:
+                setattr(result, k, copy.deepcopy(v, memo))
+        return result
+
 
 class HFResidual(nn.Module):
     """Inject HF boundary detail as residual to semantic features.
