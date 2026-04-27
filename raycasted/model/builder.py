@@ -64,6 +64,43 @@ REPEAT_MODULES = frozenset(
     }
 )
 
+DETECT_MODULES = frozenset({Detect, RayCastDetect})
+
+
+def _resolve_ch(ch_list, f):
+    """Resolve output channels from a `from` index (int or singleton list)."""
+    return ch_list[f] if isinstance(f, int) else ch_list[f[0]]
+
+
+def _handle_dwt_ll(ch_list, f, args, layers):
+    c1 = _resolve_ch(ch_list, f)
+    wavelet_type = args[0] if len(args) > 0 else 'bior2.2'
+    return DWT_LL(c1, wavelet_type=wavelet_type), c1
+
+
+def _handle_dwt_hf(ch_list, f, args, layers):
+    c1 = _resolve_ch(ch_list, f)
+    drop_hh = args[0] if len(args) > 0 else False
+    wavelet_type = args[1] if len(args) > 1 else 'bior2.2'
+    n_hf = 2 if drop_hh else 3
+    return DWT_HF(c1, drop_hh=drop_hh, wavelet_type=wavelet_type), c1 * n_hf
+
+
+def _handle_hf_residual(ch_list, f, args, layers):
+    source_idx = int(args[0])
+    source_c2 = ch_list[source_idx]
+    c2 = _resolve_ch(ch_list, f)
+    m_ = HFResidual(c2, source_c2)
+    m_._source = layers[source_idx]
+    return m_, c2
+
+
+_SPECIAL_HANDLERS = {
+    DWT_LL: _handle_dwt_ll,
+    DWT_HF: _handle_dwt_hf,
+    HFResidual: _handle_hf_residual,
+}
+
 
 def raycasted_parse_model(d, ch, verbose=True):
     """Parse a YOLO model.yaml dictionary into a PyTorch model.
@@ -99,61 +136,37 @@ def raycasted_parse_model(d, ch, verbose=True):
     layers, save, c2 = [], [], ch[-1]
 
     for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):
-        # Resolve module class
         if isinstance(m, str):
             m = getattr(torch.nn, m[3:]) if 'nn.' in m else globals()[m]
 
-        # Evaluate string args
         for j, a in enumerate(args):
             if isinstance(a, str):
-                with contextlib.suppress(ValueError):
+                with contextlib.suppress(ValueError, SyntaxError):
                     args[j] = ast.literal_eval(a)
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n
+        m_ = None
 
-        # Module-specific channel handling (order matters!)
-        if m in BASE_MODULES:
+        if m in _SPECIAL_HANDLERS:
+            m_, c2 = _SPECIAL_HANDLERS[m](ch, f, args, layers)
+        elif m in BASE_MODULES:
             c1, c2 = ch[f], args[0]
             if c2 != nc:
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
             args = [c1, c2, *args[1:]]
-
             if m in REPEAT_MODULES:
                 args.insert(2, n)
                 n = 1
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
         elif m is torch.nn.Upsample:
-            c2 = ch[f] if isinstance(f, int) else ch[f[0]]
-        elif m in frozenset(
-            {
-                Detect,
-                RayCastDetect,
-            }
-        ):
+            c2 = _resolve_ch(ch, f)
+        elif m in DETECT_MODULES:
             args = [nc, reg_max, end2end, [ch[x] for x in f]]
-        elif m is DWT_LL:
-            c1 = ch[f] if isinstance(f, int) else ch[f[0]]
-            c2 = c1
-            wavelet_type = args[0] if len(args) > 0 else 'bior2.2'
-            m_ = DWT_LL(c1, wavelet_type=wavelet_type)
-        elif m is DWT_HF:
-            c1 = ch[f] if isinstance(f, int) else ch[f[0]]
-            drop_hh = args[0] if len(args) > 0 else False
-            wavelet_type = args[1] if len(args) > 1 else 'bior2.2'
-            n_hf = 2 if drop_hh else 3
-            c2 = c1 * n_hf
-            m_ = DWT_HF(c1, drop_hh=drop_hh, wavelet_type=wavelet_type)
-        elif m is HFResidual:
-            source_idx = int(args[0])
-            source_c2 = ch[source_idx]
-            c2 = ch[f] if isinstance(f, int) else ch[f[0]]
-            m_ = HFResidual(c2, source_c2)
-            m_._source = layers[source_idx]
         else:
-            c2 = ch[f] if isinstance(f, int) else ch[f[0]]
+            c2 = _resolve_ch(ch, f)
 
-        if m not in (DWT_LL, DWT_HF, HFResidual):
+        if m_ is None:
             m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)
         t = str(m)[8:-2].replace('__main__.', '')
         m_.np = sum(x.numel() for x in m_.parameters())
