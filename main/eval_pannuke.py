@@ -535,6 +535,10 @@ def main():
     rec = map_results.get(0.5, {}).get('recall', 0.0)
     f1 = map_results.get(0.5, {}).get('F1', 0.0)
 
+    # --- Centroid F1 (LSP-DETR style) ---
+    print('Computing centroid F1 (LSP-DETR style)...')
+    centroid_results = compute_centroid_f1(results)
+
     # --- Model stats ---
     n_params = sum(p.numel() for p in model.parameters())
     params_m = n_params / 1e6
@@ -565,7 +569,10 @@ def main():
     print(f'{"DQ":<25} {mean_dq:>12.4f}')
     print(f'{"Precision":<25} {prec:>12.4f}')
     print(f'{"Recall":<25} {rec:>12.4f}')
-    print(f'{"F1":<25} {f1:>12.4f}')
+    print(f'{"F1 (mask)":<25} {f1:>12.4f}')
+    for t in sorted(centroid_results.keys()):
+        cf1 = centroid_results[t]['f1']
+        print(f'{"Centroid F1@" + str(t) + "px":<25} {cf1:>12.4f}')
     print(f'{"Params (M)":<25} {params_m:>12.2f}')
     print(f'{"GFLOPs":<25} {gflops:>12.2f}')
     print(f'{"Inference Time (ms/img)":<25} {avg_ms:>12.2f}')
