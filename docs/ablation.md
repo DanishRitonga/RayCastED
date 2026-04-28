@@ -338,6 +338,30 @@ This is the design rule that emerges from Runs 14-16b. Any modification must res
 
 ---
 
+## 📊 LSP-DETR Baseline (PanNuke)
+
+Evaluation results of LSP-DETR trained on PanNuke (provided by author):
+
+```json
+{"columns":["key","AJI","AP_0,5","AP_0,5:0,05:0,9","AP_0,7","AP_0,9","Precision","Recall","F1","bMDQ","bMSQ","bMPQ","bDQ","bSQ","bPQ","mMDQ","mMSQ","mMPQ","mDQ","mSQ","mPQ"],"data":[["pannuke",0.6771394014,0.6906352043,0.4412415922,0.5634791851,0.0998610854,0.8622461557,0.7905151844,0.8248240948,0.8105086088,0.8105850816,0.6661347151,0.80292207,0.8069549799,0.65744555,0.5864656568,0.6755865812,0.4813823998,0.581418395,0.6721677184,0.4757674932]]}
+```
+
+| Metric | LSP-DETR |
+|--------|----------|
+| AJI | 0.677 |
+| AP@0.5 | 0.691 |
+| AP@0.5:0.95 | 0.441 |
+| Precision | 0.862 |
+| Recall | 0.791 |
+| **F1** | **0.825** |
+| PQ | 0.657 |
+| SQ | 0.807 |
+| DQ | 0.803 |
+
+**⚠️ Critical metric nuance:** LSP-DETR evaluates F1 based on **centroid proximity** (Euclidean distance threshold), not mask/Shapely IoU. RayCastED's ablation table F1 column is **mask-based F1** (from `compute_pq` DQ). These are **not directly comparable**.
+
+---
+
 ## 📊 Key Finding: Segmentation vs Detection Quality Gap
 
 ### **Run 11 vs LSP-DETR Baseline Comparison**

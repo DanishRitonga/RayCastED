@@ -311,6 +311,52 @@ def test_dwt_hf_drop_hh():
     return True
 
 
+def test_hybrid_dwt():
+    """Test DWT2D_Hybrid: bior2.2 LL + db2 HF."""
+    torch.manual_seed(42)
+    from raycasted.model.blocks.resoconv import DWT2D_Hybrid
+
+    b, c_in, h, w = 2, 16, 32, 32
+    x = torch.randn(b, c_in, h, w)
+
+    dwt_hybrid = DWT2D_Hybrid(c_in, drop_hh=False)
+    out = dwt_hybrid(x)
+
+    assert out.shape == (b, 4 * c_in, h // 2, w // 2)
+
+    # LL should come from bior2.2 (6x6 kernel), HF from db2 (4x4 kernel)
+    assert dwt_hybrid.dwt_ll.dwt_weight.shape[2:] == (6, 6)
+    assert dwt_hybrid.dwt_hf.dwt_weight.shape[2:] == (4, 4)
+
+    # Layout: LL first, then HF
+    ll = out[:, :c_in]
+    hf = out[:, c_in:]
+    assert ll.shape == (b, c_in, h // 2, w // 2)
+    assert hf.shape == (b, 3 * c_in, h // 2, w // 2)
+
+    print(f'✓ DWT2D_Hybrid: {x.shape} → {out.shape}  (LL=bior2.2, HF=db2)')
+    return True
+
+
+def test_resoconv_hybrid():
+    """Test ResoConvHybrid forward pass."""
+    torch.manual_seed(42)
+    from raycasted.model.blocks.resoconv import ResoConvHybrid
+
+    b, c_in, c_out, h, w = 2, 64, 128, 32, 32
+    x = torch.randn(b, c_in, h, w)
+
+    m = ResoConvHybrid(c_in, c_out, shortcut=True, drop_hh=False)
+    out = m(x)
+
+    assert out.shape == (b, c_out, h // 2, w // 2)
+    assert m.dwt.dwt_ll.wavelet_type == 'bior2.2'
+    assert m.dwt.dwt_hf.wavelet_type == 'db2'
+
+    print(f'✓ ResoConvHybrid: {x.shape} → {out.shape}  (LL=bior2.2, HF=db2)')
+    return True
+
+
 if __name__ == '__main__':
     print('=' * 60)
     print('ResoConv Wavelet Filter Tests (db2 + bior2.2 + dual-stream)')
@@ -330,7 +376,8 @@ if __name__ == '__main__':
     test_filter_shapes_by_wavelet()
     test_dwt_ll_hf_split()
     test_dwt_hf_drop_hh()
-    test_dwt_split_equal_cost()
+    test_hybrid_dwt()
+    test_resoconv_hybrid()
 
     print('=' * 60)
     print('All tests passed!')

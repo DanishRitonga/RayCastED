@@ -145,6 +145,81 @@ def _mask_iou_matrix(pred_masks: list[np.ndarray], gt_masks: list[np.ndarray]) -
     return np.where(union > 0, intersection / union, 0.0)
 
 
+def compute_centroid_f1(results, distance_thresholds=None):
+    """Compute centroid-based F1 at specified distance thresholds.
+
+    Matches predictions to GT by centroid Euclidean distance (LSP-DETR style).
+    Uses greedy matching per image, then aggregates TP/FP/FN globally.
+
+    Args:
+        results: List of dicts with 'pred_polys', 'gt_polys', 'pred_cls', 'gt_cls'.
+        distance_thresholds: List of distance thresholds in pixels (default: [6, 8, 10, 12]).
+
+    Returns:
+        dict: {threshold: {'precision': float, 'recall': float, 'f1': float}}
+    """
+    if distance_thresholds is None:
+        distance_thresholds = [6, 8, 10, 12]
+
+    per_threshold = {t: {'tp': 0, 'fp': 0, 'fn': 0} for t in distance_thresholds}
+
+    for r in results:
+        pred_polys = r['pred_polys']
+        gt_polys = r['gt_polys']
+        n_pred = len(pred_polys)
+        n_gt = len(gt_polys)
+
+        if n_pred == 0 and n_gt == 0:
+            continue
+        if n_pred == 0:
+            for t in distance_thresholds:
+                per_threshold[t]['fn'] += n_gt
+            continue
+        if n_gt == 0:
+            for t in distance_thresholds:
+                per_threshold[t]['fp'] += n_pred
+            continue
+
+        # Centroid distance matrix
+        pred_c = pred_polys[:, :2]  # [N_pred, 2]
+        gt_c = gt_polys[:, :2]  # [N_gt, 2]
+        dist_matrix = np.linalg.norm(pred_c[:, None, :] - gt_c[None, :, :], axis=2)  # [N_pred, N_gt]
+
+        # Greedy matching per threshold
+        for t in distance_thresholds:
+            matched_gt = set()
+            tp = 0
+            fp = 0
+            for pi in range(n_pred):
+                best_gt = -1
+                best_dist = t
+                for gi in range(n_gt):
+                    if gi not in matched_gt and dist_matrix[pi, gi] < best_dist:
+                        best_dist = dist_matrix[pi, gi]
+                        best_gt = gi
+                if best_gt >= 0:
+                    tp += 1
+                    matched_gt.add(best_gt)
+                else:
+                    fp += 1
+            fn = n_gt - len(matched_gt)
+            per_threshold[t]['tp'] += tp
+            per_threshold[t]['fp'] += fp
+            per_threshold[t]['fn'] += fn
+
+    results_dict = {}
+    for t in distance_thresholds:
+        tp = per_threshold[t]['tp']
+        fp = per_threshold[t]['fp']
+        fn = per_threshold[t]['fn']
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        results_dict[t] = {'precision': precision, 'recall': recall, 'f1': f1}
+
+    return results_dict
+
+
 def compute_map_metrics(results, iou_thresholds=None):
     """Compute mAP at specified IoU thresholds using mask IoU.
 

@@ -232,6 +232,38 @@ class DWT_HF(nn.Module):
         return x_dwt[:, self.dwt.in_channels :]
 
 
+class DWT2D_Hybrid(nn.Module):
+    """Hybrid DWT: bior2.2 for LL, db2 for HF sub-bands.
+
+    Uses two separate DWT2D modules internally:
+    - bior2.2 (6-tap symmetric) for LL: stronger approximation energy, zero phase shift
+    - db2 (4-tap asymmetric) for LH/HL/HH: sharper edge response, better for boundaries
+
+    The two DWTs are applied independently to the same input; relevant sub-bands are
+    extracted and concatenated in the standard grouped layout:
+        [LL_0..LL_C, LH_0..LH_C, HL_0..HL_C, HH_0..HH_C].
+
+    Args:
+        in_channels: Number of input channels.
+        drop_hh: If True, discard HH sub-band and return 3 sub-bands only.
+    """
+
+    def __init__(self, in_channels: int, drop_hh: bool = False):
+        super().__init__()
+        self.in_channels = in_channels
+        self.drop_hh = drop_hh
+        self.dwt_ll = DWT2D(in_channels, drop_hh=False, wavelet_type='bior2.2')
+        self.dwt_hf = DWT2D(in_channels, drop_hh=drop_hh, wavelet_type='db2')
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply hybrid DWT: bior2.2 LL + db2 HF."""
+        x_bior = self.dwt_ll(x)
+        x_db2 = self.dwt_hf(x)
+        ll = x_bior[:, : self.in_channels]
+        hf = x_db2[:, self.in_channels :]
+        return torch.cat([ll, hf], dim=1)
+
+
 class ResoConv(nn.Module):
     """Wavelet-based downsampling convolution via bior2.2 DWT (single-stream).
 
@@ -264,6 +296,44 @@ class ResoConv(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply ResoConv: DWT → concat shortcut → 1×1 project."""
+        x_dwt = self.dwt(x)
+
+        if self.shortcut:
+            x_down = F.avg_pool2d(x, kernel_size=2, stride=2)
+            x_cat = torch.cat([x_down, x_dwt], dim=1)
+        else:
+            x_cat = x_dwt
+
+        return self.proj(x_cat)
+
+
+class ResoConvHybrid(nn.Module):
+    """Hybrid wavelet downsampling: bior2.2 LL + db2 HF.
+
+    Combines the best of both wavelets:
+    - bior2.2 for LL: stronger approximation energy, symmetric/linear phase
+    - db2 for LH/HL/HH: sharper edge response, asymmetric orthogonal
+
+    Uses DWT2D_Hybrid internally, then concatenates with shortcut → 1×1 projection.
+
+    Args:
+        c1: Input channels.
+        c2: Output channels.
+        shortcut: Whether to add downsampled identity shortcut before projection.
+        drop_hh: If True, discard HH sub-band (hybrid returns 3 sub-bands).
+    """
+
+    def __init__(self, c1: int, c2: int, shortcut: bool = True, drop_hh: bool = False):
+        super().__init__()
+        self.shortcut = shortcut
+        self.dwt = DWT2D_Hybrid(c1, drop_hh=drop_hh)
+
+        n_sub = 3 if drop_hh else 4
+        in_proj = c1 * (1 + n_sub) if shortcut else c1 * n_sub
+        self.proj = Conv(in_proj, c2, k=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply hybrid ResoConv: DWT → concat shortcut → 1×1 project."""
         x_dwt = self.dwt(x)
 
         if self.shortcut:
