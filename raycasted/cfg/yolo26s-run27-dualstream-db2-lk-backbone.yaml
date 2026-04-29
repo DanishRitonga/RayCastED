@@ -1,0 +1,68 @@
+# Run 27: Dual-stream ResoConvDS (db2) + C3k2_LK backbone + standard C3k2 neck
+#
+# Motivation: Run 24 (db2 dual-stream, standard C3k2) achieved the best
+# Centroid F1@12px (0.779) of any run so far. Run 16 (LK backbone only)
+# achieved the highest DQ (0.684) of any single modification. Combining
+# both should give the best of both worlds: db2 sharp edges + LK broad
+# context for nucleus detection.
+#
+# Critical insight: In the dual-stream architecture, the backbone processes
+# the LL subband (a clean downsampled image), NOT mixed wavelet features.
+# This means LK convolutions in the backbone see a proper spatial signal
+# and should work better than in single-stream ResoConv where features were
+# noisier.
+#
+# Architecture:
+#   Backbone: ResoConvDS splits DWT into LL (→ C3k2_LK) and HF (stored for neck)
+#   Neck: Top-down C3k2 (standard) produces semantic features, then HFResidual
+#         adds boundary detail as residual. Bottom-up C3k2 (standard) fuses.
+#
+# Differences from Run 24:
+#   - C3k2_LK (kernel_size=7) replaces C3k2 in backbone layers 2, 4, 6
+#   - Standard C3k2 kept in neck (Run 16b showed LK in neck hurts)
+#
+# YAML args for C3k2_LK: [c2, c3k, e]
+#   builder auto-prepends c1, inserts n, rest defaults to kernel_size=7
+#   Using simple 3-arg format [c2, False, 0.25] to avoid confusion with g param
+
+nc: 80
+end2end: True
+reg_max: 1
+scales:
+  n: [0.50, 0.25, 1024]
+  s: [0.50, 0.50, 1024]
+  m: [0.50, 1.00, 512]
+  l: [1.00, 1.00, 512]
+  x: [1.00, 1.50, 512]
+
+backbone:
+  - [-1, 1, Conv, [64, 3, 2]]                           # 0-P1/2
+  - [-1, 1, ResoConvDS, [64, 4, False, 'db2']]          # 1-P2/4 → ll(64), _hf(64)
+  - [1, 2, C3k2_LK, [128, False, 0.25]]                 # 2 f=1(ll)  LK K=7
+  - [-1, 1, ResoConvDS, [256, 4, False, 'db2']]         # 3-P3/8 → ll(256), _hf(256)
+  - [3, 2, C3k2_LK, [256, False, 0.25]]                 # 4 f=3(ll)  LK K=7
+  - [-1, 1, ResoConvDS, [512, 4, False, 'db2']]         # 5-P4/16 → ll(512), _hf(512)
+  - [5, 2, C3k2_LK, [512, True]]                        # 6 f=5(ll)  LK K=7
+  - [-1, 1, SPPF, [512, 5, 3, True]]                    # 7 - SPPF at P4
+  - [-1, 2, C2PSA, [512]]                               # 8 - C2PSA at P4/16
+
+head:
+  - [8, 1, nn.Upsample, ['None', 2, 'nearest']]         # upsample C2PSA@P4 → P3
+  - [[-1, 4], 1, Concat, [1]]                           # cat backbone P3 (from layer 4 f=3)
+  - [-1, 2, C3k2, [256, True]]                          # 11 (P3/8-small)  standard C3k2
+  - [-1, 1, HFResidual, [3]]                            # inject HF from layer 3 ResoConvDS@P3
+
+  - [-1, 1, nn.Upsample, ['None', 2, 'nearest']]        # upsample P3 → P2
+  - [[-1, 2], 1, Concat, [1]]                           # cat backbone P2 (from layer 2 f=1)
+  - [-1, 2, C3k2, [128, True]]                          # 14 (P2/4-tiny)  standard C3k2
+  - [-1, 1, HFResidual, [1]]                            # inject HF from layer 1 ResoConvDS@P2
+
+  - [-1, 1, Conv, [128, 3, 2]]                          # downsample P2 → P3
+  - [[-1, 11], 1, Concat, [1]]                          # cat head P3
+  - [-1, 2, C3k2, [256, True]]                          # 17 (P3/8-small)  standard C3k2
+
+  - [-1, 1, Conv, [256, 3, 2]]                          # downsample P3 → P4
+  - [[-1, 8], 1, Concat, [1]]                           # cat backbone P4
+  - [-1, 2, C3k2, [512, True]]                          # 20 (P4/16-medium)  standard C3k2
+
+  - [[14, 17, 20], 1, RayCastDetect, [nc, 1, True]]     # Detect(P2, P3, P4)

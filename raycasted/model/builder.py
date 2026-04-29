@@ -40,7 +40,15 @@ from ultralytics.utils.ops import make_divisible
 
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.blocks.lk_block import C3k2_LK
-from raycasted.model.blocks.resoconv import DWT_HF, DWT_LL, HFResidual, ResoConv, ResoConvDS, ResoConvHybrid
+from raycasted.model.blocks.resoconv import (
+    DWT_HF,
+    DWT_LL,
+    HFResidual,
+    ResoConv,
+    ResoConvDS,
+    ResoConvDS_Hybrid,
+    ResoConvHybrid,
+)
 
 BASE_MODULES = frozenset(
     {
@@ -52,6 +60,7 @@ BASE_MODULES = frozenset(
         DWConvTranspose2d,
         ResoConv,
         ResoConvDS,
+        ResoConvDS_Hybrid,
         ResoConvHybrid,
         C3k2_LK,
     }

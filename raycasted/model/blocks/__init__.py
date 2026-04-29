@@ -13,7 +13,7 @@ from raycasted.model.blocks.head import (
     RayRefinementBlock,
 )
 from raycasted.model.blocks.lk_block import C3k2_LK
-from raycasted.model.blocks.resoconv import HFResidual, ResoConv, ResoConvDS, ResoConvHybrid
+from raycasted.model.blocks.resoconv import HFResidual, ResoConv, ResoConvDS, ResoConvDS_Hybrid, ResoConvHybrid
 
 __all__ = [
     'C3k2_LK',
@@ -23,6 +23,7 @@ __all__ = [
     'RayRefinementBlock',
     'ResoConv',
     'ResoConvDS',
+    'ResoConvDS_Hybrid',
     'ResoConvHybrid',
     'RAYCAST_DIM',
 ]

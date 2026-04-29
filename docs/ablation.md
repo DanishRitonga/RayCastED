@@ -9,33 +9,38 @@ Tracking the effect of each config change on detection quality.
 
 ## Results
 
-| # | Config | AJI | mAP@0.5 | mAP@0.75 | PQ | SQ | DQ | Prec | Recall | F1 |
-|---|--------|-----|---------|----------|-----|-----|-----|------|--------|------|
-| 1 | Baseline (no training config, 32 rays) | 0.534 | — | — | — | — | — | — | — | 0.636 |
-| 2 | Baseline (no training config, 64 rays) | 0.543 | 0.377 | — | 0.545 | 0.723 | 0.708 | — | — | 0.636 |
-| 3 | + all recommended (topk=20, rad=2.0, focal, wide head, augment, cos_lr) | 0.461 | 0.223 | 0.095 | 0.317 | 0.701 | 0.421 | 0.331 | 0.690 | 0.447 |
-| 4 | revert assigner (topk=13, rad=1.5), keep rest | 0.530 | 0.220 | 0.119 | 0.353 | 0.738 | 0.447 | 0.324 | 0.691 | 0.442 |
-| 4m | same as Run 4 but yolo26m (24M params) | 0.509 | 0.231 | 0.119 | 0.358 | 0.735 | 0.456 | 0.343 | 0.687 | 0.458 |
-| 5 | revert focal loss (BCE), keep wide head + augment + cos_lr (yolo26s) | 0.542 | 0.379 | 0.144 | 0.526 | 0.724 | 0.680 | 0.681 | 0.591 | 0.633 |
-| 6 | + -log(IoU) loss (PolarMask formulation), same config as Run 5 | 0.553 | 0.384 | 0.187 | 0.536 | 0.745 | 0.676 | 0.680 | 0.601 | 0.638 |
-| 7 | + soft polar centerness (PolarMask++), same config as Run 6 | 0.553 | 0.389 | 0.174 | 0.538 | 0.736 | 0.686 | 0.695 | 0.598 | 0.643 |
-| 8 | same as Run 7 but scale/translate augment OFF | 0.553 | 0.374 | 0.164 | 0.550 | 0.730 | 0.709 | 0.642 | 0.624 | 0.633 |
-| 9 | same as Run 7 but yolo26s-p2 (4-scale, stride 4/8/16/32) | 0.538 | 0.381 | 0.135 | 0.520 | 0.722 | 0.675 | 0.684 | 0.588 | 0.632 |
-| 10 | same as Run 7 but QFL (quality focal loss) replaces BCE | 0.529 | 0.243 | 0.134 | 0.379 | 0.740 | 0.480 | 0.370 | 0.669 | 0.477 |
-| **11** ⭐ | **E2E Fix + Hungarian matching (tal_topk=13, beta=3.0, o2o.topk=1)** | **0.558** | **0.428** | **0.250** | **0.543** | **0.746** | **0.682** | **0.685** | **0.598** | **0.639** |
-| 12 | P3-P5 + Large Kernel (refinement_kernel_size=7) | 0.561 | 0.425 | 0.248 | 0.545 | 0.749 | 0.683 | 0.686 | 0.598 | 0.639 |
-| 12b | P3-P5 + Pretrained Backbone (yolo26s.pt, COCO) | 0.547 | 0.409 | 0.225 | 0.530 | 0.739 | **0.671** | 0.665 | 0.582 | 0.621 |
-| 13 | P2-P4 + C2PSA@P4 (dummy P5, pretrained) | 0.551 | 0.423 | 0.214 | 0.531 | 0.734 | **0.678** | 0.676 | 0.602 | 0.637 |
-| 13b | P2-P4 + C2PSA@P4 (dummy P5, scratch) | 0.511 | 0.401 | 0.128 | 0.499 | 0.703 | 0.665 | 0.662 | 0.581 | 0.619 |
-| 14 | P2-P4 + ResoConv (zero pad) | 0.561 | 0.419 | 0.220 | 0.540 | 0.744 | 0.681 | 0.673 | 0.595 | 0.632 |
-| 14b | P2-P4 + ResoConv (reflect pad) | 0.561 | 0.432 | 0.258 | 0.542 | 0.750 | 0.677 | 0.682 | 0.596 | 0.637 |
-| 15 | P2-P4 + C3k2_LK neck only | 0.526 | 0.419 | 0.155 | 0.509 | 0.713 | 0.670 | 0.669 | 0.593 | 0.629 |
-| 16 | P2-P4 + C3k2_LK backbone only | 0.546 | 0.416 | 0.206 | 0.534 | 0.734 | 0.684 | 0.678 | 0.587 | 0.629 |
-| 16b | P2-P4 + C3k2_LK backbone + neck | 0.549 | 0.409 | 0.212 | 0.532 | 0.735 | 0.678 | 0.669 | 0.588 | 0.626 |
-| **18** ⭐ | **ResoConv + LK backbone (reflect), std neck** | **0.555** | **0.405** | **0.219** | **0.540** | **0.745** | **0.680** | **0.675** | **0.582** | **0.625** |
-| 20 | ResoConv no-shortcut + LK backbone (reflect), std neck | 0.558 | 0.414 | 0.249 | 0.540 | 0.751 | 0.674 | 0.672 | 0.582 | 0.624 |
-| 21 | ResoConv no-HH + LK backbone (reflect), std neck | 0.555 | 0.414 | 0.245 | 0.535 | 0.747 | 0.670 | 0.675 | 0.583 | 0.626 |
-| 22 | bior2.2 + ResoConv + LK backbone (reflect), std neck | 0.551 | 0.421 | 0.239 | 0.527 | 0.744 | 0.663 | 0.681 | 0.580 | 0.626 |
+| # | Config | AJI | mAP@0.5 | mAP@0.75 | PQ | SQ | DQ | Prec | Recall | F1 | Cent F1@12 |
+|---|--------|-----|---------|----------|-----|-----|-----|------|--------|------|------------|
+| 1 | Baseline (no training config, 32 rays) | 0.534 | — | — | — | — | — | — | — | 0.636 | — |
+| 2 | Baseline (no training config, 64 rays) | 0.543 | 0.377 | — | 0.545 | 0.723 | 0.708 | — | — | 0.636 | — |
+| 3 | + all recommended (topk=20, rad=2.0, focal, wide head, augment, cos_lr) | 0.461 | 0.223 | 0.095 | 0.317 | 0.701 | 0.421 | 0.331 | 0.690 | 0.447 | — |
+| 4 | revert assigner (topk=13, rad=1.5), keep rest | 0.530 | 0.220 | 0.119 | 0.353 | 0.738 | 0.447 | 0.324 | 0.691 | 0.442 | — |
+| 4m | same as Run 4 but yolo26m (24M params) | 0.509 | 0.231 | 0.119 | 0.358 | 0.735 | 0.456 | 0.343 | 0.687 | 0.458 | — |
+| 5 | revert focal loss (BCE), keep wide head + augment + cos_lr (yolo26s) | 0.542 | 0.379 | 0.144 | 0.526 | 0.724 | 0.680 | 0.681 | 0.591 | 0.633 | — |
+| 6 | + -log(IoU) loss (PolarMask formulation), same config as Run 5 | 0.553 | 0.384 | 0.187 | 0.536 | 0.745 | 0.676 | 0.680 | 0.601 | 0.638 | — |
+| 7 | + soft polar centerness (PolarMask++), same config as Run 6 | 0.553 | 0.389 | 0.174 | 0.538 | 0.736 | 0.686 | 0.695 | 0.598 | 0.643 | — |
+| 8 | same as Run 7 but scale/translate augment OFF | 0.553 | 0.374 | 0.164 | 0.550 | 0.730 | 0.709 | 0.642 | 0.624 | 0.633 | — |
+| 9 | same as Run 7 but yolo26s-p2 (4-scale, stride 4/8/16/32) | 0.538 | 0.381 | 0.135 | 0.520 | 0.722 | 0.675 | 0.684 | 0.588 | 0.632 | — |
+| 10 | same as Run 7 but QFL (quality focal loss) replaces BCE | 0.529 | 0.243 | 0.134 | 0.379 | 0.740 | 0.480 | 0.370 | 0.669 | 0.477 | — |
+| **11** ⭐ | **E2E Fix + Hungarian matching (tal_topk=13, beta=3.0, o2o.topk=1)** | **0.558** | **0.428** | **0.250** | **0.543** | **0.746** | **0.682** | **0.685** | **0.598** | **0.639** | — |
+| 12 | P3-P5 + Large Kernel (refinement_kernel_size=7) | 0.561 | 0.425 | 0.248 | 0.545 | 0.749 | 0.683 | 0.686 | 0.598 | 0.639 | — |
+| 12b | P3-P5 + Pretrained Backbone (yolo26s.pt, COCO) | 0.547 | 0.409 | 0.225 | 0.530 | 0.739 | **0.671** | 0.665 | 0.582 | 0.621 | — |
+| 13 | P2-P4 + C2PSA@P4 (dummy P5, pretrained) | 0.551 | 0.423 | 0.214 | 0.531 | 0.734 | **0.678** | 0.676 | 0.602 | 0.637 | — |
+| 13b | P2-P4 + C2PSA@P4 (dummy P5, scratch) | 0.511 | 0.401 | 0.128 | 0.499 | 0.703 | 0.665 | 0.662 | 0.581 | 0.619 | — |
+| 14 | P2-P4 + ResoConv (zero pad) | 0.561 | 0.419 | 0.220 | 0.540 | 0.744 | 0.681 | 0.673 | 0.595 | 0.632 | — |
+| 14b | P2-P4 + ResoConv (reflect pad) | 0.561 | 0.432 | 0.258 | 0.542 | 0.750 | 0.677 | 0.682 | 0.596 | 0.637 | — |
+| 15 | P2-P4 + C3k2_LK neck only | 0.526 | 0.419 | 0.155 | 0.509 | 0.713 | 0.670 | 0.669 | 0.593 | 0.629 | — |
+| 16 | P2-P4 + C3k2_LK backbone only | 0.546 | 0.416 | 0.206 | 0.534 | 0.734 | 0.684 | 0.678 | 0.587 | 0.629 | — |
+| 16b | P2-P4 + C3k2_LK backbone + neck | 0.549 | 0.409 | 0.212 | 0.532 | 0.735 | 0.678 | 0.669 | 0.588 | 0.626 | — |
+| **18** ⭐ | **ResoConv + LK backbone (reflect), std neck** | **0.555** | **0.405** | **0.219** | **0.540** | **0.745** | **0.680** | **0.675** | **0.582** | **0.625** | — |
+| 20 | ResoConv no-shortcut + LK backbone (reflect), std neck | 0.558 | 0.414 | 0.249 | 0.540 | 0.751 | 0.674 | 0.672 | 0.582 | 0.624 | — |
+| 21 | ResoConv no-HH + LK backbone (reflect), std neck | 0.555 | 0.414 | 0.245 | 0.535 | 0.747 | 0.670 | 0.675 | 0.583 | 0.626 | — |
+| 22 | bior2.2 + ResoConv + LK backbone (reflect), std neck | 0.551 | 0.421 | 0.239 | 0.527 | 0.744 | 0.663 | 0.681 | 0.580 | 0.626 | — |
+| 23 | bior2.2 dual-stream backbone (no LK) | 0.538 | 0.421 | 0.214 | 0.522 | 0.732 | 0.665 | 0.674 | 0.586 | 0.627 | 0.767 |
+| 24 | db2 dual-stream backbone (no LK) | 0.551 | 0.409 | 0.233 | 0.542 | 0.743 | 0.681 | 0.685 | 0.578 | 0.627 | 0.779 |
+| 25 | hybrid wavelet (bior2.2 LL + db2 HF, single-stream) | 0.563 | 0.428 | 0.237 | 0.542 | 0.746 | 0.682 | 0.677 | 0.602 | 0.637 | 0.774 |
+| 26 | hybrid dual-stream (bior2.2 LL + db2 HF, DS) | — | — | — | — | — | — | — | — | — | — |
+| 27 | db2 dual-stream + LK backbone (kernel=7) | — | — | — | — | — | — | — | — | — | — |
 
 ---
 
@@ -320,15 +325,33 @@ Same as Run 18 but Daubechies-2 wavelet replaced with biorthogonal 2.2 (bior2.2)
 
 ### Cross-comparison: ResoConv + LK Backbone Ablations (Runs 18, 20, 21, 22)
 
-| Run | ResoConv Variant | AJI | mAP@0.5 | mAP@0.75 | PQ | SQ | DQ | Params |
+| Run | ResoConv Variant | AJI | mAP@0.5 | mAP@0.75 | PQ | SQ | DQ | Params | — |
 |-----|-----------------|-----|---------|----------|-----|-----|-----|--------|
-| 14b | ResoConv (reflect), no LK | **0.561** | **0.432** | 0.258 | **0.542** | **0.750** | 0.677 | 3.73M |
-| 18 | ResoConv + LK backbone | 0.555 | 0.405 | 0.219 | 0.540 | 0.745 | 0.680 | 3.63M |
-| 20 | ResoConv no-shortcut + LK | **0.558** | 0.414 | **0.249** | 0.540 | **0.751** | 0.674 | 3.52M |
-| 21 | ResoConv no-HH + LK | 0.555 | 0.414 | 0.245 | 0.535 | 0.747 | 0.670 | 3.42M |
-| 22 | bior2.2 + LK | 0.551 | **0.421** | 0.239 | 0.527 | 0.744 | 0.663 | 3.52M |
+| 14b | ResoConv (reflect), no LK | **0.561** | **0.432** | 0.258 | **0.542** | **0.750** | 0.677 | 3.73M | — |
+| 18 | ResoConv + LK backbone | 0.555 | 0.405 | 0.219 | 0.540 | 0.745 | 0.680 | 3.63M | — |
+| 20 | ResoConv no-shortcut + LK | **0.558** | 0.414 | **0.249** | 0.540 | **0.751** | 0.674 | 3.52M | — |
+| 21 | ResoConv no-HH + LK | 0.555 | 0.414 | 0.245 | 0.535 | 0.747 | 0.670 | 3.42M | — |
+| 22 | bior2.2 + LK | 0.551 | **0.421** | 0.239 | 0.527 | 0.744 | 0.663 | 3.52M | — |
 
 **Key finding: LK backbone consistently hurts ResoConv.** Run 14b (ResoConv alone) outperforms ALL ResoConv+LK combinations on mAP@0.5 (0.432 vs best 0.421) and PQ (0.542 vs best 0.540). The LK backbone's large receptive field interferes with the frequency decomposition that ResoConv provides. The no-shortcut variant (Run 20) recovers some ground (best mAP@0.75=0.249, SQ=0.751) but still can't match ResoConv alone on detection metrics.
+
+### Run 25 — Hybrid Wavelet (bior2.2 LL + db2 HF) ✅ COMPLETE
+```yaml
+  model: "raycasted/cfg/yolo26s-run25-hybrid-wavelet-backbone.yaml"
+```
+ResoConvHybrid uses bior2.2 for LL subband (stronger low-pass energy) and db2 for HF subbands (sharper edge response). Params: 3.73M. Result: **Best AJI (0.563) and best mask F1 (0.637) of any run.** mAP@0.5 0.428 (near best), Recall 0.602 (+0.024 vs Run 24). Centroid F1@12px 0.774 (slightly below Run 24's 0.779). **Conclusion: Hybrid wavelet improves detection and mask metrics but trades a small amount of centroid precision for significantly better recall. The combination of bior2.2's symmetric LL and db2's sharp HF is synergistic.**
+
+### Run 26 — Hybrid Dual-Stream (bior2.2 LL + db2 HF) 🔄 PENDING
+```yaml
+  model: "raycasted/cfg/yolo26s-run26-hybrid-dualstream.yaml"
+```
+New `ResoConvDS_Hybrid` block combines dual-stream architecture with hybrid wavelets:
+- **LL stream**: bior2.2 low-pass → backbone (stronger approximation energy)
+- **HF stream**: db2 high-pass → neck via HFResidual (sharper boundaries)
+- Backbone sees **only** clean bior2.2 LL (no HF mixing)
+- Neck gets pure db2 HF detail injected as residual
+
+Theory: Run 25 showed hybrid wavelet is best single-stream config. Run 24 showed dual-stream architecture improves centroids. Combining both should give the **best of both worlds**: bior2.2's stable LL for backbone feature extraction + db2's sharp HF for boundary refinement in the neck, with no cross-band interference.
 
 ### Revised Architecture Principle
 

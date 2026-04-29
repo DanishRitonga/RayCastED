@@ -406,6 +406,63 @@ class ResoConvDS(nn.Module):
         return result
 
 
+class ResoConvDS_Hybrid(nn.Module):
+    """Dual-stream wavelet downsampling with hybrid filters: bior2.2 LL + db2 HF.
+
+    Same architecture as ResoConvDS but uses DWT2D_Hybrid internally so that:
+      - LL  (approximation) comes from bior2.2 (stronger, symmetric)
+      - HF  (detail) comes from db2 (sharper, asymmetric)
+
+    Args:
+        c1: Input channels.
+        c2: Output channels (for both LL and HF streams).
+        se_r: SE reduction ratio for HF attention.
+        drop_hh: If True, discard HH sub-band (only LH+HL in HF stream).
+    """
+
+    def __init__(self, c1: int, c2: int, se_r: int = 4, drop_hh: bool = False):
+        super().__init__()
+        self.c1 = c1
+        self.c2 = c2
+        self.drop_hh = drop_hh
+        n_hf = 2 if drop_hh else 3
+
+        self.dwt = DWT2D_Hybrid(c1, drop_hh=drop_hh)
+
+        self.hf_se = SE(c1 * n_hf, reduction=se_r)
+        self.hf_proj = Conv(c1 * n_hf, c2, k=1)
+
+        self.ll_conv = nn.Conv2d(c1, c1, 3, padding=1, bias=False, groups=c1)
+        self.ll_bn = nn.BatchNorm2d(c1)
+        self.ll_proj = Conv(c1, c2, k=1)
+
+        self._hf = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply dual-stream hybrid DWT: return ll, store _hf."""
+        x_dwt = self.dwt(x)
+        ll = x_dwt[:, : self.c1]
+        hf = x_dwt[:, self.c1 :]
+
+        self._hf = self.hf_proj(self.hf_se(hf))
+        ll_out = self.ll_proj(F.silu(self.ll_bn(self.ll_conv(ll))))
+        return ll_out
+
+    def __deepcopy__(self, memo):
+        """Skip deepcopy of _hf (non-leaf tensor set during forward)."""
+        import copy
+
+        cls = self.__class__
+        result = cls.__new__(cls)
+        memo[id(self)] = result
+        for k, v in self.__dict__.items():
+            if k == '_hf':
+                setattr(result, k, None)
+            else:
+                setattr(result, k, copy.deepcopy(v, memo))
+        return result
+
+
 class HFResidual(nn.Module):
     """Inject HF boundary detail as residual to semantic features.
 
