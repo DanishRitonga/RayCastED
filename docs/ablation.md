@@ -39,7 +39,8 @@ Tracking the effect of each config change on detection quality.
 | 23 | bior2.2 dual-stream backbone (no LK) | 0.538 | 0.421 | 0.214 | 0.522 | 0.732 | 0.665 | 0.674 | 0.586 | 0.627 | 0.767 |
 | 24 | db2 dual-stream backbone (no LK) | 0.551 | 0.409 | 0.233 | 0.542 | 0.743 | 0.681 | 0.685 | 0.578 | 0.627 | 0.779 |
 | 25 | hybrid wavelet (bior2.2 LL + db2 HF, single-stream) | 0.563 | 0.428 | 0.237 | 0.542 | 0.746 | 0.682 | 0.677 | 0.602 | 0.637 | 0.774 |
-| 26 | hybrid dual-stream (bior2.2 LL + db2 HF, DS) | — | — | — | — | — | — | — | — | — | — |
+| 26 | hybrid dual-stream (bior2.2 LL + db2 HF, DS) | 0.547 | 0.428 | 0.233 | 0.526 | 0.738 | 0.666 | 0.672 | 0.595 | 0.631 | 0.763 |
+| 27 | db2 dual-stream + LK backbone (kernel=7) | — | — | — | — | — | — | — | — | — | — |
 | 27 | db2 dual-stream + LK backbone (kernel=7) | — | — | — | — | — | — | — | — | — | — |
 
 ---
@@ -341,23 +342,58 @@ Same as Run 18 but Daubechies-2 wavelet replaced with biorthogonal 2.2 (bior2.2)
 ```
 ResoConvHybrid uses bior2.2 for LL subband (stronger low-pass energy) and db2 for HF subbands (sharper edge response). Params: 3.73M. Result: **Best AJI (0.563) and best mask F1 (0.637) of any run.** mAP@0.5 0.428 (near best), Recall 0.602 (+0.024 vs Run 24). Centroid F1@12px 0.774 (slightly below Run 24's 0.779). **Conclusion: Hybrid wavelet improves detection and mask metrics but trades a small amount of centroid precision for significantly better recall. The combination of bior2.2's symmetric LL and db2's sharp HF is synergistic.**
 
-### Run 26 — Hybrid Dual-Stream (bior2.2 LL + db2 HF) 🔄 PENDING
+### Run 26 — Hybrid Dual-Stream (bior2.2 LL + db2 HF) ❌ REGRESSION
 ```yaml
   model: "raycasted/cfg/yolo26s-run26-hybrid-dualstream.yaml"
 ```
-New `ResoConvDS_Hybrid` block combines dual-stream architecture with hybrid wavelets:
-- **LL stream**: bior2.2 low-pass → backbone (stronger approximation energy)
-- **HF stream**: db2 high-pass → neck via HFResidual (sharper boundaries)
-- Backbone sees **only** clean bior2.2 LL (no HF mixing)
-- Neck gets pure db2 HF detail injected as residual
+New `ResoConvDS_Hybrid` block combines dual-stream architecture with hybrid wavelets. Params: 3.95M. Result: **Worse than single-stream hybrid across nearly all metrics.**
 
-Theory: Run 25 showed hybrid wavelet is best single-stream config. Run 24 showed dual-stream architecture improves centroids. Combining both should give the **best of both worlds**: bior2.2's stable LL for backbone feature extraction + db2's sharp HF for boundary refinement in the neck, with no cross-band interference.
+| Metric | Run 25 (hybrid single) | Run 26 (hybrid dual) | Δ |
+|--------|:----------------------:|:--------------------:|:---:|
+| AJI | **0.563** | 0.547 | **−0.016** |
+| PQ | **0.542** | 0.526 | **−0.016** |
+| DQ | **0.682** | 0.666 | **−0.016** |
+| SQ | **0.746** | 0.738 | −0.008 |
+| Recall | **0.602** | 0.595 | −0.007 |
+| F1 (mask) | **0.637** | 0.631 | −0.006 |
+| Cent F1@12px | **0.774** | 0.763 | −0.011 |
+| mAP@0.5 | 0.428 | **0.428** | ≈0 |
+
+**Why dual-stream hurts the hybrid wavelet:**
+
+1. **The 1×1 projection in single-stream learns optimal mixing.** `ResoConvHybrid` concatenates [shortcut, bior2.2 LL, db2 LH, db2 HL, db2 HH] and lets a 1×1 Conv learn how to weight each component. This learned mixing is **better than hard separation**.
+
+2. **Backbone needs HF for detection.** In the dual-stream design, the backbone (C3k2 blocks) sees **only** the bior2.2 LL approximation — it never sees edge/texture information. Cell detection requires edge cues, not just low-frequency blobs. The HF residual is only injected at the neck, too late to help object detection.
+
+3. **HFResidual injection is weak.** Adding HF as a residual at the neck (after upsampling) is a gentle nudge. It refines boundaries but cannot compensate for the backbone missing edge information entirely.
+
+**Comparison with pure db2 dual-stream (Run 24):**
+
+| | db2 single (14b) | db2 dual (24) | Hybrid single (25) | Hybrid dual (26) |
+|---|---|---|---|---|
+| AJI | 0.561 | 0.551 (−0.010) | **0.563** | 0.547 (−0.016) |
+| DQ | 0.677 | 0.681 (+0.004) | **0.682** | 0.666 (−0.016) |
+| Cent@12 | — | **0.779** | 0.774 | 0.763 |
+
+- **Pure db2**: Dual-stream helped centroids (0.779 vs none measured) because db2's LL is weak — isolating it from noisy HF and letting C3k2 process clean LL improved localization.
+- **Hybrid**: Single-stream is already optimal. The 1×1 projection learns to use bior2.2's strong LL for backbone features while preserving db2's HF for boundaries. Hard separation breaks this learned balance.
+
+**Conclusion: The hybrid wavelet's power comes from learned mixing via 1×1 projection, not from physical separation. Dual-stream architecture is only beneficial when the wavelet's LL is weak (pure db2). For the hybrid, single-stream is strictly better — simpler, faster (4.13ms vs 4.71ms), fewer params (3.73M vs 3.95M), and better metrics.**
 
 ### Revised Architecture Principle
 
 > **"Large kernels for context (backbone), small kernels for precision (neck), wavelets for preservation (downsampling)."**
 
 This is the design rule that emerges from Runs 14-16b. Any modification must respect the role boundary between backbone and neck.
+
+### Wavelet Architecture Principle
+
+> **"Learned mixing beats hard separation when wavelets are complementary."**
+
+- **Single-stream with 1×1 projection** (Run 25): Let the network learn optimal weighting of LL/HF via 1×1 Conv. Best when wavelets are complementary (bior2.2 LL + db2 HF).
+- **Dual-stream with HF residual** (Run 24): Physically separate LL and HF. Only beneficial when the wavelet's LL is weak (pure db2) — isolating clean LL from noisy HF helps. But when LL is already strong (hybrid), hard separation prevents the backbone from seeing edge cues it needs for detection.
+
+**Summary:** Use dual-stream for **weak LL wavelets** (db2). Use single-stream with **learned mixing** for **strong complementary wavelets** (hybrid bior2.2+db2).
 
 ---
 

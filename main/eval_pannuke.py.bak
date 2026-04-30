@@ -1,14 +1,8 @@
-"""PanNuke Fold3 Evaluation — LSP-DETR aligned metrics.
+"""PanNuke Fold3 Evaluation — Comprehensive metrics.
 
-Runs inference on PanNuke test tiles and computes metrics matching
-LSP-DETR's evaluation protocol:
-  AJI, AP@0.5, AP@0.7, AP@0.9, AP@0.5:0.05:0.95,
-  bPQ, bMPQ, mPQ, mMPQ,
-  F1 (centroid, r=12), Precision, Recall,
-  Params, FLOPs, Inference Time.
-
-All instance-matching metrics use Hungarian assignment (not greedy)
-to match LSP-DETR exactly.
+Runs inference on PanNuke test tiles and computes:
+  AJI, mAP@0.5, mAP@0.75, mAP@0.5:0.95, PQ, SQ, DQ,
+  Precision, Recall, F1, Params, FLOPs, Inference Time.
 
 Usage:
     # With pre-transformed test tiles
@@ -31,13 +25,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader
 from ultralytics.utils.torch_utils import model_info
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.model.metrics import (
     compute_aji,
+    compute_pq,
     polygons_to_masks,
     resolve_mask_overlaps,
 )
@@ -152,10 +146,10 @@ def _mask_iou_matrix(pred_masks: list[np.ndarray], gt_masks: list[np.ndarray]) -
 
 
 def compute_centroid_f1(results, distance_thresholds=None):
-    """Compute centroid-based F1 at specified distance thresholds (LSP-DETR style).
+    """Compute centroid-based F1 at specified distance thresholds.
 
-    Uses Hungarian matching on centroid Euclidean distances, then filters
-    by radius. Matches LSP-DETR's F1Score exactly.
+    Matches predictions to GT by centroid Euclidean distance (LSP-DETR style).
+    Uses greedy matching per image, then aggregates TP/FP/FN globally.
 
     Args:
         results: List of dicts with 'pred_polys', 'gt_polys', 'pred_cls', 'gt_cls'.
@@ -191,15 +185,24 @@ def compute_centroid_f1(results, distance_thresholds=None):
         gt_c = gt_polys[:, :2]  # [N_gt, 2]
         dist_matrix = np.linalg.norm(pred_c[:, None, :] - gt_c[None, :, :], axis=2)  # [N_pred, N_gt]
 
-        # Hungarian matching (minimize total distance)
-        row_ind, col_ind = linear_sum_assignment(dist_matrix)
-
-        # Evaluate each threshold
+        # Greedy matching per threshold
         for t in distance_thresholds:
-            valid = dist_matrix[row_ind, col_ind] <= t
-            tp = int(valid.sum())
-            fp = n_pred - tp
-            fn = n_gt - tp
+            matched_gt = set()
+            tp = 0
+            fp = 0
+            for pi in range(n_pred):
+                best_gt = -1
+                best_dist = t
+                for gi in range(n_gt):
+                    if gi not in matched_gt and dist_matrix[pi, gi] < best_dist:
+                        best_dist = dist_matrix[pi, gi]
+                        best_gt = gi
+                if best_gt >= 0:
+                    tp += 1
+                    matched_gt.add(best_gt)
+                else:
+                    fp += 1
+            fn = n_gt - len(matched_gt)
             per_threshold[t]['tp'] += tp
             per_threshold[t]['fp'] += fp
             per_threshold[t]['fn'] += fn
@@ -217,15 +220,13 @@ def compute_centroid_f1(results, distance_thresholds=None):
     return results_dict
 
 
-def compute_ap_2018_dsb(results, iou_thresholds=None):
-    """Compute AP at specified IoU thresholds using mask IoU (2018 DSB style).
+def compute_map_metrics(results, iou_thresholds=None):
+    """Compute mAP at specified IoU thresholds using mask IoU.
 
-    Matches LSP-DETR's AveragePrecision2018DSB: Hungarian assignment on
-    mask IoU, then per-threshold TP/FP counting. Predictions are sorted
-    globally by confidence and the precision-recall curve is integrated.
+    Uses rasterized polygon masks so both centroid and shape contribute to IoU.
 
     Returns:
-        dict with AP, precision, recall at each threshold.
+        dict with mAP, precision, recall at each threshold.
     """
     if iou_thresholds is None:
         iou_thresholds = [0.5, 0.75] + [round(x, 2) for x in np.arange(0.5, 1.0, 0.05)]
@@ -239,7 +240,6 @@ def compute_ap_2018_dsb(results, iou_thresholds=None):
     per_class_stats = {}
     for cls_id in sorted(class_set):
         per_class_stats[cls_id] = {t: {'tp': [], 'fp': [], 'conf': [], 'n_gt': 0} for t in iou_thresholds}
-
         for r in results:
             gt_mask = r['gt_cls'] == cls_id
             pred_mask = r['pred_cls'] == cls_id
@@ -250,41 +250,49 @@ def compute_ap_2018_dsb(results, iou_thresholds=None):
             n_pred = len(pred_polys)
             n_gt = len(gt_polys)
 
+            per_class_stats[cls_id]['n_gt_per_image'] = per_class_stats[cls_id].get('n_gt_per_image', [])
+            per_class_stats[cls_id]['n_gt_per_image'].append(n_gt)
+
             for t in iou_thresholds:
                 per_class_stats[cls_id][t]['n_gt'] += n_gt
 
-            if n_pred == 0:
-                # No predictions for this class in this image
+            if n_pred == 0 or n_gt == 0:
+                for t in iou_thresholds:
+                    per_class_stats[cls_id][t]['conf'].extend([0.0] * n_pred)
+                    per_class_stats[cls_id][t]['tp'].extend([False] * n_pred)
+                    per_class_stats[cls_id][t]['fp'].extend([True] * n_pred)
                 continue
 
             # Compute pairwise mask IoU
             imgsz = r['imgsz']
-            if n_gt > 0:
-                gt_masks = polygons_to_masks(gt_polys, imgsz, imgsz)
-                pred_masks = polygons_to_masks(pred_polys, imgsz, imgsz)
-                iou_matrix = _mask_iou_matrix(pred_masks, gt_masks)
+            gt_masks = polygons_to_masks(gt_polys, imgsz, imgsz)
+            pred_masks = polygons_to_masks(pred_polys, imgsz, imgsz)
+            iou_matrix = _mask_iou_matrix(pred_masks, gt_masks)
 
-                # Hungarian matching (maximize total IoU)
-                row_ind, col_ind = linear_sum_assignment(-iou_matrix)
-                matched_iou = iou_matrix[row_ind, col_ind]
-            else:
-                # No GT: every prediction is FP at all thresholds
-                row_ind = np.array([], dtype=int)
-                matched_iou = np.array([], dtype=float)
-
-            # Per-threshold TP/FP (same matching for all thresholds)
+            # Greedy matching per threshold
             for t in iou_thresholds:
-                if n_gt > 0:
-                    valid = matched_iou >= t
-                    matched_pred = set(row_ind[valid].tolist())
-                else:
-                    matched_pred = set()
+                matched_gt = set()
+                tp_list = []
+                fp_list = []
 
                 for pi in range(n_pred):
-                    is_tp = pi in matched_pred
-                    per_class_stats[cls_id][t]['conf'].append(float(pred_confs[pi]))
-                    per_class_stats[cls_id][t]['tp'].append(is_tp)
-                    per_class_stats[cls_id][t]['fp'].append(not is_tp)
+                    best_gt = -1
+                    best_iou = t
+                    for gi in range(n_gt):
+                        if gi not in matched_gt and iou_matrix[pi, gi] >= best_iou:
+                            best_iou = iou_matrix[pi, gi]
+                            best_gt = gi
+                    if best_gt >= 0:
+                        tp_list.append(True)
+                        fp_list.append(False)
+                        matched_gt.add(best_gt)
+                    else:
+                        tp_list.append(False)
+                        fp_list.append(True)
+
+                per_class_stats[cls_id][t]['conf'].extend(pred_confs[:n_pred].tolist() if n_pred > 0 else [])
+                per_class_stats[cls_id][t]['tp'].extend(tp_list)
+                per_class_stats[cls_id][t]['fp'].extend(fp_list)
 
     # Compute AP per class per threshold
     results_dict = {}
@@ -318,6 +326,7 @@ def compute_ap_2018_dsb(results, iou_thresholds=None):
             precision = cum_tp / (cum_tp + cum_fp)
             recall = cum_tp / n_gt
 
+            # AP = area under precision-recall curve (11-point or all-point)
             ap = _compute_ap(recall, precision)
             aps.append(ap)
 
@@ -331,7 +340,7 @@ def compute_ap_2018_dsb(results, iou_thresholds=None):
 
         f1 = 2 * precision_val * recall_val / (precision_val + recall_val) if (precision_val + recall_val) > 0 else 0.0
         results_dict[t] = {
-            'AP': map_val,
+            'mAP': map_val,
             'precision': precision_val,
             'recall': recall_val,
             'F1': f1,
@@ -356,142 +365,6 @@ def _compute_ap(recall, precision):
     # Sum Δrecall × precision
     ap = np.sum((mrec[indices + 1] - mrec[indices]) * mpre[indices + 1])
     return float(ap)
-
-
-def _compute_pq_masked(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
-    """Compute PQ with optional foreground mask (bMPQ / mMPQ style).
-
-    If ``mask`` is provided, only pixels where ``mask == True`` are considered
-    when computing intersections, unions, and areas.
-    """
-    n_pred = len(pred_masks)
-    n_gt = len(gt_masks)
-
-    if n_gt == 0 or n_pred == 0:
-        return 0.0, 0.0, 0.0
-
-    if mask is not None:
-        pred_masks = [m & mask for m in pred_masks]
-        gt_masks = [m & mask for m in gt_masks]
-
-    # Re-use vectorised IoU matrix from metrics module
-    from raycasted.model.metrics import _compute_mask_iou_matrix
-
-    iou_matrix = _compute_mask_iou_matrix(pred_masks, gt_masks)
-    row_ind, col_ind = linear_sum_assignment(-iou_matrix)
-    valid = iou_matrix[row_ind, col_ind] >= iou_threshold
-
-    tp = valid.sum()
-    fp = n_pred - tp
-    fn = n_gt - tp
-
-    dq = tp / (tp + 0.5 * fp + 0.5 * fn) if (tp + fp + fn) > 0 else 0.0
-    sq = float(iou_matrix[row_ind[valid], col_ind[valid]].mean()) if tp > 0 else 0.0
-    pq = sq * dq
-    return float(pq), float(sq), float(dq)
-
-
-def compute_binary_pq(results):
-    """Compute binary PQ and masked binary PQ (bPQ / bMPQ).
-
-    Merges all instances into a single foreground mask per image,
-    then computes PQ between the binary masks.
-    """
-    bpq_scores = []
-    bmpq_scores = []
-
-    for r in results:
-        imgsz = r['imgsz']
-        gt_masks = polygons_to_masks(r['gt_polys'], imgsz, imgsz) if r['gt_polys'].shape[0] > 0 else []
-        pred_masks = polygons_to_masks(r['pred_polys'], imgsz, imgsz) if r['pred_polys'].shape[0] > 0 else []
-        if pred_masks:
-            pred_masks = resolve_mask_overlaps(pred_masks)
-
-        # Merge to binary foreground masks
-        if len(pred_masks) > 0:
-            pred_binary = np.stack(pred_masks).max(axis=0).astype(np.uint8)
-        else:
-            pred_binary = np.zeros((imgsz, imgsz), dtype=np.uint8)
-
-        if len(gt_masks) > 0:
-            gt_binary = np.stack(gt_masks).max(axis=0).astype(np.uint8)
-        else:
-            gt_binary = np.zeros((imgsz, imgsz), dtype=np.uint8)
-
-        # bPQ: standard binary PQ on full image
-        bpq, _, _ = _compute_pq_masked([pred_binary], [gt_binary])
-        bpq_scores.append(bpq)
-
-        # bMPQ: masked to foreground pixels in GT
-        if gt_binary.sum() > 0:
-            foreground_mask = gt_binary > 0
-            bmpq, _, _ = _compute_pq_masked([pred_binary], [gt_binary], mask=foreground_mask)
-        else:
-            bmpq = 0.0
-        bmpq_scores.append(bmpq)
-
-    return np.mean(bpq_scores), np.mean(bmpq_scores)
-
-
-def compute_multiclass_pq(results, num_classes=6):
-    """Compute multiclass PQ and masked multiclass PQ (mPQ / mMPQ).
-
-    Per-class PQ is averaged over classes that have at least one GT instance
-    across the dataset.
-    """
-    # Accumulate per-class stats
-    class_pq = {c: [] for c in range(num_classes)}
-    class_mpq = {c: [] for c in range(num_classes)}
-
-    for r in results:
-        imgsz = r['imgsz']
-        pred_polys = r['pred_polys']
-        gt_polys = r['gt_polys']
-        pred_cls = r['pred_cls']
-        gt_cls = r['gt_cls']
-
-        # Rasterize all masks
-        all_pred_masks = polygons_to_masks(pred_polys, imgsz, imgsz) if pred_polys.shape[0] > 0 else []
-        all_gt_masks = polygons_to_masks(gt_polys, imgsz, imgsz) if gt_polys.shape[0] > 0 else []
-        if all_pred_masks:
-            all_pred_masks = resolve_mask_overlaps(all_pred_masks)
-
-        # Build per-class binary masks
-        for cls_id in range(num_classes):
-            pred_idx = [i for i, c in enumerate(pred_cls) if c == cls_id]
-            gt_idx = [i for i, c in enumerate(gt_cls) if c == cls_id]
-
-            pred_cls_masks = [all_pred_masks[i] for i in pred_idx]
-            gt_cls_masks = [all_gt_masks[i] for i in gt_idx]
-
-            # Unmasked mPQ (per-class instance PQ)
-            pq, _, _ = _compute_pq_masked(pred_cls_masks, gt_cls_masks)
-            class_pq[cls_id].append(pq)
-
-            # Masked mMPQ: ignore pixels with no GT instance of any class
-            if len(all_gt_masks) > 0:
-                gt_any = np.stack(all_gt_masks).max(axis=0).astype(np.uint8)
-                foreground_mask = gt_any > 0
-                mpq, _, _ = _compute_pq_masked(pred_cls_masks, gt_cls_masks, mask=foreground_mask)
-            else:
-                mpq = 0.0
-            class_mpq[cls_id].append(mpq)
-
-    # Average per-class PQ over images, then over classes with GT
-    mpq_values = []
-    mmpq_values = []
-    for c in range(num_classes):
-        # Only include classes that have at least one non-zero PQ image
-        valid_pq = [v for v in class_pq[c] if v > 0 or len(class_pq[c]) == 1]
-        valid_mpq = [v for v in class_mpq[c] if v > 0 or len(class_mpq[c]) == 1]
-        if valid_pq:
-            mpq_values.append(np.mean(valid_pq))
-        if valid_mpq:
-            mmpq_values.append(np.mean(valid_mpq))
-
-    mean_mpq = np.mean(mpq_values) if mpq_values else 0.0
-    mean_mmpq = np.mean(mmpq_values) if mmpq_values else 0.0
-    return mean_mpq, mean_mmpq
 
 
 def benchmark_inference(model, dataloader, device, n_warmup=10):
@@ -601,9 +474,12 @@ def main():
     results = run_inference(model, dataloader, device, conf_threshold=args.conf)
     print(f'  Processed {len(results)} images')
 
-    # --- Pixel-level metrics (AJI, PQ variants) ---
-    print('Computing pixel-level metrics (AJI, bPQ, bMPQ, mPQ, mMPQ)...')
+    # --- Pixel-level metrics (AJI, PQ, SQ, DQ) ---
+    print('Computing pixel-level metrics (AJI, PQ, SQ, DQ)...')
     aji_scores = []
+    pq_scores = []
+    sq_scores = []
+    dq_scores = []
     debug_printed = []
 
     for r in results:
@@ -636,24 +512,32 @@ def main():
                 print(f'    Pred mask areas (first 3): {pred_areas}')
 
         aji_scores.append(compute_aji(pred_masks, gt_masks))
+        pq, sq, dq = compute_pq(pred_masks, gt_masks)
+        pq_scores.append(pq)
+        sq_scores.append(sq)
+        dq_scores.append(dq)
 
     mean_aji = np.mean(aji_scores)
-    mean_bpq, mean_bmpq = compute_binary_pq(results)
-    mean_mpq, mean_mmpq = compute_multiclass_pq(results)
+    mean_pq = np.mean(pq_scores)
+    mean_sq = np.mean(sq_scores)
+    mean_dq = np.mean(dq_scores)
 
-    # --- AP metrics (LSP-DETR style: Hungarian matching) ---
-    print('Computing AP metrics (Hungarian matching)...')
-    ap_results = compute_ap_2018_dsb(results)
+    # --- mAP metrics ---
+    print('Computing mAP metrics...')
+    map_results = compute_map_metrics(results)
 
-    ap50 = ap_results.get(0.5, {}).get('AP', 0.0)
-    ap70 = ap_results.get(0.7, {}).get('AP', 0.0)
-    ap90 = ap_results.get(0.9, {}).get('AP', 0.0)
-    ap50_95 = np.mean([ap_results[t]['AP'] for t in sorted(ap_results.keys())])
+    map50 = map_results.get(0.5, {}).get('mAP', 0.0)
+    map75 = map_results.get(0.75, {}).get('mAP', 0.0)
+    map50_95 = np.mean([map_results[t]['mAP'] for t in sorted(map_results.keys())])
 
-    # --- Centroid F1 (LSP-DETR style: Hungarian matching, r=12) ---
-    print('Computing centroid F1 (Hungarian matching)...')
-    centroid_results = compute_centroid_f1(results, distance_thresholds=[12])
-    f12 = centroid_results[12]
+    # Use 0.5 threshold for P/R/F1
+    prec = map_results.get(0.5, {}).get('precision', 0.0)
+    rec = map_results.get(0.5, {}).get('recall', 0.0)
+    f1 = map_results.get(0.5, {}).get('F1', 0.0)
+
+    # --- Centroid F1 (LSP-DETR style) ---
+    print('Computing centroid F1 (LSP-DETR style)...')
+    centroid_results = compute_centroid_f1(results)
 
     # --- Model stats ---
     n_params = sum(p.numel() for p in model.parameters())
@@ -670,29 +554,31 @@ def main():
     inf_dl = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=_simple_collate)
     avg_ms = benchmark_inference(model, inf_dl, device)
 
-    # --- Print results (LSP-DETR format) ---
+    # --- Print results ---
     print('\n' + '=' * 60)
-    print('PanNuke Fold3 Evaluation Results (LSP-DETR Protocol)')
+    print('PanNuke Fold3 Evaluation Results')
     print('=' * 60)
     print(f'{"Metric":<25} {"Value":>12}')
     print('-' * 37)
     print(f'{"AJI":<25} {mean_aji:>12.4f}')
-    print(f'{"AP@0.5":<25} {ap50:>12.4f}')
-    print(f'{"AP@0.7":<25} {ap70:>12.4f}')
-    print(f'{"AP@0.9":<25} {ap90:>12.4f}')
-    print(f'{"AP@0.5:0.05:0.95":<25} {ap50_95:>12.4f}')
-    print(f'{"bPQ":<25} {mean_bpq:>12.4f}')
-    print(f'{"bMPQ":<25} {mean_bmpq:>12.4f}')
-    print(f'{"mPQ":<25} {mean_mpq:>12.4f}')
-    print(f'{"mMPQ":<25} {mean_mmpq:>12.4f}')
-    print(f'{"F1 (centroid, r=12)":<25} {f12["f1"]:>12.4f}')
-    print(f'{"Precision (centroid)":<25} {f12["precision"]:>12.4f}')
-    print(f'{"Recall (centroid)":<25} {f12["recall"]:>12.4f}')
+    print(f'{"mAP@0.5":<25} {map50:>12.4f}')
+    print(f'{"mAP@0.75":<25} {map75:>12.4f}')
+    print(f'{"mAP@0.5:0.95":<25} {map50_95:>12.4f}')
+    print(f'{"PQ":<25} {mean_pq:>12.4f}')
+    print(f'{"SQ":<25} {mean_sq:>12.4f}')
+    print(f'{"DQ":<25} {mean_dq:>12.4f}')
+    print(f'{"Precision":<25} {prec:>12.4f}')
+    print(f'{"Recall":<25} {rec:>12.4f}')
+    print(f'{"F1 (mask)":<25} {f1:>12.4f}')
+    for t in sorted(centroid_results.keys()):
+        cf1 = centroid_results[t]['f1']
+        print(f'{"Centroid F1@" + str(t) + "px":<25} {cf1:>12.4f}')
     print(f'{"Params (M)":<25} {params_m:>12.2f}')
     print(f'{"GFLOPs":<25} {gflops:>12.2f}')
     print(f'{"Inference Time (ms/img)":<25} {avg_ms:>12.2f}')
     print('=' * 37)
 
+    # Per-class mAP@0.5 breakdown
     print(f'\nImages evaluated: {len(results)}')
     print(f'Confidence threshold: {args.conf}')
 
@@ -716,7 +602,7 @@ def _simple_collate(batch):
     else:
         # Derive annotation width from non-empty labels, or fallback to a safe default.
         # When targets are empty the exact width doesn't affect computation.
-        ann_width = next((lbl.shape[1] for lbl in labels_list if lbl.ndim == 2 and lbl.shape[1] > 0), 35)
+        ann_width = next((l.shape[1] for l in labels_list if l.ndim == 2 and l.shape[1] > 0), 35)
         targets = _torch.zeros((0, 2 + ann_width), dtype=_torch.float32)  # batch_idx + cls + rays
 
     return {
