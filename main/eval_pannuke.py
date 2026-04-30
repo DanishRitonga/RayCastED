@@ -148,7 +148,7 @@ def _mask_iou_matrix(pred_masks: list[np.ndarray], gt_masks: list[np.ndarray]) -
     gt_area = gt_stack.sum(axis=1, keepdims=True)
     union = pred_area + gt_area.T - intersection
 
-    return np.where(union > 0, intersection / union, 0.0)
+    return np.divide(intersection, union, out=np.zeros_like(intersection, dtype=np.float64), where=union > 0)
 
 
 def compute_centroid_f1(results, distance_thresholds=None):

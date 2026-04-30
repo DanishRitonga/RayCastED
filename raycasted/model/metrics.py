@@ -65,7 +65,7 @@ def _compute_mask_iou_matrix(pred_masks: list[np.ndarray], gt_masks: list[np.nda
     gt_area = gt_stack.sum(axis=1, keepdims=True)  # (N_gt, 1)
     union = pred_area + gt_area.T - intersection
 
-    iou = np.where(union > 0, intersection / union, 0.0)
+    iou = np.divide(intersection, union, out=np.zeros_like(intersection, dtype=np.float64), where=union > 0)
     return iou
 
 
