@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import yaml
 
+from raycasted.data.etl.utils import constants as _const
 from raycasted.model.head import RayCastDetect
 from raycasted.model.loss import RayCastE2ELoss
 from raycasted.model.register import register_raycast_head
@@ -273,15 +274,18 @@ def test_forward_pass_output_shapes():
             assert 'scores' in b, f'{branch}: missing scores'
             assert 'feats' in b, f'{branch}: missing feats'
 
-            # boxes: [B, 34, N_anchors]
-            assert b['boxes'].shape[:2] == (1, 34), f'{branch} boxes shape wrong: {b["boxes"].shape}'
-            # scores: [B, nc, N_anchors]
-            assert b['scores'].shape[:2] == (1, 5), f'{branch} scores shape wrong: {b["scores"].shape}'
+            # boxes: [B, raycast_dim, N_anchors]  (raycast_dim = 2 + n_rays)
+            raycast_dim = 2 + _const.N_RAYS
+            assert b['boxes'].shape[:2] == (1, raycast_dim), f'{branch} boxes shape wrong: {b["boxes"].shape}'
+            # scores: [B, nc, N_anchors]  (nc from YAML, default 80)
+            head = model.model[-1]
+            assert b['scores'].shape[:2] == (1, head.nc), f'{branch} scores shape wrong: {b["scores"].shape}'
             # feats: list of 3 feature maps
             assert len(b['feats']) == 3, f'{branch}: expected 3 feat maps, got {len(b["feats"])}'
 
         n_anchors = preds['one2many']['boxes'].shape[2]
-        print(f'PASS: forward pass — 3-scale output, {n_anchors} anchors, boxes [1,34,{n_anchors}]')
+        head = model.model[-1]
+        print(f'PASS: forward pass — 3-scale output, {n_anchors} anchors, boxes [1,{head.raycast_dim},{n_anchors}]')
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +296,8 @@ def test_forward_pass_output_shapes():
 def _make_synthetic_batch(batch_size=2, nc=5, imgsz=64, n_gt_per_img=3):
     """Create a synthetic batch dict matching collate_fn output format."""
     # Simulate the output from _raycast_collate_fn
+    n_rays = _const.N_RAYS
+    raycast_dim = 2 + n_rays
     batch_idx_list = []
     cls_list = []
     bboxes_list = []
@@ -299,8 +305,8 @@ def _make_synthetic_batch(batch_size=2, nc=5, imgsz=64, n_gt_per_img=3):
         for _ in range(n_gt_per_img):
             batch_idx_list.append(float(b))
             cls_list.append(float(np.random.randint(0, nc)))
-            # [cx_norm, cy_norm, d_1..d_32] all in [0, 1]
-            bbox = np.random.uniform(0.1, 0.9, 34).astype(np.float32)
+            # [cx_norm, cy_norm, d_1..d_n] all in [0, 1]
+            bbox = np.random.uniform(0.1, 0.9, raycast_dim).astype(np.float32)
             bbox[:2] = np.random.uniform(0.2, 0.8, 2)  # centroids well inside
             bboxes_list.append(bbox)
 
@@ -495,8 +501,9 @@ def test_smoke_train_2_epochs():
 
         # Verify training_args persisted
         ta = model.training_args
-        assert ta['nc'] == 5, f'nc should be 5, got {ta["nc"]}'
-        assert ta['n_rays'] == 32, f'n_rays should be 32, got {ta["n_rays"]}'
+        # nc comes from the model YAML (default 80 for yolo11n.yaml), not from data
+        assert ta['nc'] == head.nc, f'nc mismatch: training_args={ta["nc"]}, head={head.nc}'
+        assert ta['n_rays'] == _const.N_RAYS, f'n_rays should be {_const.N_RAYS}, got {ta["n_rays"]}'
 
         print(f'PASS: smoke train — 2 epochs in {elapsed:.1f}s')
 
@@ -506,6 +513,10 @@ def test_smoke_train_2_epochs():
 # ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
+    import sys
+
+    quick_mode = '--quick' in sys.argv
+
     test_extract_neck_channels()
     test_model_has_raycast_head()
     test_criterion_is_raycast_e2e()
@@ -521,6 +532,9 @@ if __name__ == '__main__':
     test_preprocess_batch()
     test_get_validator()
     test_build_dataset_and_dataloader()
-    test_smoke_train_2_epochs()
 
-    print('\nAll Phase 10 training integration tests passed!')
+    if quick_mode:
+        print('\nAll Phase 10 training integration tests passed (quick mode, smoke test skipped)!')
+    else:
+        test_smoke_train_2_epochs()
+        print('\nAll Phase 10 training integration tests passed!')

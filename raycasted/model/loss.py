@@ -21,25 +21,28 @@ from raycasted.data.etl.ops.loss import angular_smoothness_loss_torch
 from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
 
 
-def _compute_soft_polar_centerness(gt_rays: torch.Tensor, n_rays: int) -> torch.Tensor:
-    """Compute soft polar centerness target from GT ray distances.
+def _log_space_ray_loss(pred_rays: torch.Tensor, target_rays: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    """L1 loss in log-space for ray distances.
 
-    Divides rays into 4 quadrants (0-90°, 90-180°, 180-270°, 270-360°) and
-    computes: sqrt(F(D1)/F(D3) * F(D2)/F(D4)) where F = mean of quadrant.
+    Matches LSP-DETR's observation that linear L1 gives equal gradient for
+    absolute errors regardless of ray magnitude, causing small objects (rays
+    ~0.01-0.05 normalised) to receive disproportionately weak supervision.
+    Log-space converts absolute errors into relative ones: a 10% error on a
+    small ray produces the same loss as a 10% error on a large ray.
+
+    Both pred and target are clamped to [eps, ∞) before log to avoid log(0).
 
     Args:
-        gt_rays: [N, n_rays] normalised ray distances (foreground only).
-        n_rays: Number of rays.
+        pred_rays: [N, n_rays] predicted ray distances (strictly positive via softplus).
+        target_rays: [N, n_rays] GT ray distances (normalised by crop_size, in [0, ~1]).
+        eps: Minimum clamp value to prevent log(0).
 
     Returns:
-        [N] centerness targets in [0, 1].
+        [N] per-sample mean absolute error in log-space.
     """
-    q = n_rays // 4
-    f1 = gt_rays[:, :q].mean(-1).clamp(min=1e-7)
-    f2 = gt_rays[:, q : 2 * q].mean(-1).clamp(min=1e-7)
-    f3 = gt_rays[:, 2 * q : 3 * q].mean(-1).clamp(min=1e-7)
-    f4 = gt_rays[:, 3 * q : 4 * q].mean(-1).clamp(min=1e-7)
-    return (f1 / f3 * f2 / f4).clamp(max=1.0).sqrt()
+    log_pred = torch.clamp(pred_rays, min=eps).log()
+    log_tgt = torch.clamp(target_rays, min=eps).log()
+    return (log_pred - log_tgt).abs().mean(-1)
 
 
 class RayCastDetectionLoss(v8DetectionLoss):
@@ -48,7 +51,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
     Replaces v8DetectionLoss bbox/DFL terms:
       L_cls     — BCE or Focal on classification scores
       L_xy      — Huber(δ=0.01) on decoded centroid
-      L_L1      — Uniform MAE on 32 rays
+      L_L1      — Uniform MAE on 32 rays (linear or log-space)
       L_PolarIoU — 1 - PolarIoU
       L_smooth  — Angular smoothness regularisation (annealed)
 
@@ -66,8 +69,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         assigner_beta: float = 6.0,
         focal_loss: bool = False,
         focal_gamma: float = 2.0,
-        centerness_weight: float = 1.0,
         quality_focal_loss: bool = False,
+        log_ray_loss: bool = False,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -82,8 +85,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Quality focal loss configuration
         self.quality_focal_loss = quality_focal_loss
 
-        # Centerness configuration
-        self.lambda_ct = centerness_weight
+        # Log-space ray loss configuration
+        self.log_ray_loss = log_ray_loss
 
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
@@ -157,7 +160,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         Returns:
             (assignment_info, loss_5vec, loss_detach)
         """
-        loss = torch.zeros(6, device=self.device)  # [xy, cls, L1, piou, smooth, ct]
+        loss = torch.zeros(5, device=self.device)  # [xy, cls, L1, piou, smooth]
 
         # --- Prediction parsing ---
         pred_distri = preds['boxes'].permute(0, 2, 1).contiguous()  # [B, N, raycast_dim]
@@ -251,8 +254,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss_xy = F.huber_loss(fg_pred_xy, fg_target_xy, reduction='none', delta=1.0).mean(-1)
             loss[0] = (loss_xy.unsqueeze(-1) * weight).sum() / target_scores_sum
 
-            # L_L1: Uniform MAE on 32 rays
-            loss_l1 = (fg_pred_rays - fg_target_rays).abs().mean(-1)
+            # L_L1: Uniform MAE on 32 rays (linear or log-space)
+            if self.log_ray_loss:
+                loss_l1 = _log_space_ray_loss(fg_pred_rays, fg_target_rays)
+            else:
+                loss_l1 = (fg_pred_rays - fg_target_rays).abs().mean(-1)
             loss[2] = (loss_l1.unsqueeze(-1) * weight).sum() / target_scores_sum
 
             # L_PolarIoU: -log(PolarIoU) — matches PolarMask formulation
@@ -264,28 +270,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
             # L_smooth: Angular smoothness on predicted rays
             fg_smooth = angular_smoothness_loss_torch(fg_pred_rays)  # [N_fg] (already float32)
             loss[4] = (fg_smooth * weight.squeeze(-1)).sum() / target_scores_sum
-
-            # L_ct: IoU-aware quality prediction (foreground only)
-            # Instead of polar centerness (which predicts centered-ness),
-            # predict the actual Polar-IoU between predicted and GT rays.
-            # At inference, score = cls * predicted_IoU gives quality-aware
-            # confidence calibration (matching LSP-DETR's scoring strategy).
-            ct_pred = preds.get('centerness')
-            if ct_pred is not None:
-                fg_ct = ct_pred.permute(0, 2, 1)[fg_mask].squeeze(-1).float()  # [N_fg]
-                # Target: actual Polar-IoU (already computed above as fg_piou)
-                loss_ct = F.binary_cross_entropy_with_logits(fg_ct, fg_piou.detach(), reduction='none')
-                loss[5] = (loss_ct * weight.squeeze(-1)).sum() / target_scores_sum
         else:
             # DDP safety — touch all prediction tensors to avoid unused-gradient errors
             loss[0] += (pred_xy * 0).sum()
             loss[2] += (pred_rays * 0).sum()
             loss[3] += (pred_rays * 0).sum()
             loss[4] += (pred_rays * 0).sum()
-            # Touch centerness tensor for DDP safety
-            ct_pred = preds.get('centerness')
-            if ct_pred is not None:
-                loss[5] += (ct_pred * 0).sum()
 
         # --- Apply loss weights ---
         loss[0] *= self.lambda_xy
@@ -293,7 +283,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         loss[2] *= self.lambda_l1
         loss[3] *= self.lambda_piou
         loss[4] *= self.lambda_smooth
-        loss[5] *= self.lambda_ct
 
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
@@ -320,9 +309,10 @@ class RayCastE2ELoss(E2ELoss):
         assigner_beta: float = 6.0,
         focal_loss: bool = False,
         focal_gamma: float = 2.0,
-        centerness_weight: float = 1.0,
         quality_focal_loss: bool = False,
         use_hungarian_o2o: bool = True,
+        log_ray_loss: bool = False,
+        centroid_sigma: float = 0.05,
     ):
         # Bind training config to RayCastDetectionLoss so E2ELoss passes it through
         loss_fn = partial(
@@ -333,8 +323,8 @@ class RayCastE2ELoss(E2ELoss):
             assigner_beta=assigner_beta,
             focal_loss=focal_loss,
             focal_gamma=focal_gamma,
-            centerness_weight=centerness_weight,
             quality_focal_loss=quality_focal_loss,
+            log_ray_loss=log_ray_loss,
         )
         super().__init__(model, loss_fn=loss_fn)
 
@@ -375,6 +365,7 @@ class RayCastE2ELoss(E2ELoss):
                 stride=self.one2one.assigner.stride if hasattr(self.one2one.assigner, 'stride') else [8, 16, 32],
                 topk2=1,
                 radius_scale=assigner_radius_scale,
+                centroid_sigma=centroid_sigma,
             )
         else:
             one2one_pool = max(tal_topk // 2, 7)  # candidate pool for one2one

@@ -22,7 +22,9 @@ from ultralytics.utils.tal import make_anchors
 
 # Default raycast dimension for backward compat (tests, export).
 # At runtime, use head.raycast_dim which reflects the actual n_rays parameter.
-RAYCAST_DIM = 34  # xy(2) + rays(32)
+from raycasted.data.etl.utils import constants as _const
+
+RAYCAST_DIM = 2 + _const.N_RAYS
 
 
 class RayRefinementBlock(nn.Module):
@@ -108,11 +110,6 @@ class RayCastDetect(Detect):
     Subclasses ultralytics Detect, replacing the cv2 regression branch with:
         Conv → Conv → RayRefinementBlock → Conv2d(c2, raycast_dim, 1)
 
-    Optionally includes a centerness prediction branch (soft polar centerness
-    from PolarMask++) that predicts how well-centered an anchor is relative
-    to the object. At inference, cls_score × centerness suppresses off-center
-    predictions.
-
     DFL is removed entirely. Output activations:
         - Channels 0-1 (xy): Sigmoid (inference only)
         - Channels 2..(2+n_rays) (rays): Softplus (inference only)
@@ -127,7 +124,6 @@ class RayCastDetect(Detect):
         n_rays: int = 32,
         head_channel_scale: float = 0.5,
         head_channel_min: int = 64,
-        use_centerness: bool = True,
         refinement_kernel_size: int = 3,
     ):
         """Initialize polygon detection head.
@@ -140,14 +136,12 @@ class RayCastDetect(Detect):
             n_rays: Number of radial rays for polygon parameterization.
             head_channel_scale: Fraction of input channels for head width.
             head_channel_min: Minimum head intermediate channels.
-            use_centerness: Whether to add soft polar centerness branch.
             refinement_kernel_size: Kernel size for polygon refinement block.
                 3 = standard RayRefinementBlock (default).
                 7 or 13 = LargeKernelRefinementBlock (LKCell-style, wider receptive field).
         """
         self.n_rays = n_rays
         self.raycast_dim = 2 + n_rays  # xy + rays
-        self.use_centerness = use_centerness
         self._end2end_arg = end2end  # store before parent __init__ (end2end is a property)
 
         super().__init__(nc, reg_max, end2end, ch)
@@ -175,65 +169,40 @@ class RayCastDetect(Detect):
             for x in ch
         )
 
-        # Centerness branch: predicts 1-channel logit per anchor
-        if self.use_centerness:
-            self.cv_ct = nn.ModuleList(
-                nn.Sequential(
-                    Conv(x, c2, 3),
-                    Conv(c2, c2, 3),
-                    nn.Conv2d(c2, 1, 1),
-                )
-                for x in ch
-            )
-
         # Remove DFL — not applicable to polygon regression
         self.dfl = nn.Identity()
 
         # Recreate one2one heads with polygon cv2
         if self._end2end_arg:
             self.one2one_cv2 = copy.deepcopy(self.cv2)
-            if self.use_centerness:
-                self.one2one_cv_ct = copy.deepcopy(self.cv_ct)
 
     @property
     def one2many(self):
-        """Return one2many head components with optional centerness branch."""
-        d = dict(box_head=self.cv2, cls_head=self.cv3)
-        if self.use_centerness:
-            d['ct_head'] = self.cv_ct
-        return d
+        """Return one2many head components."""
+        return dict(box_head=self.cv2, cls_head=self.cv3)
 
     @property
     def one2one(self):
-        """Return one2one head components with optional centerness branch."""
-        d = dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
-        if self.use_centerness:
-            d['ct_head'] = self.one2one_cv_ct
-        return d
+        """Return one2one head components."""
+        return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
 
     def forward_head(
         self,
         x: list[torch.Tensor],
         box_head: nn.Module | None = None,
         cls_head: nn.Module | None = None,
-        ct_head: nn.Module | None = None,
     ) -> dict[str, torch.Tensor]:
         """Concatenate polygon predictions and class scores across scales.
 
         Returns dict with 'boxes' key containing raycast_dim polygon logits,
-        'scores' key containing class logits, and optionally 'centerness' key
-        containing 1-channel centerness logits.
+        'scores' key containing class logits, and 'feats' key with feature maps.
         """
         if box_head is None or cls_head is None:
             return {}
         bs = x[0].shape[0]
         poly = torch.cat([box_head[i](x[i]).view(bs, self.raycast_dim, -1) for i in range(self.nl)], dim=-1)
         scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
-        result = dict(boxes=poly, scores=scores, feats=x)
-        if ct_head is not None:
-            ct = torch.cat([ct_head[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
-            result['centerness'] = ct
-        return result
+        return dict(boxes=poly, scores=scores, feats=x)
 
     def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode polygon predictions for inference.
@@ -263,9 +232,6 @@ class RayCastDetect(Detect):
 
         dbox = torch.cat([xy_abs, rays_abs], dim=1)
         scores = x['scores'].sigmoid()
-        # Multiply centerness to suppress off-center predictions
-        if 'centerness' in x:
-            scores = scores * x['centerness'].sigmoid()
         return torch.cat((dbox, scores), 1)
 
     def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
@@ -318,10 +284,6 @@ class RayCastDetect(Detect):
                 bias[:2] = 2.5  # sigmoid → ~0.92
             bias[2:] = ray_bias  # rays: softplus → target_px / crop_size
             b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (crop_size / self.stride[i]) ** 2)
-        if 'ct_head' in o2m:
-            for ct in o2m['ct_head']:
-                # IoU prediction: initial target ≈ 0.5 (mid-range), bias = logit(0.5) = 0.0
-                ct[-1].bias.data.fill_(0.0)
         if self._end2end_arg:
             o2o = self.one2one
             for i, (a, b) in enumerate(zip(o2o['box_head'], o2o['cls_head'])):
@@ -336,6 +298,3 @@ class RayCastDetect(Detect):
                     bias[:2] = 2.5
                 bias[2:] = ray_bias
                 b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (crop_size / self.stride[i]) ** 2)
-            if 'ct_head' in o2o:
-                for ct in o2o['ct_head']:
-                    ct[-1].bias.data.fill_(0.0)

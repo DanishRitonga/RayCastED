@@ -242,9 +242,29 @@ class HungarianRayCastAssigner(RayCastAssigner):
     the same anchors, and select_highest_overlaps resolves ties by max-IoU,
     often giving suboptimal assignments that degrade NMS-free inference.
 
+    The matching score includes a Gaussian center prior:
+        score = cls^α × PolarIoU^β × exp(-dist² / (2σ²))
+    This ensures anchors close to the GT centroid are preferred, which is
+    crucial in dense scenes where multiple GTs share candidate anchors and
+    Polar-IoU alone is unreliable (especially early in training).
+
     Inherits select_candidates_in_gts and get_box_metrics from RayCastAssigner.
     Only overrides _forward to replace the selection mechanism.
     """
+
+    def __init__(self, centroid_sigma: float = 0.05, **kwargs):
+        """Initialize HungarianRayCastAssigner.
+
+        Args:
+            centroid_sigma: Std dev for Gaussian center prior in normalised [0,1] space.
+                Controls how quickly score decays with anchor-GT centroid distance.
+                σ=0.05 → score=0.14 at dist=0.1 (10% of image).
+                σ=0.10 → score=0.61 at dist=0.1.
+                Set to 0 to disable the centroid prior.
+            **kwargs: Forwarded to RayCastAssigner (topk, num_classes, etc.).
+        """
+        super().__init__(**kwargs)
+        self.centroid_sigma = centroid_sigma
 
     def _forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
         """Hungarian matching assignment — globally optimal 1:1 matching.
@@ -299,9 +319,19 @@ class HungarianRayCastAssigner(RayCastAssigner):
             # align_metric[b] is (n_max_boxes, na)
             cost = align_metric[b][valid_gt_idx[:, None], cand_idx[None, :]]  # (n_valid_gt, n_cand)
 
-            # Apply candidate mask: set non-candidates to large cost
+            # Apply candidate mask: set non-candidates to zero score
             pair_mask = mask_in_gts[b][valid_gt_idx[:, None], cand_idx[None, :]]
             cost = cost * pair_mask.float()
+
+            # Gaussian center prior: exp(-dist² / (2σ²))
+            # Multiplied into score so anchors closer to GT centroid rank higher.
+            # Critical in dense scenes where Polar-IoU alone can't resolve
+            # which anchor belongs to which GT (especially early in training).
+            if self.centroid_sigma > 0:
+                gt_cx_cy = gt_bboxes[b, valid_gt_idx, :2]  # (n_valid_gt, 2)
+                anc_xy = anc_points[cand_idx]  # (n_cand, 2)
+                dist_sq = (gt_cx_cy[:, None, :] - anc_xy[None, :, :]).pow(2).sum(-1)  # (n_valid_gt, n_cand)
+                cost = cost * torch.exp(-dist_sq / (2 * self.centroid_sigma**2))
 
             # Hungarian algorithm (minimise negative = maximise alignment)
             # For large matrices, fall back to top-1 greedy per GT

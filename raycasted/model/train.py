@@ -118,8 +118,10 @@ def _raycast_collate_fn(batch: list) -> dict:
     if target_list:
         targets = torch.from_numpy(np.concatenate(target_list, axis=0))
     else:
-        # Empty batch — shape doesn't matter, just needs correct ndim
-        targets = torch.zeros((0, 4 + 32), dtype=torch.float32)
+        # Empty batch — shape must match 2 + n_rays (cx, cy, d_1..d_n) for bboxes
+        from raycasted.data.etl.utils.constants import N_RAYS as _n_rays
+
+        targets = torch.zeros((0, 4 + _n_rays), dtype=torch.float32)
 
     # Metadata required by validator (ori_shape, ratio_pad, im_file)
     ori_shapes = []
@@ -136,7 +138,7 @@ def _raycast_collate_fn(batch: list) -> dict:
         'img': images,
         'batch_idx': targets[:, 0],
         'cls': targets[:, 1],
-        'bboxes': targets[:, 2:],  # [N, 34] = cx, cy, d_1..d_32
+        'bboxes': targets[:, 2:],  # [N, 2+n_rays] = cx, cy, d_1..d_n
         'ori_shape': torch.stack(ori_shapes),
         'ratio_pad': ratio_pads,
         'im_file': im_files,
@@ -166,9 +168,10 @@ class _RayCastCriterionWrapper:
             assigner_beta=tcfg.get('assigner_beta', 6.0),
             focal_loss=tcfg.get('focal_loss', False),
             focal_gamma=tcfg.get('focal_gamma', 2.0),
-            centerness_weight=tcfg.get('centerness_weight', 1.0),
             quality_focal_loss=tcfg.get('quality_focal_loss', False),
             use_hungarian_o2o=tcfg.get('use_hungarian_o2o', True),
+            log_ray_loss=tcfg.get('log_ray_loss', False),
+            centroid_sigma=tcfg.get('centroid_sigma', 0.05),
         )
 
 
@@ -272,7 +275,7 @@ class RayCastTrainer(DetectionTrainer):
         self.training_config = training_config  # dict or None
 
     def plot_training_labels(self):
-        """Skip standard bbox label plotting — incompatible with 34-dim polygon data."""
+        """Skip standard bbox label plotting — incompatible with raycast polygon data."""
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Create YOLO model with RayCastDetect head and RayCastE2ELoss.
@@ -302,7 +305,6 @@ class RayCastTrainer(DetectionTrainer):
             tcfg = self.training_config
             head_channel_scale = tcfg.get('head_channel_scale', 0.5) if tcfg else 0.5
             head_channel_min = tcfg.get('head_channel_min', 64) if tcfg else 64
-            use_centerness = tcfg.get('soft_polar_centerness', True) if tcfg else True
             refinement_kernel_size = tcfg.get('refinement_kernel_size', 3) if tcfg else 3
             new_head = RayCastDetect(
                 nc=nc,
@@ -311,7 +313,6 @@ class RayCastTrainer(DetectionTrainer):
                 n_rays=n_rays,
                 head_channel_scale=head_channel_scale,
                 head_channel_min=head_channel_min,
-                use_centerness=use_centerness,
                 refinement_kernel_size=refinement_kernel_size,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
@@ -344,7 +345,7 @@ class RayCastTrainer(DetectionTrainer):
 
     def get_validator(self):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
-        self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'piou_loss', 'smooth_loss', 'ct_loss')
+        self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'piou_loss', 'smooth_loss')
         args_copy = copy.copy(self.args)
         if self.training_config and 'inference_conf' in self.training_config:
             args_copy.conf = self.training_config['inference_conf']

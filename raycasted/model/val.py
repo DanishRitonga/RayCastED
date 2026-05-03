@@ -18,7 +18,9 @@ from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 from raycasted.model.blocks.head import RayCastDetect
 
 # Backward compat constant (tests import this). At runtime, use self.raycast_dim.
-RAYCAST_DIM = 34  # xy(2) + rays(32)
+from raycasted.data.etl.utils import constants as _val_const
+
+RAYCAST_DIM = 2 + _val_const.N_RAYS
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +159,7 @@ class RayCastValidator(DetectionValidator):
         self.metrics = RayCastDetMetrics()
         self.centroid_thresholds = [6.0, 8.0, 10.0]  # px, LSP-DETR comparability
         self.n_centroid = len(self.centroid_thresholds)
-        self.raycast_dim = 34  # default; overwritten in init_metrics from model head
+        self.raycast_dim = 2 + _val_const.N_RAYS  # default; overwritten in init_metrics from model head
 
     def preprocess(self, batch):
         """Move batch to device without /255 — images already normalised by RayCastTileDataset.
@@ -191,11 +193,11 @@ class RayCastValidator(DetectionValidator):
                 head = child[-1]
                 break
             head = child
-        self.raycast_dim = getattr(head, 'raycast_dim', 34)
-        self.n_rays = getattr(head, 'n_rays', 32)
+        self.raycast_dim = getattr(head, 'raycast_dim', 2 + _val_const.N_RAYS)
+        self.n_rays = getattr(head, 'n_rays', _val_const.N_RAYS)
 
     def finalize_metrics(self, *args, **kwargs):
-        """Skip confusion matrix plotting — incompatible with 34-dim polygon data."""
+        """Skip confusion matrix plotting — incompatible with raycast polygon data."""
 
     def postprocess(self, preds):
         """Extract polygon predictions from end-to-end model output (no NMS).

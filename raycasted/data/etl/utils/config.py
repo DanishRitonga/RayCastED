@@ -71,10 +71,6 @@ class TrainingSettings(BaseModel):
     translate_augment: bool = True  # random translation augmentation
     translate_range: float = 0.1  # fraction of crop_size
 
-    # Soft polar centerness (PolarMask++)
-    soft_polar_centerness: bool = True  # add centerness prediction branch
-    centerness_weight: float = 1.0  # BCE loss weight for centerness term
-
     inference_conf: float = 0.20  # confidence threshold at inference
 
     refinement_kernel_size: int = 3  # kernel size for polygon refinement block
