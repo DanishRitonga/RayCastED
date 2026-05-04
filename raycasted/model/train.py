@@ -297,7 +297,15 @@ class RayCastTrainer(DetectionTrainer):
 
         # Replace Detect head → RayCastDetect
         old_head = model.model[-1]
-        if not isinstance(old_head, RayCastDetect):
+        if isinstance(old_head, RayCastDetect):
+            # YAML already specifies RayCastDetect — ensure n_rays matches
+            # the configured value (YAML args don't include n_rays, so it
+            # may have been created with the wrong default).
+            if old_head.n_rays != _const.N_RAYS:
+                old_head.n_rays = _const.N_RAYS
+                old_head.raycast_dim = 2 + _const.N_RAYS
+                old_head.no = old_head.nc + old_head.raycast_dim
+        else:
             ch = _extract_neck_channels(old_head)
             nc = old_head.nc
             n_rays = _const.N_RAYS

@@ -121,7 +121,7 @@ class RayCastDetect(Detect):
         reg_max: int = 16,
         end2end: bool = False,
         ch: tuple = (),
-        n_rays: int = 32,
+        n_rays: int | None = None,
         head_channel_scale: float = 0.5,
         head_channel_min: int = 64,
         refinement_kernel_size: int = 3,
@@ -140,8 +140,8 @@ class RayCastDetect(Detect):
                 3 = standard RayRefinementBlock (default).
                 7 or 13 = LargeKernelRefinementBlock (LKCell-style, wider receptive field).
         """
-        self.n_rays = n_rays
-        self.raycast_dim = 2 + n_rays  # xy + rays
+        self.n_rays = n_rays if n_rays is not None else _const.N_RAYS
+        self.raycast_dim = 2 + self.n_rays  # xy + rays
         self._end2end_arg = end2end  # store before parent __init__ (end2end is a property)
 
         super().__init__(nc, reg_max, end2end, ch)
