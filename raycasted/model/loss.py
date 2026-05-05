@@ -3,6 +3,10 @@
 5-term polygon loss:
   L = λ_xy × L_xy + λ_cls × L_cls + λ_L1 × L_L1 + λ_piou × L_PolarIoU + λ_smooth × L_smooth
 
+With GradNorm enabled, the static λ values are replaced by dynamic weights
+that equalise gradient norms across all 5 tasks, preventing cls_loss from
+dominating the shared backbone gradients.
+
 RayCastDetectionLoss subclasses v8DetectionLoss, replacing bbox/DFL logic
 with polygon regression terms.
 RayCastE2ELoss subclasses E2ELoss, wiring RayCastDetectionLoss
@@ -13,9 +17,14 @@ to be severely harmful for polygon detection (precision collapse, F1 drop
 from 0.73 to 0.41). See ablation runs with Run 27 architecture.
 """
 
+from __future__ import annotations
+
+import logging
 from functools import partial
+from typing import TYPE_CHECKING
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from ultralytics.utils.loss import E2ELoss, v8DetectionLoss
 from ultralytics.utils.tal import make_anchors
@@ -23,6 +32,159 @@ from ultralytics.utils.tal import make_anchors
 from raycasted.data.etl.ops.iou import polar_iou_torch
 from raycasted.data.etl.ops.loss import angular_smoothness_loss_torch
 from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
+
+if TYPE_CHECKING:
+    pass
+
+logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  GradNorm — Gradient Normalisation for Multi-Task Loss Balancing
+# ──────────────────────────────────────────────────────────────────────
+
+_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth')
+
+
+class GradNormManager:
+    """Per-task gradient-norm equalisation (Chen et al., 2018).
+
+    Uses the loss-ratio approximation (r_i = L_i(t) / L_i(0)) to estimate
+    per-task gradient norms without requiring per-task backward passes.
+    After every training step call :meth:`update` to re-balance the loss
+    weights so that all tasks contribute equal gradient magnitude to the
+    shared backbone.
+
+    The algorithm targets:
+
+        G_i(t) = Ḡ(t) × [ r_i(t) ]^α
+
+    where r_i = L_i(t) / L_i(0) is the inverse training rate and α
+    controls how aggressively slow learners are boosted (0 = uniform,
+    1 = full inverse-rate scaling).
+
+    Parameters
+    ----------
+    model : nn.Module
+        The full detection model (``model.model`` is the nn.Sequential).
+    num_tasks : int
+        Number of scalar loss terms (default 5).
+    alpha : float
+        GradNorm restoring force.  Higher → more aggressive rebalancing.
+        Recommended: 0.5 for well-behaved losses, up to 1.0 for extreme
+        imbalance.
+    initial_weights : list[float] | None
+        Starting λ values.  ``None`` uses ``[1.0] * num_tasks``.
+    warmup_epochs : int
+        Number of epochs before GradNorm activates.  During warmup,
+        static weights from ``initial_weights`` are used.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        num_tasks: int = 5,
+        alpha: float = 0.5,
+        initial_weights: list[float] | None = None,
+        warmup_epochs: int = 5,
+    ):
+        self.num_tasks = num_tasks
+        self.alpha = alpha
+        self.task_names = _TASK_NAMES[:num_tasks]
+
+        # ── learnable log-weights ──
+        init = initial_weights or [1.0] * num_tasks
+        self.log_weights = nn.Parameter(
+            torch.tensor(init, dtype=torch.float32).log(),
+            requires_grad=True,
+        )
+
+        # ── tracking state ──
+        self.initial_losses: torch.Tensor | None = None
+        self._current_losses: torch.Tensor | None = None
+        self._step_count = 0
+        self._warmup_epochs = warmup_epochs
+
+    # ── dynamic enabled (warmup gate) ──────────────────────────────
+
+    @property
+    def enabled(self) -> bool:
+        """GradNorm is active only after warmup completes."""
+        return self._step_count >= self._warmup_epochs
+
+    # ── forward-pass loss storage ──────────────────────────────────
+
+    def store_losses(self, losses: torch.Tensor) -> None:
+        """Store per-task losses from the current forward pass.
+
+        Called from RayCastDetectionLoss.__call__ BEFORE weight
+        application so that update() can compute loss ratios.
+
+        On the first call after warmup, these become the baseline
+        L_i(0) for the inverse training rate r_i = L_i(t) / L_i(0).
+
+        Args:
+            losses: [5] tensor of unweighted per-task losses.
+        """
+        self._current_losses = losses.detach().clone()
+        if self.initial_losses is None and self.enabled:
+            self.initial_losses = self._current_losses.clone()
+            logger.info('GradNorm: initial losses set — %s', self._current_losses.tolist())
+
+    # ── weight computation ─────────────────────────────────────────
+
+    def get_weights(self) -> torch.Tensor:
+        """Return normalised dynamic weights: softmax(log_w) × num_tasks."""
+        return F.softmax(self.log_weights, dim=0) * self.num_tasks
+
+    # ── GradNorm update (called from on_train_batch_end callback) ─
+
+    def update(self) -> None:
+        """Update log-weights using the loss-ratio method.
+
+        Uses r_i = L_i(t) / L_i(0) as a proxy for per-task gradient
+        norms (Chen et al., 2018 §4.2).  Computes target gradient
+        norms G_i* = Ḡ × r_i^α and nudges weights so that each
+        task contributes equal gradient magnitude.
+        """
+        if not self.enabled:
+            self._step_count += 1
+            return
+        if self._current_losses is None or self.initial_losses is None:
+            return
+
+        with torch.no_grad():
+            r = self._current_losses / (self.initial_losses + 1e-8)
+            r = r.clamp(min=0.01, max=100.0)
+            r_avg = r.mean()
+            r_rel = r / (r_avg + 1e-8)
+
+            # Target: tasks that learned slowly (high r_rel) get boosted
+            grad_w = 1.0 - (r_rel ** self.alpha)
+            grad_w = grad_w - grad_w.mean()  # zero-centre
+
+            lr = 0.025
+            new_log_w = self.log_weights - lr * grad_w.to(self.log_weights.device)
+            self.log_weights.data = 0.9 * self.log_weights.data + 0.1 * new_log_w
+            self.log_weights.data.clamp_(-5.0, 5.0)
+
+        self._step_count += 1
+
+    # ── initial loss setter (optional, for resume) ─────────────────
+
+    def set_initial_losses(self, losses: torch.Tensor) -> None:
+        """Override initial losses (e.g. on resume from checkpoint)."""
+        self.initial_losses = losses.detach().clone()
+
+    # ── logging ────────────────────────────────────────────────────
+
+    def log_state(self) -> dict[str, float]:
+        """Return a dict of current state for logging."""
+        w = self.get_weights().detach().cpu()
+        return {
+            f'gradnorm/{name}': w[i].item()
+            for i, name in enumerate(self.task_names)
+        }
 
 
 def _log_space_ray_loss(pred_rays: torch.Tensor, target_rays: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
@@ -72,6 +234,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         assigner_alpha: float = 0.5,
         assigner_beta: float = 6.0,
         log_ray_loss: bool = False,
+        gradnorm_manager: GradNormManager | None = None,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -81,6 +244,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # Log-space ray loss configuration
         self.log_ray_loss = log_ray_loss
+
+        # GradNorm integration — dynamic loss weight balancing
+        self.gradnorm_manager = gradnorm_manager
 
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
@@ -242,12 +408,25 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[3] += (pred_rays * 0).sum()
             loss[4] += (pred_rays * 0).sum()
 
+        # --- Store unweighted per-task losses for GradNorm ---
+        if self.gradnorm_manager is not None:
+            self.gradnorm_manager.store_losses(loss.detach())
+
         # --- Apply loss weights ---
-        loss[0] *= self.lambda_xy
-        loss[1] *= self.lambda_cls
-        loss[2] *= self.lambda_l1
-        loss[3] *= self.lambda_piou
-        loss[4] *= self.lambda_smooth
+        # If GradNorm is active, use its dynamic weights; otherwise use static lambdas.
+        if self.gradnorm_manager is not None and self.gradnorm_manager.enabled:
+            w = self.gradnorm_manager.get_weights()  # [5]
+            loss[0] *= w[0]
+            loss[1] *= w[1]
+            loss[2] *= w[2]
+            loss[3] *= w[3]
+            loss[4] *= w[4]
+        else:
+            loss[0] *= self.lambda_xy
+            loss[1] *= self.lambda_cls
+            loss[2] *= self.lambda_l1
+            loss[3] *= self.lambda_piou
+            loss[4] *= self.lambda_smooth
 
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
@@ -257,11 +436,16 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
 
 class RayCastE2ELoss(E2ELoss):
-    """E2E dual-assignment loss with smoothness annealing.
+    """E2E dual-assignment loss with smoothness annealing and GradNorm.
 
     Wires RayCastDetectionLoss into both one2many and one2one branches.
     Smoothness lambda anneals from smooth_start to smooth_end over
     smooth_anneal_epochs. Inherits o2m/o2o weight decay from parent.
+
+    When ``gradnorm=True``, replaces static λ weights with GradNorm
+    (Chen et al., 2018) dynamic weights that equalise gradient norms
+    across all 5 tasks, preventing cls_loss from dominating the shared
+    backbone.
     """
 
     def __init__(
@@ -275,7 +459,21 @@ class RayCastE2ELoss(E2ELoss):
         use_hungarian_o2o: bool = True,
         log_ray_loss: bool = False,
         centroid_sigma: float = 0.05,
+        gradnorm: bool = False,
+        gradnorm_alpha: float = 0.5,
+        gradnorm_warmup_epochs: int = 5,
     ):
+        # --- GradNorm manager (created before loss_fn so branches can reference it) ---
+        self.gradnorm_manager: GradNormManager | None = None
+        if gradnorm:
+            self.gradnorm_manager = GradNormManager(
+                model=model,
+                num_tasks=5,
+                alpha=gradnorm_alpha,
+                warmup_epochs=gradnorm_warmup_epochs,
+            )
+            logger.info('GradNorm enabled: α=%.2f, warmup=%d epochs', gradnorm_alpha, gradnorm_warmup_epochs)
+
         # Bind training config to RayCastDetectionLoss so E2ELoss passes it through
         loss_fn = partial(
             RayCastDetectionLoss,
@@ -284,6 +482,7 @@ class RayCastE2ELoss(E2ELoss):
             assigner_alpha=assigner_alpha,
             assigner_beta=assigner_beta,
             log_ray_loss=log_ray_loss,
+            gradnorm_manager=self.gradnorm_manager,
         )
         super().__init__(model, loss_fn=loss_fn)
 

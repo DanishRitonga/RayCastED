@@ -169,6 +169,9 @@ class _RayCastCriterionWrapper:
             use_hungarian_o2o=tcfg.get('use_hungarian_o2o', True),
             log_ray_loss=tcfg.get('log_ray_loss', False),
             centroid_sigma=tcfg.get('centroid_sigma', 0.05),
+            gradnorm=tcfg.get('gradnorm', False),
+            gradnorm_alpha=tcfg.get('gradnorm_alpha', 0.5),
+            gradnorm_warmup_epochs=tcfg.get('gradnorm_warmup_epochs', 5),
         )
 
 
@@ -240,6 +243,20 @@ class RayCastDetectionModel(DetectionModel):
             LOGGER.info('')
 
 
+def _gradnorm_update_callback(trainer):
+    """Update GradNorm weights after each training step.
+
+    Called via on_train_batch_end.  Accesses the GradNormManager through
+    the criterion (RayCastE2ELoss) attached to the model.
+    """
+    criterion = getattr(trainer, 'criterion', None)
+    if criterion is None:
+        return
+    gn = getattr(criterion, 'gradnorm_manager', None)
+    if gn is not None:
+        gn.update()
+
+
 class RayCastTrainer(DetectionTrainer):
     """Training pipeline for RayCastED polygon detection model.
 
@@ -270,6 +287,9 @@ class RayCastTrainer(DetectionTrainer):
         self.args.mosaic = 0.0
         self.args.mixup = 0.0
         self.training_config = training_config  # dict or None
+
+        # Register GradNorm callback — updates dynamic loss weights after each step
+        self.add_callback('on_train_batch_end', _gradnorm_update_callback)
 
     def plot_training_labels(self):
         """Skip standard bbox label plotting — incompatible with raycast polygon data."""
