@@ -25,6 +25,17 @@ uv run python -m raycasted.pipeline --config main/dataset.yaml --output output/ 
 uv run python -m raycasted.pipeline --config main/dataset.yaml --output output/ --stage train --epochs 50
 ```
 
+## Training Workflow
+
+**The user trains on a separate GPU device.** Do NOT launch training commands (e.g. `--stage train`) from this agent session. Instead:
+
+1. Update `main/pannuke.yaml` (or the relevant config) with the new model YAML path.
+2. Inform the user the config is ready — they will run training themselves, typically:
+   ```bash
+   uv run python -m raycasted.pipeline --config main/pannuke.yaml --output output/<RunName> --epochs 500 --device 0 --stage train
+   ```
+3. The pipeline uses ultralytics' built-in resume from `last.pt` — if training is interrupted, re-running the same command resumes from the last checkpoint.
+
 ## Code Style
 
 **Ruff config** (`pyproject.toml`): line length 120, single quotes, Google-style docstrings, isort with `raycasted` as first-party.
