@@ -134,8 +134,14 @@ class GradNormManager:
     # ── weight computation ─────────────────────────────────────────
 
     def get_weights(self) -> torch.Tensor:
-        """Return normalised dynamic weights: softmax(log_w) × num_tasks."""
-        return F.softmax(self.log_weights, dim=0) * self.num_tasks
+        """Return unnormalised dynamic weights (clamped to [0.1, 10.0]).
+
+        Unlike softmax-normalised GradNorm, these weights are NOT
+        constrained to sum to num_tasks.  This allows slow learners
+        (e.g. cls) to receive unconstrained weight growth without
+        starving fast learners of gradient signal.
+        """
+        return self.log_weights.exp().clamp(0.1, 10.0)
 
     # ── GradNorm update (called from on_train_batch_end callback) ─
 
@@ -154,19 +160,22 @@ class GradNormManager:
             return
 
         with torch.no_grad():
+            w = self.log_weights.exp()
             r = self._current_losses / (self.initial_losses + 1e-8)
             r = r.clamp(min=0.01, max=100.0)
             r_avg = r.mean()
             r_rel = r / (r_avg + 1e-8)
 
             # Target: tasks that learned slowly (high r_rel) get boosted
-            grad_w = 1.0 - (r_rel ** self.alpha)
+            grad_w = 1.0 - (r_rel**self.alpha)
+            # Decay toward 1.0 to prevent unbounded growth (no normalization)
+            grad_w = grad_w + 0.02 * (1.0 - w)
             grad_w = grad_w - grad_w.mean()  # zero-centre
 
             lr = 0.025
             new_log_w = self.log_weights - lr * grad_w.to(self.log_weights.device)
             self.log_weights.data = 0.9 * self.log_weights.data + 0.1 * new_log_w
-            self.log_weights.data.clamp_(-5.0, 5.0)
+            self.log_weights.data.clamp_(-2.3, 2.3)  # e^-2.3≈0.1 to e^2.3≈10.
 
         self._step_count += 1
 
@@ -181,10 +190,7 @@ class GradNormManager:
     def log_state(self) -> dict[str, float]:
         """Return a dict of current state for logging."""
         w = self.get_weights().detach().cpu()
-        return {
-            f'gradnorm/{name}': w[i].item()
-            for i, name in enumerate(self.task_names)
-        }
+        return {f'gradnorm/{name}': w[i].item() for i, name in enumerate(self.task_names)}
 
 
 def _log_space_ray_loss(pred_rays: torch.Tensor, target_rays: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
@@ -263,10 +269,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # xy and L1 both produce tiny raw values (Huber on normalised coords, log-space rays),
         # so both need high lambda to contribute meaningfully.
         # smooth starts at 0, reverse-anneals to peak over 40% of training (shape prior).
-        self.lambda_cls = 2.0    # classification (23-28% of task gradient)
-        self.lambda_xy = 15.0    # centroid (45-50% of task gradient)
-        self.lambda_l1 = 25.0    # ray accuracy (25-30% of task gradient)
-        self.lambda_piou = 2.0   # shape IoU (1-2% of task gradient)
+        self.lambda_cls = 2.0  # classification (23-28% of task gradient)
+        self.lambda_xy = 15.0  # centroid (45-50% of task gradient)
+        self.lambda_l1 = 25.0  # ray accuracy (25-30% of task gradient)
+        self.lambda_piou = 2.0  # shape IoU (1-2% of task gradient)
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss (0 → 1.0 over 40% of training)
 
     def preprocess(self, targets, batch_size, scale_tensor=None):
@@ -545,8 +551,8 @@ class RayCastE2ELoss(E2ELoss):
         # Smooth loss: reverse anneal — starts at 0, ramps up to peak, then holds.
         # Early training: model focuses on detection (xy, cls, L1).
         # After ramp: smoothness pressure helps refine polygon boundaries.
-        self.smooth_start = 0.0       # initial value (no smoothness pressure)
-        self.smooth_end = 1.0         # peak value (meaningful shape prior)
+        self.smooth_start = 0.0  # initial value (no smoothness pressure)
+        self.smooth_end = 1.0  # peak value (meaningful shape prior)
         self.smooth_anneal_fraction = 0.4  # ramp over first 40% of training
         self.smooth_anneal_epochs = max(1, int(max_epochs * self.smooth_anneal_fraction))
 
