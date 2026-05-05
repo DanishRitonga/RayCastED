@@ -1,12 +1,16 @@
 """RayCastED — RayCast Detection Loss (Phase 6).
 
-6-term polygon loss:
-  L = λ_cls × L_cls + λ_xy × L_xy + λ_L1 × L_L1 + λ_piou × L_PolarIoU + λ_smooth × L_smooth + λ_ct × L_ct
+5-term polygon loss:
+  L = λ_xy × L_xy + λ_cls × L_cls + λ_L1 × L_L1 + λ_piou × L_PolarIoU + λ_smooth × L_smooth
 
 RayCastDetectionLoss subclasses v8DetectionLoss, replacing bbox/DFL logic
 with polygon regression terms.
 RayCastE2ELoss subclasses E2ELoss, wiring RayCastDetectionLoss
 into both one2many/one2one branches with smoothness annealing.
+
+Classification loss: BCE only. Focal loss and QFL were tested and found
+to be severely harmful for polygon detection (precision collapse, F1 drop
+from 0.73 to 0.41). See ablation runs with Run 27 architecture.
 """
 
 from functools import partial
@@ -49,10 +53,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
     """Polygon detection loss with 5 terms.
 
     Replaces v8DetectionLoss bbox/DFL terms:
-      L_cls     — BCE or Focal on classification scores
-      L_xy      — Huber(δ=0.01) on decoded centroid
-      L_L1      — Uniform MAE on 32 rays (linear or log-space)
-      L_PolarIoU — 1 - PolarIoU
+      L_cls     — BCE on classification scores
+      L_xy      — Huber on decoded centroid
+      L_L1      — Log-space L1 on ray distances
+      L_PolarIoU — -log(PolarIoU)
       L_smooth  — Angular smoothness regularisation (annealed)
 
     Inherits assignment framework from v8DetectionLoss, replacing
@@ -67,9 +71,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         assigner_radius_scale: float = 1.5,
         assigner_alpha: float = 0.5,
         assigner_beta: float = 6.0,
-        focal_loss: bool = False,
-        focal_gamma: float = 2.0,
-        quality_focal_loss: bool = False,
         log_ray_loss: bool = False,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
@@ -77,13 +78,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.raycast_dim = m.raycast_dim  # 2 + n_rays
         self.no = m.nc + self.raycast_dim  # BUG-02 fix (parent sets nc + reg_max*4)
         self.use_dfl = False  # DFL not applicable to polygon regression
-
-        # Focal loss configuration
-        self.focal_loss = focal_loss
-        self.focal_gamma = focal_gamma
-
-        # Quality focal loss configuration
-        self.quality_focal_loss = quality_focal_loss
 
         # Log-space ray loss configuration
         self.log_ray_loss = log_ray_loss
@@ -99,14 +93,15 @@ class RayCastDetectionLoss(v8DetectionLoss):
             radius_scale=assigner_radius_scale,
         )
 
-        # Loss weights for topk=1 NMS-free detection
-        # Focus on direct ray regression rather than strict IoU supervision
-        self.lambda_cls = 0.5
-        self.lambda_xy = 50.0  # Huber(delta=0.01) on normalised coords produces tiny
-        # gradients; high lambda ensures the optimizer sees centroid errors.
-        self.lambda_l1 = 5.0  # Very strong direct ray supervision (replaces strict IoU)
-        self.lambda_piou = 0.5  # Minimal IoU supervision (mainly for ranking)
-        self.lambda_smooth = 0.05  # annealed by RayCastE2ELoss
+        # Loss weights (rebalanced so xy and L1 share gradient signal equally)
+        # xy and L1 both produce tiny raw values (Huber on normalised coords, log-space rays),
+        # so both need high lambda to contribute meaningfully.
+        # smooth starts at 0, reverse-anneals to peak over 40% of training (shape prior).
+        self.lambda_cls = 2.0    # classification (23-28% of task gradient)
+        self.lambda_xy = 15.0    # centroid (45-50% of task gradient)
+        self.lambda_l1 = 25.0    # ray accuracy (25-30% of task gradient)
+        self.lambda_piou = 2.0   # shape IoU (1-2% of task gradient)
+        self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss (0 → 1.0 over 40% of training)
 
     def preprocess(self, targets, batch_size, scale_tensor=None):
         """Preprocess polygon targets.
@@ -201,38 +196,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         target_scores_sum = max(target_scores.sum(), 1)
 
-        # --- Pre-compute IoU for QFL (before cls loss, detached for quality target) ---
-        fg_piou_detached = None
-        if self.quality_focal_loss and fg_mask.sum():
-            fg_piou_detached = polar_iou_torch(
-                pred_rays[fg_mask].float(), target_bboxes[fg_mask][:, 2:].float()
-            ).detach()
-
-        # --- L_cls (term 1) ---
-        # Cast to float32 for numerical stability under AMP/FP16 validation
-        pred_f = pred_scores.float()
-        target_f = target_scores.float()
-        if self.quality_focal_loss:
-            # QFL: |σ - ŷ|^γ × BCE(z, σ)
-            # σ = IoU for positive assigned class, 0 otherwise
-            # ŷ = sigmoid(z) = predicted probability
-            qfl_target = torch.zeros_like(target_f)
-            if fg_mask.sum():
-                fg_target_cls = target_f[fg_mask]  # [N_fg, nc]
-                fg_assigned_cls = fg_target_cls.argmax(dim=-1)  # [N_fg]
-                fg_quality = torch.zeros_like(fg_target_cls)
-                fg_quality.scatter_(1, fg_assigned_cls.unsqueeze(-1), fg_piou_detached.unsqueeze(-1))
-                qfl_target[fg_mask] = fg_quality
-            pred_prob = pred_f.sigmoid()
-            modulating = (qfl_target - pred_prob).abs().pow(self.focal_gamma)
-            bce = F.binary_cross_entropy_with_logits(pred_f, qfl_target, reduction='none')
-            loss[1] = (modulating * bce).sum() / target_scores_sum
-        elif self.focal_loss:
-            bce = F.binary_cross_entropy_with_logits(pred_f, target_f, reduction='none')
-            pt = torch.exp(-bce)
-            loss[1] = (((1 - pt) ** self.focal_gamma) * bce).sum() / target_scores_sum
-        else:
-            loss[1] = self.bce(pred_f, target_f).sum() / target_scores_sum
+        # --- L_cls: BCE only (focal/QFL tested and found harmful) ---
+        loss[1] = self.bce(pred_scores.float(), target_scores.float()).sum() / target_scores_sum
 
         # --- Polygon regression losses (foreground only) ---
         if fg_mask.sum():
@@ -307,9 +272,6 @@ class RayCastE2ELoss(E2ELoss):
         assigner_radius_scale: float = 1.5,
         assigner_alpha: float = 0.5,
         assigner_beta: float = 6.0,
-        focal_loss: bool = False,
-        focal_gamma: float = 2.0,
-        quality_focal_loss: bool = False,
         use_hungarian_o2o: bool = True,
         log_ray_loss: bool = False,
         centroid_sigma: float = 0.05,
@@ -321,9 +283,6 @@ class RayCastE2ELoss(E2ELoss):
             assigner_radius_scale=assigner_radius_scale,
             assigner_alpha=assigner_alpha,
             assigner_beta=assigner_beta,
-            focal_loss=focal_loss,
-            focal_gamma=focal_gamma,
-            quality_focal_loss=quality_focal_loss,
             log_ray_loss=log_ray_loss,
         )
         super().__init__(model, loss_fn=loss_fn)
@@ -384,9 +343,12 @@ class RayCastE2ELoss(E2ELoss):
         assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
             f'E2E violation: one2many.topk2 ({self.one2many.assigner.topk2}) != topk ({self.one2many.assigner.topk})'
         )
-        self.smooth_start = 0.05
-        self.smooth_end = 0.0
-        self.smooth_anneal_fraction = 0.3  # anneal over first 30% of training
+        # Smooth loss: reverse anneal — starts at 0, ramps up to peak, then holds.
+        # Early training: model focuses on detection (xy, cls, L1).
+        # After ramp: smoothness pressure helps refine polygon boundaries.
+        self.smooth_start = 0.0       # initial value (no smoothness pressure)
+        self.smooth_end = 1.0         # peak value (meaningful shape prior)
+        self.smooth_anneal_fraction = 0.4  # ramp over first 40% of training
         self.smooth_anneal_epochs = max(1, int(max_epochs * self.smooth_anneal_fraction))
 
     def update(self):
@@ -413,7 +375,8 @@ class RayCastE2ELoss(E2ELoss):
                 f'E2E violation: one2many topk={self.one2many.assigner.topk} != topk2={self.one2many.assigner.topk2}'
             )
 
-        delta = (self.smooth_start - self.smooth_end) / self.smooth_anneal_epochs
-        new_lambda = max(self.smooth_end, self.smooth_start - delta * self.updates)
+        # Reverse anneal: ramp from smooth_start → smooth_end over smooth_anneal_epochs
+        t = min(self.updates / self.smooth_anneal_epochs, 1.0)
+        new_lambda = self.smooth_start + t * (self.smooth_end - self.smooth_start)
         self.one2many.lambda_smooth = new_lambda
         self.one2one.lambda_smooth = new_lambda

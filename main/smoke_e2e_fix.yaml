@@ -20,7 +20,6 @@ training:
   # CRITICAL: E2E dual-assignment fix
   tal_topk: 13              # NEW: Controls one2many branch (was assigner_topk)
   assigner_radius_scale: 1.5
-  focal_loss: false         # BCE loss (baseline)
   cos_lr: true
 
   # Minimal augmentation for smoke test

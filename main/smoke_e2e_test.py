@@ -19,7 +19,6 @@ def main():
     training_config = {
         'tal_topk': 13,  # NEW parameter name
         'assigner_radius_scale': 1.5,
-        'focal_loss': False,
     }
 
     trainer = RayCastTrainer(

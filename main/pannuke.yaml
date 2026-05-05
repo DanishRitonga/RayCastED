@@ -54,10 +54,8 @@ training:
   assigner_beta: 6.0          # iou^beta in alignment metric (try 3.0-4.0 for dense scenes)
   use_hungarian_o2o: true     # Hungarian matching for one2one branch (globally optimal)
 
-  # Classification loss
-  focal_loss: false          # BCE loss (baseline)
-  focal_gamma: 2.0           # focal loss gamma (unused when focal_loss=false)
-  quality_focal_loss: false  # QFL is harmful with IoU-based assignment
+  # Classification loss (BCE only — focal and QFL tested, both harmful)
+  # focal_loss, focal_gamma, quality_focal_loss removed from codebase
 
   # Augmentation (polygon-safe)
   stain_jitter: true         # HSV color jitter for histopathology. Was false

@@ -52,10 +52,7 @@ class TrainingSettings(BaseModel):
     assigner_topk: int = 20  # positive anchors per GT. Was 13
     assigner_radius_scale: float = 2.0  # containment radius multiplier. Was 1.5
 
-    # Classification loss
-    focal_loss: bool = True  # use focal loss instead of BCE. Was False
-    focal_gamma: float = 2.0  # focal loss gamma
-    quality_focal_loss: bool = False  # QFL is HARMFUL with IoU-based assignment. Do not enable.
+    # Classification loss — BCE only (focal/QFL tested, both harmful)
 
     # Augmentation (polygon-safe)
     stain_jitter: bool = True  # HSV color jitter for histopathology

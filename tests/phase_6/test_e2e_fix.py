@@ -124,15 +124,16 @@ def test_e2e_default_parameters_match_baseline():
     # Test with defaults (no parameters specified)
     e2e = RayCastE2ELoss(model)
 
-    # Check loss defaults (updated for dense cell optimization)
-    assert not e2e.one2many.focal_loss, f'Default focal_loss should be False, got {e2e.one2many.focal_loss}'
+    # Check loss defaults (rebalanced: xy and L1 share gradient equally)
     assert e2e.one2many.assigner.radius_scale == 1.5, (
         f'Default radius_scale should be 1.5, got {e2e.one2many.assigner.radius_scale}'
     )
     assert e2e.one2many.assigner.topk == 13, f'Default tal_topk should be 13, got {e2e.one2many.assigner.topk}'
-    assert e2e.one2many.lambda_l1 == 5.0, f'Default lambda_l1 should be 5.0 (LSP-DETR), got {e2e.one2many.lambda_l1}'
-    assert e2e.one2many.lambda_piou == 0.5, (
-        f'Default lambda_piou should be 0.5 (minimal for topk=1), got {e2e.one2many.lambda_piou}'
+    assert e2e.one2many.lambda_l1 == 25.0, f'Default lambda_l1 should be 25.0, got {e2e.one2many.lambda_l1}'
+    assert e2e.one2many.lambda_xy == 15.0, f'Default lambda_xy should be 15.0, got {e2e.one2many.lambda_xy}'
+    assert e2e.one2many.lambda_cls == 2.0, f'Default lambda_cls should be 2.0, got {e2e.one2many.lambda_cls}'
+    assert e2e.one2many.lambda_piou == 2.0, (
+        f'Default lambda_piou should be 2.0, got {e2e.one2many.lambda_piou}'
     )
     assert e2e.one2many.assigner.alpha == 0.5, f'Default alpha should be 0.5, got {e2e.one2many.assigner.alpha}'
     assert e2e.one2many.assigner.beta == 6.0, f'Default beta should be 6.0, got {e2e.one2many.assigner.beta}'
