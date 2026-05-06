@@ -169,9 +169,13 @@ class _RayCastCriterionWrapper:
             use_hungarian_o2o=tcfg.get('use_hungarian_o2o', True),
             log_ray_loss=tcfg.get('log_ray_loss', False),
             centroid_sigma=tcfg.get('centroid_sigma', 0.05),
+            assigner_beta_start=tcfg.get('assigner_beta_start', 0.0),
+            assigner_centroid_sigma_start=tcfg.get('assigner_centroid_sigma_start', 0.5),
+            assigner_anneal_frac=tcfg.get('assigner_anneal_frac', 0.4),
             gradnorm=tcfg.get('gradnorm', False),
             gradnorm_alpha=tcfg.get('gradnorm_alpha', 0.5),
             gradnorm_warmup_epochs=tcfg.get('gradnorm_warmup_epochs', 5),
+            piou_annealing_frac=tcfg.get('piou_annealing_frac', 0.4),
         )
 
 
@@ -257,6 +261,18 @@ def _gradnorm_update_callback(trainer):
         gn.update()
 
 
+def _piou_annealing_callback(trainer):
+    """Set current epoch on criterion for piou reverse-annealing.
+
+    Called via on_train_epoch_start.  Updates the _epoch attribute on
+    RayCastE2ELoss so its update() method can propagate to inner losses.
+    """
+    criterion = getattr(trainer, 'criterion', None)
+    if criterion is None:
+        return
+    criterion._epoch = trainer.epoch
+
+
 class RayCastTrainer(DetectionTrainer):
     """Training pipeline for RayCastED polygon detection model.
 
@@ -290,6 +306,7 @@ class RayCastTrainer(DetectionTrainer):
 
         # Register GradNorm callback — updates dynamic loss weights after each step
         self.add_callback('on_train_batch_end', _gradnorm_update_callback)
+        self.add_callback('on_train_epoch_start', _piou_annealing_callback)
 
     def plot_training_labels(self):
         """Skip standard bbox label plotting — incompatible with raycast polygon data."""

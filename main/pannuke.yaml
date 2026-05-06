@@ -54,7 +54,10 @@ training:
   tal_topk: 13                # one2many positives per GT (was assigner_topk)
   assigner_radius_scale: 1.5  # containment radius multiplier
   assigner_alpha: 0.5         # cls^alpha in alignment metric
-  assigner_beta: 6.0          # iou^beta in alignment metric (try 3.0-4.0 for dense scenes)
+  assigner_beta: 3.0          # iou^beta in alignment metric (proven best from Run 11)
+  assigner_beta_start: 0.0          # Anneal beta: 0→3.0 (start with no IoU in cost)
+  assigner_centroid_sigma_start: 0.5 # Anneal sigma: 0.5→0.05 (wide Gaussian → tight)
+  assigner_anneal_frac: 0.4          # Ramp over first 40% of training (200 of 500 epochs)
   use_hungarian_o2o: true     # Hungarian matching for one2one branch (globally optimal)
 
   # Classification loss (BCE only — focal and QFL tested, both harmful)

@@ -241,6 +241,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         assigner_beta: float = 6.0,
         log_ray_loss: bool = False,
         gradnorm_manager: GradNormManager | None = None,
+        max_epochs: int = 200,
+        piou_annealing_frac: float = 0.0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -253,6 +255,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # GradNorm integration — dynamic loss weight balancing
         self.gradnorm_manager = gradnorm_manager
+
+        # Piou reverse-annealing: ramp from 0→1 over first piou_annealing_frac of training
+        self.max_epochs = max_epochs
+        self.piou_annealing_frac = piou_annealing_frac
+        self._current_epoch = 0
 
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
@@ -274,6 +281,22 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.lambda_l1 = 25.0  # ray accuracy (25-30% of task gradient)
         self.lambda_piou = 2.0  # shape IoU (1-2% of task gradient)
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss (0 → 1.0 over 40% of training)
+
+    @property
+    def piou_weight(self) -> float:
+        """Ramp from 0→1 over first piou_annealing_frac fraction of training."""
+        if self.piou_annealing_frac <= 0:
+            return 1.0
+        anneal_epochs = int(self.max_epochs * self.piou_annealing_frac)
+        if self._current_epoch >= anneal_epochs:
+            return 1.0
+        w = self._current_epoch / max(anneal_epochs, 1)
+        if self._current_epoch == 0:
+            logger.info(
+                'Piou annealing: ramping 0→1 over %d epochs (%.0f%% of training)',
+                anneal_epochs, self.piou_annealing_frac * 100,
+            )
+        return w
 
     def preprocess(self, targets, batch_size, scale_tensor=None):
         """Preprocess polygon targets.
@@ -434,6 +457,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[3] *= self.lambda_piou
             loss[4] *= self.lambda_smooth
 
+        # --- Piou reverse-annealing: ramp from 0→1 over first N% of training ---
+        loss[3] *= self.piou_weight
+
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
             loss,
@@ -462,12 +488,19 @@ class RayCastE2ELoss(E2ELoss):
         assigner_radius_scale: float = 1.5,
         assigner_alpha: float = 0.5,
         assigner_beta: float = 6.0,
+        assigner_beta_start: float = 0.0,
+        assigner_beta_end: float | None = None,
+        assigner_centroid_sigma: float = 0.05,
+        assigner_centroid_sigma_start: float = 0.5,
+        assigner_centroid_sigma_end: float | None = None,
+        assigner_anneal_frac: float = 0.4,
         use_hungarian_o2o: bool = True,
         log_ray_loss: bool = False,
         centroid_sigma: float = 0.05,
         gradnorm: bool = False,
         gradnorm_alpha: float = 0.5,
         gradnorm_warmup_epochs: int = 5,
+        piou_annealing_frac: float = 0.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -489,6 +522,8 @@ class RayCastE2ELoss(E2ELoss):
             assigner_beta=assigner_beta,
             log_ray_loss=log_ray_loss,
             gradnorm_manager=self.gradnorm_manager,
+            max_epochs=max_epochs,
+            piou_annealing_frac=piou_annealing_frac,
         )
         super().__init__(model, loss_fn=loss_fn)
 
@@ -526,10 +561,16 @@ class RayCastE2ELoss(E2ELoss):
                 num_classes=self.one2one.assigner.num_classes,
                 alpha=assigner_alpha,
                 beta=assigner_beta,
+                beta_start=assigner_beta_start,
+                beta_end=assigner_beta_end,
+                centroid_sigma=centroid_sigma,
+                centroid_sigma_start=assigner_centroid_sigma_start,
+                centroid_sigma_end=assigner_centroid_sigma_end,
+                max_epochs=max_epochs,
+                anneal_epochs=assigner_anneal_frac,
                 stride=self.one2one.assigner.stride if hasattr(self.one2one.assigner, 'stride') else [8, 16, 32],
                 topk2=1,
                 radius_scale=assigner_radius_scale,
-                centroid_sigma=centroid_sigma,
             )
         else:
             one2one_pool = max(tal_topk // 2, 7)  # candidate pool for one2one
@@ -585,3 +626,12 @@ class RayCastE2ELoss(E2ELoss):
         new_lambda = self.smooth_start + t * (self.smooth_end - self.smooth_start)
         self.one2many.lambda_smooth = new_lambda
         self.one2one.lambda_smooth = new_lambda
+
+        # Update piou annealing epoch on inner loss instances
+        epoch = getattr(self, '_epoch', 0)
+        for branch in (self.one2many, self.one2one):
+            if hasattr(branch, 'loss_fn') and hasattr(branch.loss_fn, '_current_epoch'):
+                branch.loss_fn._current_epoch = epoch
+            # Sync epoch to Hungarian assigner for beta/sigma annealing
+            if hasattr(branch, 'assigner') and hasattr(branch.assigner, '_current_epoch'):
+                branch.assigner._current_epoch = epoch

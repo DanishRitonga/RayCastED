@@ -127,6 +127,32 @@ All import paths must use these actual locations.
   - `lambda_piou=0.5` (minimal IoU, mainly for ranking)
   - This compensates for sparse assignment while maintaining NMS-free property.
 
+### LSP-DETR Baseline (PanNuke Fold3)
+Reference values from LSP-DETR author evaluation (source: `docs/ablation.md`):
+| Metric | LSP-DETR |
+|--------|----------|
+| AJI | 0.677 |
+| AP@0.5 | 0.691 |
+| AP@0.5:0.95 | 0.441 |
+| AP@0.7 | 0.563 |
+| AP@0.9 | 0.100 |
+| Precision | 0.862 |
+| Recall | 0.791 |
+| F1 (centroid) | 0.825 |
+| bDQ | 0.803 |
+| bSQ | 0.807 |
+| bPQ | 0.657 |
+| bMDQ | 0.811 |
+| bMSQ | 0.811 |
+| bMPQ | 0.666 |
+| mDQ | 0.581 |
+| mSQ | 0.672 |
+| mPQ | 0.476 |
+| mMDQ | 0.481 |
+| mMSQ | 0.676 |
+| mMPQ | 0.481 |
+⚠️ LSP-DETR F1 is centroid-based (Euclidean distance threshold). RayCastED ablation F1 is mask-based (DQ from PQ). Not directly comparable.
+
 ## Testing Strategy
 
 Tests are plain `assert`-based scripts organized by phase:

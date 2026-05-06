@@ -252,19 +252,68 @@ class HungarianRayCastAssigner(RayCastAssigner):
     Only overrides _forward to replace the selection mechanism.
     """
 
-    def __init__(self, centroid_sigma: float = 0.05, **kwargs):
+    def __init__(
+        self,
+        centroid_sigma: float = 0.05,
+        centroid_sigma_start: float = 0.5,
+        centroid_sigma_end: float | None = None,
+        beta_start: float = 0.0,
+        beta_end: float | None = None,
+        anneal_epochs: int = 0,
+        max_epochs: int = 200,
+        **kwargs,
+    ):
         """Initialize HungarianRayCastAssigner.
 
         Args:
-            centroid_sigma: Std dev for Gaussian center prior in normalised [0,1] space.
-                Controls how quickly score decays with anchor-GT centroid distance.
-                σ=0.05 → score=0.14 at dist=0.1 (10% of image).
-                σ=0.10 → score=0.61 at dist=0.1.
-                Set to 0 to disable the centroid prior.
-            **kwargs: Forwarded to RayCastAssigner (topk, num_classes, etc.).
+            centroid_sigma: Default std dev for Gaussian center prior (used as end if start given).
+            centroid_sigma_start: Initial std dev — wide Gaussian early for soft spatial matching.
+            centroid_sigma_end: Final std dev. Defaults to centroid_sigma.
+            beta_start: Initial beta (IoU exponent) — 0 disables IoU in cost early in training.
+            beta_end: Final beta. Defaults to kwargs['beta'] (6.0).
+            anneal_epochs: Fraction of max_epochs to ramp (0.0–1.0). 0 = no annealing.
+            max_epochs: Total training epochs.
+            **kwargs: Passed to parent RayCastAssigner (topk, num_classes, alpha, beta, etc.).
         """
+        self.centroid_sigma_end = centroid_sigma_end if centroid_sigma_end is not None else centroid_sigma
+        self.centroid_sigma_start = centroid_sigma_start
+        self.beta_end = beta_end if beta_end is not None else kwargs.get('beta', 6.0)
+        self.beta_start = beta_start
+        # anneal_epochs is a fraction (0–1) of max_epochs
+        self.anneal_epochs = max(1, int(max_epochs * anneal_epochs)) if anneal_epochs > 0 else 0
+        self._current_epoch = 0
         super().__init__(**kwargs)
-        self.centroid_sigma = centroid_sigma
+        # Override: store final centroid_sigma on instance for non-annealing fallback
+        self.centroid_sigma = self.centroid_sigma_end
+
+    @property
+    def _current_beta(self) -> float:
+        """Return the annealed beta (IoU exponent) for the current epoch."""
+        if self.anneal_epochs <= 0 or self._current_epoch >= self.anneal_epochs:
+            return self.beta_end
+        frac = self._current_epoch / self.anneal_epochs
+        return self.beta_start + frac * (self.beta_end - self.beta_start)
+
+    @property
+    def _current_sigma(self) -> float:
+        """Return the annealed centroid sigma for the current epoch."""
+        if self.anneal_epochs <= 0 or self._current_epoch >= self.anneal_epochs:
+            return self.centroid_sigma_end
+        frac = self._current_epoch / self.anneal_epochs
+        return self.centroid_sigma_start + frac * (self.centroid_sigma_end - self.centroid_sigma_start)
+
+    def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
+        """Override to use annealed beta instead of static self.beta.
+
+        Temporarily swaps self.beta to the current annealed value, delegates
+        to parent RayCastAssigner.get_box_metrics, then restores.
+        """
+        saved_beta = self.beta
+        self.beta = self._current_beta
+        try:
+            return super().get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt)
+        finally:
+            self.beta = saved_beta
 
     def _forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
         """Hungarian matching assignment — globally optimal 1:1 matching.
@@ -323,15 +372,16 @@ class HungarianRayCastAssigner(RayCastAssigner):
             pair_mask = mask_in_gts[b][valid_gt_idx[:, None], cand_idx[None, :]]
             cost = cost * pair_mask.float()
 
-            # Gaussian center prior: exp(-dist² / (2σ²))
-            # Multiplied into score so anchors closer to GT centroid rank higher.
-            # Critical in dense scenes where Polar-IoU alone can't resolve
-            # which anchor belongs to which GT (especially early in training).
-            if self.centroid_sigma > 0:
+            # Annealed Gaussian center prior: exp(-dist² / (2σ²))
+            # σ anneals from centroid_sigma_start (wide) → centroid_sigma_end (tight)
+            # over assigner_anneal_frac of training. Combined with beta annealing,
+            # this creates a curriculum: spatial-only matching → full geometric matching.
+            cur_sigma = self._current_sigma
+            if cur_sigma > 0:
                 gt_cx_cy = gt_bboxes[b, valid_gt_idx, :2]  # (n_valid_gt, 2)
                 anc_xy = anc_points[cand_idx]  # (n_cand, 2)
                 dist_sq = (gt_cx_cy[:, None, :] - anc_xy[None, :, :]).pow(2).sum(-1)  # (n_valid_gt, n_cand)
-                cost = cost * torch.exp(-dist_sq / (2 * self.centroid_sigma**2))
+                cost = cost * torch.exp(-dist_sq / (2 * cur_sigma**2))
 
             # Hungarian algorithm (minimise negative = maximise alignment)
             # For large matrices, fall back to top-1 greedy per GT
