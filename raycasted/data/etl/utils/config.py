@@ -70,7 +70,15 @@ class TrainingSettings(BaseModel):
 
     inference_conf: float = 0.20  # confidence threshold at inference
 
-    refinement_kernel_size: int = 3  # kernel size for polygon refinement block
+    refinement_kernel_size: int = 3
+
+    # Early stopping
+    patience: int = 100  # epochs with no improvement before stopping (default: 100)
+
+    # GradNorm — dynamic per-task loss weighting
+    gradnorm: bool = False  # enable GradNorm
+    gradnorm_alpha: float = 0.5  # restoring force: 0=uniform, 1=aggressive
+    gradnorm_warmup_epochs: int = 5  # use static weights for first N epochs  # kernel size for polygon refinement block
 
     # E2E dual-assignment (NMS-free)
     tal_topk: int = 13  # one2many positives per GT
