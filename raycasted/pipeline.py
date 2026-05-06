@@ -186,6 +186,8 @@ class RayCastPipeline:
         # Apply training config to Ultralytics overrides
         if self.training_config is not None and self.training_config.get('cos_lr', True):
             overrides['cos_lr'] = True
+        if self.training_config is not None and 'patience' in self.training_config:
+            overrides['patience'] = self.training_config['patience']
 
         trainer = RayCastTrainer(overrides=overrides, training_config=self.training_config)
         trainer.train()

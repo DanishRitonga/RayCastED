@@ -44,6 +44,9 @@ training:
   head_channel_scale: 0.5    # c2 = max(head_channel_min, ch * scale). Was 0.25
   head_channel_min: 64       # minimum channels in polygon head. Was 16
 
+  # Early stopping
+  patience: 300              # epochs with no improvement before stopping (default: 100)
+
   # Learning rate
   cos_lr: true               # cosine LR schedule. Was false
 
