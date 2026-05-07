@@ -168,7 +168,6 @@ class _RayCastCriterionWrapper:
             assigner_beta=tcfg.get('assigner_beta', 6.0),
             use_hungarian_o2o=tcfg.get('use_hungarian_o2o', True),
             log_ray_loss=tcfg.get('log_ray_loss', False),
-            centroid_sigma=tcfg.get('centroid_sigma', 0.05),
             cost_class=tcfg.get('cost_class', 1.0),
             cost_centroid=tcfg.get('cost_centroid', 1.0),
             cost_ray=tcfg.get('cost_ray', 1.0),
