@@ -364,8 +364,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
             mask_gt,
         )
 
-        # --- L_cls: BCE with mean normalisation (per-element average) ---
-        loss[1] = self.bce(pred_scores.float(), target_scores.float()).mean()
+        # --- L_cls: BCE with fg normalisation (consistent with regression losses) ---
+        n_norm = max(fg_mask.sum(), 1)
+        loss[1] = self.bce(pred_scores.float(), target_scores.float()).sum() / n_norm
 
         # --- Polygon regression losses (foreground only, uniform weight) ---
         if fg_mask.sum():
