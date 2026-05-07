@@ -479,7 +479,6 @@ class RayCastE2ELoss(E2ELoss):
             assigner_beta=assigner_beta,
             log_ray_loss=log_ray_loss,
             gradnorm_manager=self.gradnorm_manager,
-            max_epochs=max_epochs,
         )
         super().__init__(model, loss_fn=loss_fn)
 
