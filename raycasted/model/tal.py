@@ -233,95 +233,44 @@ class RayCastAssigner(TaskAlignedAssigner):
 class HungarianRayCastAssigner(RayCastAssigner):
     """Globally optimal bipartite matching assigner for the one2one branch.
 
-    Replaces the greedy topk→topk2 selection in TaskAlignedAssigner with
-    scipy.linear_sum_assignment (Hungarian algorithm) to find the globally
-    optimal 1:1 assignment between GT objects and anchor points.
+    Cost formulation (L1-based, no IoU — inspired by LSP-DETR):
+        cost = w_cls * focal_cls_cost + w_xy * L1(centroid) + w_ray * relative_L1(rays)
 
-    This is critical for dense touching-cell scenes (e.g., PanNuke) where
-    greedy TAL causes assignment collisions: nearby GTs independently pick
-    the same anchors, and select_highest_overlaps resolves ties by max-IoU,
-    often giving suboptimal assignments that degrade NMS-free inference.
+    This avoids the noisy Polar-IoU signal that can suppress training and
+    uses scale-invariant relative L1 for ray matching. Centroid L1 replaces
+    the previous Gaussian center prior.
 
-    The matching score includes a Gaussian center prior:
-        score = cls^α × PolarIoU^β × exp(-dist² / (2σ²))
-    This ensures anchors close to the GT centroid are preferred, which is
-    crucial in dense scenes where multiple GTs share candidate anchors and
-    Polar-IoU alone is unreliable (especially early in training).
-
-    Inherits select_candidates_in_gts and get_box_metrics from RayCastAssigner.
-    Only overrides _forward to replace the selection mechanism.
+    Inherits select_candidates_in_gts from RayCastAssigner.
+    Only overrides _forward to replace the selection mechanism and cost.
     """
 
     def __init__(
         self,
-        centroid_sigma: float = 0.05,
-        centroid_sigma_start: float = 0.5,
-        centroid_sigma_end: float | None = None,
-        beta_start: float = 0.0,
-        beta_end: float | None = None,
-        anneal_epochs: int = 0,
-        max_epochs: int = 200,
+        cost_class: float = 1.0,
+        cost_centroid: float = 1.0,
+        cost_ray: float = 1.0,
         **kwargs,
     ):
         """Initialize HungarianRayCastAssigner.
 
         Args:
-            centroid_sigma: Default std dev for Gaussian center prior (used as end if start given).
-            centroid_sigma_start: Initial std dev — wide Gaussian early for soft spatial matching.
-            centroid_sigma_end: Final std dev. Defaults to centroid_sigma.
-            beta_start: Initial beta (IoU exponent) — 0 disables IoU in cost early in training.
-            beta_end: Final beta. Defaults to kwargs['beta'] (6.0).
-            anneal_epochs: Fraction of max_epochs to ramp (0.0–1.0). 0 = no annealing.
-            max_epochs: Total training epochs.
-            **kwargs: Passed to parent RayCastAssigner (topk, num_classes, alpha, beta, etc.).
+            cost_class: Weight for focal classification cost.
+            cost_centroid: Weight for L1 centroid cost.
+            cost_ray: Weight for relative-L1 ray cost (scale-invariant).
+            **kwargs: Passed to parent RayCastAssigner (topk, num_classes, etc.).
         """
-        self.centroid_sigma_end = centroid_sigma_end if centroid_sigma_end is not None else centroid_sigma
-        self.centroid_sigma_start = centroid_sigma_start
-        self.beta_end = beta_end if beta_end is not None else kwargs.get('beta', 6.0)
-        self.beta_start = beta_start
-        # anneal_epochs is a fraction (0–1) of max_epochs
-        self.anneal_epochs = max(1, int(max_epochs * anneal_epochs)) if anneal_epochs > 0 else 0
-        self._current_epoch = 0
+        self.cost_class = cost_class
+        self.cost_centroid = cost_centroid
+        self.cost_ray = cost_ray
         super().__init__(**kwargs)
-        # Override: store final centroid_sigma on instance for non-annealing fallback
-        self.centroid_sigma = self.centroid_sigma_end
-
-    @property
-    def _current_beta(self) -> float:
-        """Return the annealed beta (IoU exponent) for the current epoch."""
-        if self.anneal_epochs <= 0 or self._current_epoch >= self.anneal_epochs:
-            return self.beta_end
-        frac = self._current_epoch / self.anneal_epochs
-        return self.beta_start + frac * (self.beta_end - self.beta_start)
-
-    @property
-    def _current_sigma(self) -> float:
-        """Return the annealed centroid sigma for the current epoch."""
-        if self.anneal_epochs <= 0 or self._current_epoch >= self.anneal_epochs:
-            return self.centroid_sigma_end
-        frac = self._current_epoch / self.anneal_epochs
-        return self.centroid_sigma_start + frac * (self.centroid_sigma_end - self.centroid_sigma_start)
-
-    def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
-        """Override to use annealed beta instead of static self.beta.
-
-        Temporarily swaps self.beta to the current annealed value, delegates
-        to parent RayCastAssigner.get_box_metrics, then restores.
-        """
-        saved_beta = self.beta
-        self.beta = self._current_beta
-        try:
-            return super().get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt)
-        finally:
-            self.beta = saved_beta
 
     def _forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
-        """Hungarian matching assignment — globally optimal 1:1 matching.
+        """Hungarian matching assignment with L1-based cost.
 
-        Uses the same candidate filtering and IoU computation as TAL, but
-        replaces topk selection with Hungarian algorithm on the cost matrix
-        (negative alignment metric), ensuring each GT is matched to exactly
-        one anchor with no collisions.
+        Builds a cost matrix from focal cls + L1 centroid + relative-L1 rays,
+        then solves with scipy.linear_sum_assignment for globally optimal 1:1
+        matching.  target_scores are weighted by cost-derived quality
+        (1 / (1 + cost)) instead of IoU-based alignment.
 
         Args:
             pd_scores: Predicted classification scores, shape (B, N_anchors, nc).
@@ -335,11 +284,9 @@ class HungarianRayCastAssigner(RayCastAssigner):
             Tuple of (target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx).
         """
         mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes, mask_gt)
-        align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt)
 
         bs = pd_scores.shape[0]
         na = pd_scores.shape[1]
-        n_max_boxes = gt_bboxes.shape[1]
         device = gt_bboxes.device
 
         target_labels = torch.full((bs, na), self.num_classes, dtype=torch.long, device=device)
@@ -347,7 +294,6 @@ class HungarianRayCastAssigner(RayCastAssigner):
         target_scores = torch.zeros_like(pd_scores)
         fg_mask = torch.zeros(bs, na, dtype=torch.bool, device=device)
         target_gt_idx = torch.zeros(bs, na, dtype=torch.long, device=device)
-        mask_pos = torch.zeros(bs, n_max_boxes, na, dtype=torch.float32, device=device)
 
         for b in range(bs):
             valid_gt_mask = mask_gt[b, :, 0].bool()
@@ -364,59 +310,64 @@ class HungarianRayCastAssigner(RayCastAssigner):
             if n_cand == 0:
                 continue
 
-            # Build cost matrix from alignment metric
-            # align_metric[b] is (n_max_boxes, na)
-            cost = align_metric[b][valid_gt_idx[:, None], cand_idx[None, :]]  # (n_valid_gt, n_cand)
+            # Classification cost: focal-style (positive part of sigmoid CE)
+            gt_cls = gt_labels[b, valid_gt_idx, 0].long().clamp(min=0)
+            out_prob = pd_scores[b, cand_idx].sigmoid()  # (n_cand, nc)
+            alpha_focal = 0.25
+            gamma_focal = 2.0
+            neg_cost = (1 - alpha_focal) * (out_prob**gamma_focal) * (-(1 - out_prob + 1e-8).log())
+            pos_cost = alpha_focal * ((1 - out_prob) ** gamma_focal) * (-(out_prob + 1e-8).log())
+            cost_cls = pos_cost[:, gt_cls] - neg_cost[:, gt_cls]  # (n_cand, n_valid_gt)
 
-            # Apply candidate mask: set non-candidates to zero score
-            pair_mask = mask_in_gts[b][valid_gt_idx[:, None], cand_idx[None, :]]
-            cost = cost * pair_mask.float()
+            # Centroid cost: L1 on decoded (x, y)
+            pd_xy = pd_bboxes[b, cand_idx, :2]  # (n_cand, 2)
+            gt_xy = gt_bboxes[b, valid_gt_idx, :2]  # (n_valid_gt, 2)
+            cost_xy = torch.cdist(pd_xy.float(), gt_xy.float(), p=1)  # (n_cand, n_valid_gt)
 
-            # Annealed Gaussian center prior: exp(-dist² / (2σ²))
-            # σ anneals from centroid_sigma_start (wide) → centroid_sigma_end (tight)
-            # over assigner_anneal_frac of training. Combined with beta annealing,
-            # this creates a curriculum: spatial-only matching → full geometric matching.
-            cur_sigma = self._current_sigma
-            if cur_sigma > 0:
-                gt_cx_cy = gt_bboxes[b, valid_gt_idx, :2]  # (n_valid_gt, 2)
-                anc_xy = anc_points[cand_idx]  # (n_cand, 2)
-                dist_sq = (gt_cx_cy[:, None, :] - anc_xy[None, :, :]).pow(2).sum(-1)  # (n_valid_gt, n_cand)
-                cost = cost * torch.exp(-dist_sq / (2 * cur_sigma**2))
+            # Ray cost: relative L1 (scale-invariant) — |pred - gt| / (gt + eps)
+            pd_rays = pd_bboxes[b, cand_idx, 2:]  # (n_cand, n_rays)
+            gt_rays = gt_bboxes[b, valid_gt_idx, 2:]  # (n_valid_gt, n_rays)
+            ray_diff = pd_rays[:, None, :].float() - gt_rays[None, :, :].float()  # (n_cand, n_valid_gt, n_rays)
+            ray_rel = (ray_diff.abs() / (gt_rays[None, :, :].float() + 1e-6)).mean(-1)  # (n_cand, n_valid_gt)
 
-            # Hungarian algorithm (minimise negative = maximise alignment)
-            # For large matrices, fall back to top-1 greedy per GT
+            # Combined cost (n_cand, n_valid_gt) — Hungarian minimises this
+            cost = self.cost_class * cost_cls + self.cost_centroid * cost_xy + self.cost_ray * ray_rel
+
+            # Apply candidate mask: set non-candidates to large cost
+            pair_mask = mask_in_gts[b][valid_gt_idx[:, None], cand_idx[None, :]]  # (n_valid_gt, n_cand)
+            cost = cost.T + (1 - pair_mask.float()) * 1e6  # (n_valid_gt, n_cand)
+
+            # Hungarian algorithm (minimises cost directly)
+            match_costs = {}
             if n_valid_gt * n_cand > 0:
-                cost_np = (-cost.float()).cpu().numpy()
-                cost_np = np.nan_to_num(cost_np, nan=0.0, posinf=0.0, neginf=0.0)
+                cost_np = cost.float().cpu().numpy()
+                cost_np = np.nan_to_num(cost_np, nan=1e6, posinf=1e6, neginf=1e6)
                 row_ind, col_ind = linear_sum_assignment(cost_np)
                 matched_gt = valid_gt_idx[row_ind]
                 matched_anchor = cand_idx[col_ind]
 
-                # Verify matches are within candidate mask
-                for gt_i, anc_i in zip(matched_gt, matched_anchor):
+                for gt_i, anc_i, ci in zip(matched_gt, matched_anchor, range(len(matched_gt))):
                     if mask_in_gts[b, gt_i, anc_i]:
-                        mask_pos[b, gt_i, anc_i] = 1.0
                         fg_mask[b, anc_i] = True
                         target_gt_idx[b, anc_i] = gt_i
+                        match_costs[anc_i.item()] = cost_np[row_ind[ci], col_ind[ci]]
 
-            # Fill targets for matched anchors
+            # Fill targets for matched anchors + cost-derived quality scores
             if fg_mask[b].any():
                 fg_idx = fg_mask[b].nonzero(as_tuple=False).squeeze(-1)
                 gt_indices = target_gt_idx[b, fg_idx]
                 target_labels[b, fg_idx] = gt_labels[b, gt_indices, 0].long()
                 target_bboxes[b, fg_idx] = gt_bboxes[b, gt_indices]
 
-                # One-hot class scores
+                # One-hot class scores weighted by cost-derived quality
+                quality = torch.tensor(
+                    [1.0 / (1.0 + match_costs[a.item()]) for a in fg_idx],
+                    device=device,
+                    dtype=target_scores.dtype,
+                )
                 cls_labels = gt_labels[b, gt_indices, 0].long().clamp(min=0)
                 target_scores[b, fg_idx] = torch.zeros(
                     fg_idx.shape[0], self.num_classes, device=device, dtype=target_scores.dtype
-                ).scatter_(1, cls_labels.unsqueeze(-1), 1.0)
-
-        # Normalize alignment metric (same as parent)
-        align_metric *= mask_pos
-        pos_align_metrics = align_metric.amax(dim=-1, keepdim=True)
-        pos_overlaps = (overlaps * mask_pos).amax(dim=-1, keepdim=True)
-        norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
-        target_scores = target_scores * norm_align_metric
+                ).scatter_(1, cls_labels.unsqueeze(-1), 1.0) * quality.unsqueeze(-1)
 
         return target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx

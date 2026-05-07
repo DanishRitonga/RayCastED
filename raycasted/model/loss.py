@@ -294,7 +294,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         if self._current_epoch == 0:
             logger.info(
                 'Piou annealing: ramping 0→1 over %d epochs (%.0f%% of training)',
-                anneal_epochs, self.piou_annealing_frac * 100,
+                anneal_epochs,
+                self.piou_annealing_frac * 100,
             )
         return w
 
@@ -488,15 +489,12 @@ class RayCastE2ELoss(E2ELoss):
         assigner_radius_scale: float = 1.5,
         assigner_alpha: float = 0.5,
         assigner_beta: float = 6.0,
-        assigner_beta_start: float = 0.0,
-        assigner_beta_end: float | None = None,
-        assigner_centroid_sigma: float = 0.05,
-        assigner_centroid_sigma_start: float = 0.5,
-        assigner_centroid_sigma_end: float | None = None,
-        assigner_anneal_frac: float = 0.4,
         use_hungarian_o2o: bool = True,
         log_ray_loss: bool = False,
         centroid_sigma: float = 0.05,
+        cost_class: float = 1.0,
+        cost_centroid: float = 1.0,
+        cost_ray: float = 1.0,
         gradnorm: bool = False,
         gradnorm_alpha: float = 0.5,
         gradnorm_warmup_epochs: int = 5,
@@ -561,13 +559,10 @@ class RayCastE2ELoss(E2ELoss):
                 num_classes=self.one2one.assigner.num_classes,
                 alpha=assigner_alpha,
                 beta=assigner_beta,
-                beta_start=assigner_beta_start,
-                beta_end=assigner_beta_end,
                 centroid_sigma=centroid_sigma,
-                centroid_sigma_start=assigner_centroid_sigma_start,
-                centroid_sigma_end=assigner_centroid_sigma_end,
-                max_epochs=max_epochs,
-                anneal_epochs=assigner_anneal_frac,
+                cost_class=cost_class,
+                cost_centroid=cost_centroid,
+                cost_ray=cost_ray,
                 stride=self.one2one.assigner.stride if hasattr(self.one2one.assigner, 'stride') else [8, 16, 32],
                 topk2=1,
                 radius_scale=assigner_radius_scale,
@@ -605,9 +600,10 @@ class RayCastE2ELoss(E2ELoss):
         if self.updates == 1:
             is_hungarian = isinstance(self.one2one.assigner, HungarianRayCastAssigner)
             if is_hungarian:
+                a = self.one2one.assigner
                 print(
                     f'✓ E2E NMS-free: o2m.topk={self.one2many.assigner.topk}, '
-                    f'o2o=Hungarian (globally optimal 1:1 matching)'
+                    f'o2o=Hungarian L1-cost (cls={a.cost_class}, xy={a.cost_centroid}, ray={a.cost_ray})'
                 )
             else:
                 assert self.one2one.assigner.topk2 == 1, (
@@ -632,6 +628,3 @@ class RayCastE2ELoss(E2ELoss):
         for branch in (self.one2many, self.one2one):
             if hasattr(branch, 'loss_fn') and hasattr(branch.loss_fn, '_current_epoch'):
                 branch.loss_fn._current_epoch = epoch
-            # Sync epoch to Hungarian assigner for beta/sigma annealing
-            if hasattr(branch, 'assigner') and hasattr(branch.assigner, '_current_epoch'):
-                branch.assigner._current_epoch = epoch
