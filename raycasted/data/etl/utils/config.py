@@ -54,9 +54,6 @@ class TrainingSettings(BaseModel):
 
     # Classification loss — BCE only (focal/QFL tested, both harmful)
 
-    # Loss annealing
-    piou_annealing_frac: float = 0.4  # ramp piou weight from 0→1 over first N% of training
-
     # Assigner cost annealing (beta + sigma curriculum)
     assigner_beta_start: float = 0.0  # Polar-IoU exponent at start (0 = IoU off)
     assigner_centroid_sigma_start: float = 0.5  # Gaussian width at start (wide = spatial-only)

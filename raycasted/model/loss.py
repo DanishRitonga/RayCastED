@@ -1,10 +1,10 @@
 """RayCastED — RayCast Detection Loss (Phase 6).
 
-5-term polygon loss:
-  L = λ_xy × L_xy + λ_cls × L_cls + λ_L1 × L_L1 + λ_piou × L_PolarIoU + λ_smooth × L_smooth
+4-term polygon loss:
+  L = λ_xy × L_xy + λ_cls × L_cls + λ_L1 × L_L1 + λ_smooth × L_smooth
 
 With GradNorm enabled, the static λ values are replaced by dynamic weights
-that equalise gradient norms across all 5 tasks, preventing cls_loss from
+that equalise gradient norms across all 4 tasks, preventing cls_loss from
 dominating the shared backbone gradients.
 
 RayCastDetectionLoss subclasses v8DetectionLoss, replacing bbox/DFL logic
@@ -29,7 +29,6 @@ import torch.nn.functional as F
 from ultralytics.utils.loss import E2ELoss, v8DetectionLoss
 from ultralytics.utils.tal import make_anchors
 
-from raycasted.data.etl.ops.iou import polar_iou_torch
 from raycasted.data.etl.ops.loss import angular_smoothness_loss_torch
 from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
 
@@ -43,7 +42,7 @@ logger = logging.getLogger(__name__)
 #  GradNorm — Gradient Normalisation for Multi-Task Loss Balancing
 # ──────────────────────────────────────────────────────────────────────
 
-_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth')
+_TASK_NAMES = ('xy', 'cls', 'l1', 'smooth')
 
 
 class GradNormManager:
@@ -241,8 +240,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         assigner_beta: float = 6.0,
         log_ray_loss: bool = False,
         gradnorm_manager: GradNormManager | None = None,
-        max_epochs: int = 200,
-        piou_annealing_frac: float = 0.0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -255,11 +252,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # GradNorm integration — dynamic loss weight balancing
         self.gradnorm_manager = gradnorm_manager
-
-        # Piou reverse-annealing: ramp from 0→1 over first piou_annealing_frac of training
-        self.max_epochs = max_epochs
-        self.piou_annealing_frac = piou_annealing_frac
-        self._current_epoch = 0
 
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
@@ -276,28 +268,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # xy and L1 both produce tiny raw values (Huber on normalised coords, log-space rays),
         # so both need high lambda to contribute meaningfully.
         # smooth starts at 0, reverse-anneals to peak over 40% of training (shape prior).
-        self.lambda_cls = 2.0  # classification (23-28% of task gradient)
-        self.lambda_xy = 15.0  # centroid (45-50% of task gradient)
-        self.lambda_l1 = 25.0  # ray accuracy (25-30% of task gradient)
-        self.lambda_piou = 2.0  # shape IoU (1-2% of task gradient)
-        self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss (0 → 1.0 over 40% of training)
-
-    @property
-    def piou_weight(self) -> float:
-        """Ramp from 0→1 over first piou_annealing_frac fraction of training."""
-        if self.piou_annealing_frac <= 0:
-            return 1.0
-        anneal_epochs = int(self.max_epochs * self.piou_annealing_frac)
-        if self._current_epoch >= anneal_epochs:
-            return 1.0
-        w = self._current_epoch / max(anneal_epochs, 1)
-        if self._current_epoch == 0:
-            logger.info(
-                'Piou annealing: ramping 0→1 over %d epochs (%.0f%% of training)',
-                anneal_epochs,
-                self.piou_annealing_frac * 100,
-            )
-        return w
+        self.lambda_cls = 2.0
+        self.lambda_xy = 15.0
+        self.lambda_l1 = 25.0
+        self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
 
     def preprocess(self, targets, batch_size, scale_tensor=None):
         """Preprocess polygon targets.
@@ -346,12 +320,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
         return xy_pixel / imgsz[[1, 0]]  # normalise
 
     def get_assigned_targets_and_loss(self, preds, batch):
-        """Compute 5-term polygon loss.
+        """Compute 4-term polygon loss.
 
         Returns:
-            (assignment_info, loss_5vec, loss_detach)
+            (assignment_info, loss_4vec, loss_detach)
         """
-        loss = torch.zeros(5, device=self.device)  # [xy, cls, L1, piou, smooth]
+        loss = torch.zeros(4, device=self.device)  # [xy, cls, L1, smooth]
 
         # --- Prediction parsing ---
         pred_distri = preds['boxes'].permute(0, 2, 1).contiguous()  # [B, N, raycast_dim]
@@ -422,18 +396,13 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 loss_l1 = (fg_pred_rays - fg_target_rays).abs().mean(-1)
             loss[2] = loss_l1.sum() / n_fg
 
-            # L_PolarIoU: -log(PolarIoU) — matches PolarMask formulation
-            fg_piou = polar_iou_torch(fg_pred_rays, fg_target_rays)
-            loss[3] = (-torch.log(fg_piou + 1e-7)).sum() / n_fg
-
             # L_smooth: Angular smoothness on predicted rays
-            loss[4] = angular_smoothness_loss_torch(fg_pred_rays).sum() / n_fg
+            loss[3] = angular_smoothness_loss_torch(fg_pred_rays).sum() / n_fg
         else:
             # DDP safety — touch all prediction tensors to avoid unused-gradient errors
             loss[0] += (pred_xy * 0).sum()
             loss[2] += (pred_rays * 0).sum()
             loss[3] += (pred_rays * 0).sum()
-            loss[4] += (pred_rays * 0).sum()
 
         # --- Store unweighted per-task losses for GradNorm ---
         if self.gradnorm_manager is not None:
@@ -442,21 +411,16 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # --- Apply loss weights ---
         # If GradNorm is active, use its dynamic weights; otherwise use static lambdas.
         if self.gradnorm_manager is not None and self.gradnorm_manager.enabled:
-            w = self.gradnorm_manager.get_weights()  # [5]
+            w = self.gradnorm_manager.get_weights()  # [4]
             loss[0] *= w[0]
             loss[1] *= w[1]
             loss[2] *= w[2]
             loss[3] *= w[3]
-            loss[4] *= w[4]
         else:
             loss[0] *= self.lambda_xy
             loss[1] *= self.lambda_cls
             loss[2] *= self.lambda_l1
-            loss[3] *= self.lambda_piou
-            loss[4] *= self.lambda_smooth
-
-        # --- Piou reverse-annealing: ramp from 0→1 over first N% of training ---
-        loss[3] *= self.piou_weight
+            loss[3] *= self.lambda_smooth
 
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
@@ -474,7 +438,7 @@ class RayCastE2ELoss(E2ELoss):
 
     When ``gradnorm=True``, replaces static λ weights with GradNorm
     (Chen et al., 2018) dynamic weights that equalise gradient norms
-    across all 5 tasks, preventing cls_loss from dominating the shared
+    across all 4 tasks, preventing cls_loss from dominating the shared
     backbone.
     """
 
@@ -494,14 +458,13 @@ class RayCastE2ELoss(E2ELoss):
         gradnorm: bool = False,
         gradnorm_alpha: float = 0.5,
         gradnorm_warmup_epochs: int = 5,
-        piou_annealing_frac: float = 0.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
         if gradnorm:
             self.gradnorm_manager = GradNormManager(
                 model=model,
-                num_tasks=5,
+                num_tasks=4,
                 alpha=gradnorm_alpha,
                 warmup_epochs=gradnorm_warmup_epochs,
             )
@@ -517,7 +480,6 @@ class RayCastE2ELoss(E2ELoss):
             log_ray_loss=log_ray_loss,
             gradnorm_manager=self.gradnorm_manager,
             max_epochs=max_epochs,
-            piou_annealing_frac=piou_annealing_frac,
         )
         super().__init__(model, loss_fn=loss_fn)
 
@@ -617,9 +579,3 @@ class RayCastE2ELoss(E2ELoss):
         new_lambda = self.smooth_start + t * (self.smooth_end - self.smooth_start)
         self.one2many.lambda_smooth = new_lambda
         self.one2one.lambda_smooth = new_lambda
-
-        # Update piou annealing epoch on inner loss instances
-        epoch = getattr(self, '_epoch', 0)
-        for branch in (self.one2many, self.one2one):
-            if hasattr(branch, 'loss_fn') and hasattr(branch.loss_fn, '_current_epoch'):
-                branch.loss_fn._current_epoch = epoch
