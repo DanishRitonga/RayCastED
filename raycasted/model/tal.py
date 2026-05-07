@@ -338,7 +338,6 @@ class HungarianRayCastAssigner(RayCastAssigner):
             cost = cost.T + (1 - pair_mask.float()) * 1e6  # (n_valid_gt, n_cand)
 
             # Hungarian algorithm (minimises cost directly)
-            match_costs = {}
             if n_valid_gt * n_cand > 0:
                 cost_np = cost.float().cpu().numpy()
                 cost_np = np.nan_to_num(cost_np, nan=1e6, posinf=1e6, neginf=1e6)
@@ -346,28 +345,23 @@ class HungarianRayCastAssigner(RayCastAssigner):
                 matched_gt = valid_gt_idx[row_ind]
                 matched_anchor = cand_idx[col_ind]
 
-                for gt_i, anc_i, ci in zip(matched_gt, matched_anchor, range(len(matched_gt))):
+                for gt_i, anc_i in zip(matched_gt, matched_anchor):
                     if mask_in_gts[b, gt_i, anc_i]:
                         fg_mask[b, anc_i] = True
                         target_gt_idx[b, anc_i] = gt_i
-                        match_costs[anc_i.item()] = cost_np[row_ind[ci], col_ind[ci]]
 
-            # Fill targets for matched anchors + cost-derived quality scores
+            # Fill targets for matched anchors
             if fg_mask[b].any():
                 fg_idx = fg_mask[b].nonzero(as_tuple=False).squeeze(-1)
                 gt_indices = target_gt_idx[b, fg_idx]
                 target_labels[b, fg_idx] = gt_labels[b, gt_indices, 0].long()
                 target_bboxes[b, fg_idx] = gt_bboxes[b, gt_indices]
 
-                # One-hot class scores weighted by cost-derived quality
-                quality = torch.tensor(
-                    [1.0 / (1.0 + match_costs[a.item()]) for a in fg_idx],
-                    device=device,
-                    dtype=target_scores.dtype,
-                )
+                # One-hot class targets (hard labels — quality weighting in BCE targets
+                # fights the classification objective when quality << 1)
                 cls_labels = gt_labels[b, gt_indices, 0].long().clamp(min=0)
                 target_scores[b, fg_idx] = torch.zeros(
                     fg_idx.shape[0], self.num_classes, device=device, dtype=target_scores.dtype
-                ).scatter_(1, cls_labels.unsqueeze(-1), 1.0) * quality.unsqueeze(-1)
+                ).scatter_(1, cls_labels.unsqueeze(-1), 1.0)
 
         return target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx

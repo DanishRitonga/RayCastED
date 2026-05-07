@@ -390,47 +390,44 @@ class RayCastDetectionLoss(v8DetectionLoss):
             mask_gt,
         )
 
-        target_scores_sum = max(target_scores.sum(), 1)
+        bs = pred_scores.shape[0]
 
-        # --- L_cls: BCE only (focal/QFL tested and found harmful) ---
-        loss[1] = self.bce(pred_scores.float(), target_scores.float()).sum() / target_scores_sum
+        # --- L_cls: BCE normalised by batch size (quality-weighted targets + sparse
+        #     Hungarian assignment make sum-based normalisation unstable — target_scores_sum
+        #     can be << 1, amplifying gradients by 100-1000x and flipping logits negative) ---
+        loss[1] = self.bce(pred_scores.float(), target_scores.float()).sum() / bs
 
-        # --- Polygon regression losses (foreground only) ---
+        # --- Polygon regression losses (foreground only, uniform weight) ---
         if fg_mask.sum():
-            weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)  # [N_fg, 1]
+            n_fg = max(fg_mask.sum(), 1)
 
-            fg_pred_xy = pred_xy[fg_mask]  # [N_fg, 2]
-            fg_pred_rays = pred_rays[fg_mask]  # [N_fg, n_rays]
-            fg_target_xy = target_bboxes[fg_mask][:, :2]  # [N_fg, 2]
-            fg_target_rays = target_bboxes[fg_mask][:, 2:]  # [N_fg, n_rays]
+            fg_pred_xy = pred_xy[fg_mask]
+            fg_pred_rays = pred_rays[fg_mask]
+            fg_target_xy = target_bboxes[fg_mask][:, :2]
+            fg_target_rays = target_bboxes[fg_mask][:, 2:]
 
-            # Cast to float32 for numerical stability under AMP/FP16 validation
             fg_pred_xy = fg_pred_xy.float()
             fg_target_xy = fg_target_xy.float()
             fg_pred_rays = fg_pred_rays.float()
             fg_target_rays = fg_target_rays.float()
-            weight = weight.float()
 
             # L_xy: Huber on decoded centroid
             loss_xy = F.huber_loss(fg_pred_xy, fg_target_xy, reduction='none', delta=1.0).mean(-1)
-            loss[0] = (loss_xy.unsqueeze(-1) * weight).sum() / target_scores_sum
+            loss[0] = loss_xy.sum() / n_fg
 
             # L_L1: Uniform MAE on 32 rays (linear or log-space)
             if self.log_ray_loss:
                 loss_l1 = _log_space_ray_loss(fg_pred_rays, fg_target_rays)
             else:
                 loss_l1 = (fg_pred_rays - fg_target_rays).abs().mean(-1)
-            loss[2] = (loss_l1.unsqueeze(-1) * weight).sum() / target_scores_sum
+            loss[2] = loss_l1.sum() / n_fg
 
             # L_PolarIoU: -log(PolarIoU) — matches PolarMask formulation
-            # Logarithmic loss more strongly penalizes low-IoU predictions than linear (1 - IoU)
-            fg_piou = polar_iou_torch(fg_pred_rays, fg_target_rays)  # [N_fg] (already float32)
-            loss_piou = -torch.log(fg_piou + 1e-7)
-            loss[3] = (loss_piou * weight.squeeze(-1)).sum() / target_scores_sum
+            fg_piou = polar_iou_torch(fg_pred_rays, fg_target_rays)
+            loss[3] = (-torch.log(fg_piou + 1e-7)).sum() / n_fg
 
             # L_smooth: Angular smoothness on predicted rays
-            fg_smooth = angular_smoothness_loss_torch(fg_pred_rays)  # [N_fg] (already float32)
-            loss[4] = (fg_smooth * weight.squeeze(-1)).sum() / target_scores_sum
+            loss[4] = angular_smoothness_loss_torch(fg_pred_rays).sum() / n_fg
         else:
             # DDP safety — touch all prediction tensors to avoid unused-gradient errors
             loss[0] += (pred_xy * 0).sum()
