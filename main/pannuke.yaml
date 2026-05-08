@@ -51,7 +51,7 @@ training:
   cos_lr: true               # cosine LR schedule. Was false
 
   # E2E dual-assignment (NMS-free)
-  tal_topk: 13                # one2many positives per GT (was assigner_topk)
+  tal_topk: 20                # one2many positives per GT (increased for dense cell scenes)
   assigner_radius_scale: 1.5  # containment radius multiplier
   assigner_alpha: 0.5         # cls^alpha in alignment metric
   assigner_beta: 3.0          # iou^beta in alignment metric (one2many only)
