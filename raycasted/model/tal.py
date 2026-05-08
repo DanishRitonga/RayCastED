@@ -3,7 +3,7 @@
 RayCastAssigner subclasses TaskAlignedAssigner to replace box-based
 assignment with polygon-aware logic:
   - select_candidates_in_gts: 75th-percentile radius containment
-  - get_box_metrics: VRAM-safe Polar-IoU with per-batch chunking
+  - get_box_metrics: log-space L1 ray similarity (LSP-DETR style, no Polar-IoU)
 
 HungarianRayCastAssigner extends RayCastAssigner with globally optimal
 bipartite matching (scipy.linear_sum_assignment) for the one2one branch,
@@ -22,19 +22,13 @@ import torch
 from scipy.optimize import linear_sum_assignment
 from ultralytics.utils.tal import TaskAlignedAssigner
 
-from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
-
-# VRAM guard: max candidate-GT pairs per chunk.
-# 1M pairs × 32 rays × 4 bytes = ~128 MB per chunk.
-MAX_FLAT_PAIRS = 1_000_000
-
 
 class RayCastAssigner(TaskAlignedAssigner):
-    """Polygon-aware assigner replacing bbox IoU with Polar-IoU.
+    """Polygon-aware assigner using log-space L1 ray similarity for matching.
 
     Overrides two methods from TaskAlignedAssigner:
       - select_candidates_in_gts: radius containment instead of box containment
-      - get_box_metrics: VRAM-safe Polar-IoU instead of bbox_iou(CIoU)
+      - get_box_metrics: log-space L1 similarity (LSP-DETR style, no Polar-IoU)
 
     get_targets is inherited as-is — the parent is dimension-agnostic.
     """
@@ -145,15 +139,21 @@ class RayCastAssigner(TaskAlignedAssigner):
         return mask
 
     # -----------------------------------------------------------------
-    # Override 2: VRAM-safe Polar-IoU
+    # Override 2: Log-space L1 alignment (replaces Polar-IoU for matching)
     # -----------------------------------------------------------------
 
     def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
-        """Compute alignment metric using VRAM-safe Polar-IoU.
+        """Compute alignment metric using L1 log-space ray distance.
 
-        Replaces the parent's bbox_iou(CIoU) with polar_iou_pairwise_flat_torch,
-        computed in a per-batch loop with conditional chunking to avoid OOM
-        on dense TIL fields (BUG-05).
+        Replaces the parent's bbox_iou(CIoU) with a log-space L1 quality
+        metric matching LSP-DETR's assignment cost. The overlap proxy is:
+
+            overlap_ij = 1 / (1 + mean(|log(pred_rays) - log(gt_rays)|))
+
+        Log-space L1 is scale-invariant (10% error penalised equally for
+        small and large rays). Maps to (0, 1] (higher = better), preserving
+        compatibility with the parent's select_highest_overlaps and
+        norm_align_metric normalisation.
 
         Args:
             pd_scores: Classification scores, shape (B, N_anchors, nc).
@@ -169,63 +169,41 @@ class RayCastAssigner(TaskAlignedAssigner):
             overlaps: (B, N_max_gt, N_anchors).
         """
         na = pd_bboxes.shape[-2]
-        mask_gt_bool = mask_gt.bool()  # (B, N_gt, N_anchors)
-        # Force overlaps to float32 — under AMP/FP16 validation, the parent
-        # TaskAlignedAssigner._forward normalisation uses self.eps=1e-9 which
-        # underflows to 0 in float16, causing NaN. bbox_scores can stay as-is
-        # (PyTorch upcasts automatically in align_metric = scores^α * overlaps^β).
+        mask_gt_bool = mask_gt.bool()
         overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=torch.float32, device=pd_bboxes.device)
         bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
 
-        # --- Classification scores (same logic as parent, not memory-intensive) ---
+        # --- Classification scores (same logic as parent) ---
         ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)
         ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)
         ind[1] = gt_labels.squeeze(-1)
         bbox_scores[mask_gt_bool] = pd_scores[ind[0], :, ind[1]][mask_gt_bool]
 
-        # --- VRAM-safe per-batch Polar-IoU ---
+        # --- Per-batch L1-based overlap ---
         for b in range(self.bs):
-            # Candidate anchors selected by any GT in this image
-            candidate_mask = mask_gt_bool[b].any(dim=0)  # (N_anchors,)
-            cand_idx = candidate_mask.nonzero(as_tuple=False).squeeze(-1)  # (N_cand,)
+            candidate_mask = mask_gt_bool[b].any(dim=0)
+            cand_idx = candidate_mask.nonzero(as_tuple=False).squeeze(-1)
             n_cand = cand_idx.shape[0]
             if n_cand == 0:
                 continue
 
-            # Valid GTs that have at least one candidate
-            valid_gt_mask = mask_gt_bool[b].any(dim=1)  # (N_gt,)
-            valid_gt_idx = valid_gt_mask.nonzero(as_tuple=False).squeeze(-1)  # (N_valid_gt,)
-            n_valid_gt = valid_gt_idx.shape[0]
+            valid_gt_mask = mask_gt_bool[b].any(dim=1)
+            valid_gt_idx = valid_gt_mask.nonzero(as_tuple=False).squeeze(-1)
+            pd_rays = pd_bboxes[b, cand_idx, 2:].float()
+            gt_rays = gt_bboxes[b, valid_gt_idx, 2:].float()
 
-            # Extract rays (columns 2: of the 34-dim polygon vector)
-            pd_rays = pd_bboxes[b, cand_idx, 2:]  # (N_cand, 32)
-            gt_rays = gt_bboxes[b, valid_gt_idx, 2:]  # (N_valid_gt, 32)
+            # Log-space L1: |log(pred) - log(gt)|, mean over rays (LSP-DETR style)
+            # Scale-invariant: 10% error on small ray == 10% error on large ray.
+            log_pd = pd_rays[:, None, :].clamp(min=1e-4).log()
+            log_gt = gt_rays[None, :, :].clamp(min=1e-4).log()
+            log_l1 = (log_pd - log_gt).abs().mean(dim=-1)  # (N_cand, N_valid_gt)
 
-            # Pairwise Polar-IoU with conditional chunking
-            if n_cand * n_valid_gt <= MAX_FLAT_PAIRS:
-                # Small enough: compute in one shot
-                pd_exp = pd_rays[:, None, :].expand(-1, n_valid_gt, -1)  # (N_cand, N_valid_gt, 32)
-                gt_exp = gt_rays[None, :, :].expand(n_cand, -1, -1)  # (N_cand, N_valid_gt, 32)
-                iou = polar_iou_pairwise_flat_torch(pd_exp, gt_exp)  # (N_cand, N_valid_gt)
-            else:
-                # Dense scene: chunk to stay under memory budget
-                chunk_size = max(1, MAX_FLAT_PAIRS // n_valid_gt)
-                iou = torch.zeros(n_cand, n_valid_gt, device=pd_bboxes.device, dtype=pd_bboxes.dtype)
-                for chunk_start in range(0, n_cand, chunk_size):
-                    chunk_end = min(chunk_start + chunk_size, n_cand)
-                    pd_chunk = pd_rays[chunk_start:chunk_end][:, None, :].expand(-1, n_valid_gt, -1)
-                    gt_chunk = gt_rays[None, :, :].expand(chunk_end - chunk_start, -1, -1)
-                    iou[chunk_start:chunk_end] = polar_iou_pairwise_flat_torch(pd_chunk, gt_chunk)
+            # Convert to overlap proxy: 1 / (1 + log_l1) ∈ (0, 1]
+            l1_overlap = 1.0 / (1.0 + log_l1)
 
-            # Fill overlaps — only at positions where mask_gt is True.
-            # iou is (N_cand, N_valid_gt), overlaps needs (N_valid_gt, N_cand).
-            # Cast to overlaps dtype to handle AMP half/float mismatch.
-            pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]  # (N_valid_gt, N_cand)
-            overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = iou.T.to(overlaps.dtype) * pair_mask.to(
-                overlaps.dtype
-            )
+            pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
+            overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = l1_overlap.T * pair_mask.float()
 
-        # Alignment metric: cls_score^alpha * iou^beta (same formula as parent)
         align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
         return align_metric, overlaps
 
