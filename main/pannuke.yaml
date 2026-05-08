@@ -1,7 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"        # YOLO26 variant: n, s, m, l, x
-  model: "raycasted/cfg/yolo26s-run27-haar-resoconv-backbone.yaml"  # Run 27: pure Haar (db1) wavelet single-stream
+  model: "raycasted/cfg/yolo26s-run25-hybrid-wavelet-backbone.yaml"  
   n_rays: 64          # Number of radial rays for polygon parameterization
   max_size: 256
   crop_size: 256
