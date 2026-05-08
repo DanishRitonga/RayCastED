@@ -12,9 +12,9 @@ with polygon regression terms.
 RayCastE2ELoss subclasses E2ELoss, wiring RayCastDetectionLoss
 into both one2many/one2one branches with smoothness annealing.
 
-Classification loss: BCE only. Focal loss and QFL were tested and found
-to be severely harmful for polygon detection (precision collapse, F1 drop
-from 0.73 to 0.41). See ablation runs with Run 27 architecture.
+Classification loss: BCE (default) or Focal loss. Focal loss down-weights
+easy negatives and amplifies hard positives, useful for dense cell scenes.
+Enabled via focal_gamma > 0.
 """
 
 from __future__ import annotations
@@ -216,6 +216,34 @@ def _log_space_ray_loss(pred_rays: torch.Tensor, target_rays: torch.Tensor, eps:
     return (log_pred - log_tgt).abs().mean(-1)
 
 
+def _focal_loss(
+    pred_scores: torch.Tensor,
+    target_scores: torch.Tensor,
+    gamma: float = 2.0,
+    alpha: float = 1.0,
+) -> torch.Tensor:
+    """Focal loss for multi-label classification.
+
+    Down-weights easy negatives and amplifies hard positives, which helps
+    in dense cell scenes where background anchors vastly outnumber positive ones.
+
+    When gamma=0 and alpha=1.0, this reduces to standard BCE.
+
+    Args:
+        pred_scores: [B, N, C] raw logits from the detection head.
+        target_scores: [B, N, C] soft classification targets from the assigner.
+        gamma: Focusing parameter. Higher values down-weight easy examples more.
+        alpha: Positive sample weight factor. 1.0 means no extra weighting.
+
+    Returns:
+        [B, N, C] element-wise focal loss (no reduction).
+    """
+    pred = pred_scores.sigmoid()
+    ce = F.binary_cross_entropy(pred, target_scores, reduction='none')
+    focal_weight = alpha * (1 - pred) ** gamma * target_scores + pred ** gamma * (1 - target_scores)
+    return focal_weight * ce
+
+
 class RayCastDetectionLoss(v8DetectionLoss):
     """Polygon detection loss with 5 terms.
 
@@ -240,6 +268,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         assigner_beta: float = 6.0,
         log_ray_loss: bool = False,
         gradnorm_manager: GradNormManager | None = None,
+        focal_gamma: float = 0.0,
+        focal_alpha: float = 1.0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -252,6 +282,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # GradNorm integration — dynamic loss weight balancing
         self.gradnorm_manager = gradnorm_manager
+
+        # Focal loss configuration (gamma=0 disables focal, uses pure BCE)
+        self.focal_gamma = focal_gamma
+        self.focal_alpha = focal_alpha
 
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
@@ -364,9 +398,16 @@ class RayCastDetectionLoss(v8DetectionLoss):
             mask_gt,
         )
 
-        # --- L_cls: BCE normalised by target_scores_sum (standard TAL approach) ---
+        # --- L_cls: BCE or Focal loss normalised by target_scores_sum ---
         target_scores_sum = max(target_scores.sum(), 1)
-        loss[1] = self.bce(pred_scores.float(), target_scores.float()).sum() / target_scores_sum
+        if self.focal_gamma > 0:
+            loss_cls = self.focal_loss(
+                pred_scores.float(), target_scores.float(),
+                gamma=self.focal_gamma, alpha=self.focal_alpha,
+            )
+        else:
+            loss_cls = self.bce(pred_scores.float(), target_scores.float())
+        loss[1] = loss_cls.sum() / target_scores_sum
 
         # --- Polygon regression losses (foreground only, uniform weight) ---
         if fg_mask.sum():
@@ -452,6 +493,8 @@ class RayCastE2ELoss(E2ELoss):
         cost_class: float = 1.0,
         cost_centroid: float = 1.0,
         cost_ray: float = 1.0,
+        focal_gamma: float = 0.0,
+        focal_alpha: float = 1.0,
         gradnorm: bool = False,
         gradnorm_alpha: float = 0.5,
         gradnorm_warmup_epochs: int = 5,
@@ -476,6 +519,8 @@ class RayCastE2ELoss(E2ELoss):
             assigner_beta=assigner_beta,
             log_ray_loss=log_ray_loss,
             gradnorm_manager=self.gradnorm_manager,
+            focal_gamma=focal_gamma,
+            focal_alpha=focal_alpha,
         )
         super().__init__(model, loss_fn=loss_fn)
 

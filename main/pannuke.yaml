@@ -62,8 +62,9 @@ training:
   cost_centroid: 1.0          # L1 centroid cost weight
   cost_ray: 1.0               # relative-L1 ray cost weight (scale-invariant)
 
-  # Classification loss (BCE only — focal and QFL tested, both harmful)
-  # focal_loss, focal_gamma, quality_focal_loss removed from codebase
+  # Classification loss
+  focal_gamma: 1.0           # Focal loss gamma (0 = BCE, 1.0 = recommended start)
+  focal_alpha: 1.0           # Focal loss alpha (1.0 = no class weighting)
 
   # Augmentation (polygon-safe)
   stain_jitter: true         # HSV color jitter for histopathology. Was false
