@@ -403,9 +403,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # --- L_cls: BCE or Focal loss normalised by target_scores_sum ---
         target_scores_sum = max(target_scores.sum(), 1)
         if self.focal_gamma > 0:
-            loss_cls = self.focal_loss(
+            cls_targets = target_scores.float().clone()
+            cls_targets[cls_targets > 0] = 1.0
+            loss_cls = _focal_loss(
                 pred_scores.float(),
-                target_scores.float(),
+                cls_targets,
                 gamma=self.focal_gamma,
                 alpha=self.focal_alpha,
             )
