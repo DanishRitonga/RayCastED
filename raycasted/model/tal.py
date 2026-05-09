@@ -4,6 +4,7 @@ RayCastAssigner subclasses TaskAlignedAssigner to replace box-based
 assignment with polygon-aware logic:
   - select_candidates_in_gts: 75th-percentile radius containment
   - get_box_metrics: log-space L1 ray similarity (LSP-DETR style, no Polar-IoU)
+  - select_topk_candidates: dynamic topk cap per GT to avoid garbage padding
 
 HungarianRayCastAssigner extends RayCastAssigner with globally optimal
 bipartite matching (scipy.linear_sum_assignment) for the one2one branch,
@@ -26,23 +27,27 @@ from ultralytics.utils.tal import TaskAlignedAssigner
 class RayCastAssigner(TaskAlignedAssigner):
     """Polygon-aware assigner using log-space L1 ray similarity for matching.
 
-    Overrides two methods from TaskAlignedAssigner:
+    Overrides three methods from TaskAlignedAssigner:
       - select_candidates_in_gts: radius containment instead of box containment
       - get_box_metrics: log-space L1 similarity (LSP-DETR style, no Polar-IoU)
+      - select_topk_candidates: dynamic topk cap per GT to avoid garbage padding
 
-    get_targets is inherited as-is — the parent is dimension-agnostic.
+    get_targets is inherited as-is — the parent implementation is dimension-
+    agnostic (uses gt_bboxes.shape[-1] dynamically) and works for 34-dim
+    polygon targets without modification.
     """
 
     def __init__(
         self,
-        topk: int = 13,
-        num_classes: int = 80,
-        alpha: float = 0.5,
-        beta: float = 6.0,
-        stride: list | None = None,
-        eps: float = 1e-9,
-        topk2: int | None = None,
-        radius_scale: float = 1.5,
+        topk=13,
+        num_classes=80,
+        alpha=0.5,
+        beta=6.0,
+        stride=None,
+        eps=1e-9,
+        topk2=None,
+        radius_scale=1.5,
+        align_threshold=0.0,
     ):
         """Initialize RayCastAssigner.
 
@@ -57,6 +62,9 @@ class RayCastAssigner(TaskAlignedAssigner):
             radius_scale: Multiplier on 75th-percentile containment radius.
                 Monitor mean positive assignments per GT cell for first 100
                 batches. Target: 1-4. Below 1 → too small. Above 10 → too large.
+            align_threshold: Minimum overlap proxy (1/(1+log_l1)) for a candidate
+                to be considered a positive. Anchors below this threshold are
+                zeroed out before topk selection. Range [0, 1), default 0 (disabled).
         """
         super().__init__(
             topk=topk,
@@ -68,6 +76,7 @@ class RayCastAssigner(TaskAlignedAssigner):
             topk2=topk2,
         )
         self.radius_scale = radius_scale
+        self.align_threshold = align_threshold
 
     # -----------------------------------------------------------------
     # Override 1: radius-based containment
@@ -204,8 +213,38 @@ class RayCastAssigner(TaskAlignedAssigner):
             pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
             overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = l1_overlap.T * pair_mask.float()
 
+        if self.align_threshold > 0:
+            overlaps = overlaps * (overlaps >= self.align_threshold).float()
+
         align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
         return align_metric, overlaps
+
+    def select_topk_candidates(self, metrics, topk_mask=None):
+        """Select top-k candidates with dynamic per-GT cap.
+
+        Overrides parent to clamp topk per GT to the number of actual
+        candidates (non-zero metric entries). When a GT has fewer than
+        ``self.topk`` anchors within its containment radius, the parent
+        pads with the first-k entries — which injects garbage anchors
+        into the positive set. This override prevents that by masking
+        zero-metric entries before topk selection.
+        """
+        bs, n_max_boxes, n_anchors = metrics.shape
+        safe_k = min(self.topk, n_anchors)
+
+        topk_metrics, topk_idxs = torch.topk(metrics, safe_k, dim=-1, largest=True)
+
+        metric_mask = topk_metrics > self.eps
+        if topk_mask is not None:
+            metric_mask = metric_mask & topk_mask
+        topk_idxs.masked_fill_(~metric_mask, 0)
+
+        count_tensor = torch.zeros(metrics.shape, dtype=torch.int8, device=topk_idxs.device)
+        ones = torch.ones_like(topk_idxs[:, :, :1], dtype=torch.int8, device=topk_idxs.device)
+        for k in range(safe_k):
+            count_tensor.scatter_add_(-1, topk_idxs[:, :, k : k + 1], ones)
+        count_tensor.clamp_(0, 1)
+        return count_tensor
 
 
 class HungarianRayCastAssigner(RayCastAssigner):

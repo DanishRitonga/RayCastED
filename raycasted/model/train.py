@@ -173,6 +173,7 @@ class _RayCastCriterionWrapper:
             cost_ray=tcfg.get('cost_ray', 1.0),
             focal_gamma=tcfg.get('focal_gamma', 0.0),
             focal_alpha=tcfg.get('focal_alpha', 1.0),
+            align_threshold=tcfg.get('align_threshold', 0.0),
             gradnorm=tcfg.get('gradnorm', False),
             gradnorm_alpha=tcfg.get('gradnorm_alpha', 0.5),
             gradnorm_warmup_epochs=tcfg.get('gradnorm_warmup_epochs', 5),

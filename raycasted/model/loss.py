@@ -240,7 +240,7 @@ def _focal_loss(
     """
     pred = pred_scores.sigmoid()
     ce = F.binary_cross_entropy(pred, target_scores, reduction='none')
-    focal_weight = alpha * (1 - pred) ** gamma * target_scores + pred ** gamma * (1 - target_scores)
+    focal_weight = alpha * (1 - pred) ** gamma * target_scores + pred**gamma * (1 - target_scores)
     return focal_weight * ce
 
 
@@ -266,6 +266,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         assigner_radius_scale: float = 1.5,
         assigner_alpha: float = 0.5,
         assigner_beta: float = 6.0,
+        align_threshold: float = 0.0,
         log_ray_loss: bool = False,
         gradnorm_manager: GradNormManager | None = None,
         focal_gamma: float = 0.0,
@@ -294,8 +295,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
             alpha=assigner_alpha,
             beta=assigner_beta,
             stride=self.stride.tolist(),
-            topk2=tal_topk2,  # Pass through topk2 for E2E one2one branch
+            topk2=tal_topk2,
             radius_scale=assigner_radius_scale,
+            align_threshold=align_threshold,
         )
 
         # Loss weights (rebalanced so xy and L1 share gradient signal equally)
@@ -402,8 +404,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
         target_scores_sum = max(target_scores.sum(), 1)
         if self.focal_gamma > 0:
             loss_cls = self.focal_loss(
-                pred_scores.float(), target_scores.float(),
-                gamma=self.focal_gamma, alpha=self.focal_alpha,
+                pred_scores.float(),
+                target_scores.float(),
+                gamma=self.focal_gamma,
+                alpha=self.focal_alpha,
             )
         else:
             loss_cls = self.bce(pred_scores.float(), target_scores.float())
@@ -495,6 +499,7 @@ class RayCastE2ELoss(E2ELoss):
         cost_ray: float = 1.0,
         focal_gamma: float = 0.0,
         focal_alpha: float = 1.0,
+        align_threshold: float = 0.0,
         gradnorm: bool = False,
         gradnorm_alpha: float = 0.5,
         gradnorm_warmup_epochs: int = 5,
@@ -521,6 +526,7 @@ class RayCastE2ELoss(E2ELoss):
             gradnorm_manager=self.gradnorm_manager,
             focal_gamma=focal_gamma,
             focal_alpha=focal_alpha,
+            align_threshold=align_threshold,
         )
         super().__init__(model, loss_fn=loss_fn)
 
@@ -564,11 +570,20 @@ class RayCastE2ELoss(E2ELoss):
                 stride=self.one2one.assigner.stride if hasattr(self.one2one.assigner, 'stride') else [8, 16, 32],
                 topk2=1,
                 radius_scale=assigner_radius_scale,
+                align_threshold=align_threshold,
             )
         else:
-            one2one_pool = max(tal_topk // 2, 7)  # candidate pool for one2one
-            self.one2one.assigner.topk = one2one_pool
-            self.one2one.assigner.topk2 = 1  # NMS-free: keep only 1 anchor per GT
+            one2one_pool = max(tal_topk // 2, 7)
+            self.one2one.assigner = RayCastAssigner(
+                topk=one2one_pool,
+                num_classes=self.one2one.assigner.num_classes,
+                alpha=assigner_alpha,
+                beta=assigner_beta,
+                stride=self.one2one.assigner.stride if hasattr(self.one2one.assigner, 'stride') else [8, 16, 32],
+                topk2=1,
+                radius_scale=assigner_radius_scale,
+                align_threshold=align_threshold,
+            )
 
         # Validate E2E architecture integrity
         if use_hungarian_o2o:

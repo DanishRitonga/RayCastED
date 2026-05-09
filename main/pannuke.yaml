@@ -1,7 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"        # YOLO26 variant: n, s, m, l, x
-  model: "raycasted/cfg/yolo26s-run25-hybrid-wavelet-backbone.yaml"  
+  model: "raycasted/cfg/yolo26s-run28-p234.yaml"  
   n_rays: 64          # Number of radial rays for polygon parameterization
   max_size: 256
   crop_size: 256
@@ -55,6 +55,7 @@ training:
   assigner_radius_scale: 1.5  # containment radius multiplier
   assigner_alpha: 0.5         # cls^alpha in alignment metric
   assigner_beta: 3.0          # iou^beta in alignment metric (one2many only)
+  align_threshold: 0.2        # minimum overlap proxy for positive assignment (0=disabled)
   use_hungarian_o2o: true     # Hungarian matching for one2one branch (globally optimal)
 
   # L1-based Hungarian assignment cost (one2one branch)
