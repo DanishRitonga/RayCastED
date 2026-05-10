@@ -8,17 +8,17 @@ import polars as pl
 
 from .normalizer import NormalizerAndPadder
 from .spatialChunker import SpatialChunker
-from .stainEstimator import StainEstimator
 
 
 class TransformOrchestrator:
     """Orchestrates the ETL transform pipeline: chunking, profiling, normalization."""
 
-    def __init__(self, config_manager, ingested_dir: str, final_output_dir: str):
+    def __init__(self, config_manager, ingested_dir: str, final_output_dir: str, use_gpu: bool = False):
         self.config = config_manager.get_global_config()
         self.ingested_dir = Path(ingested_dir)
         self.final_output_dir = Path(final_output_dir)
         self.final_output_dir.mkdir(parents=True, exist_ok=True)
+        self.use_gpu = use_gpu
 
         # Memory-only transformers
         self.chunker = SpatialChunker(self.config)
@@ -34,7 +34,7 @@ class TransformOrchestrator:
         profile_path = self._build_population_profile()
 
         # 3. Instantiate Stage 3
-        self.normalizer = NormalizerAndPadder(self.config, profile_path)
+        self.normalizer = NormalizerAndPadder(self.config, profile_path, use_gpu=self.use_gpu)
 
         print('\n--- Stage 3: Normalization, Padding, & Final Cache ---')
 
@@ -129,6 +129,7 @@ class TransformOrchestrator:
         Returns:
             Path to the saved profile JSON, or None if no valid profiles found.
         """
+        estimator = self._get_estimator()
         stain_matrices = []
         max_concentrations = []
 
@@ -136,7 +137,7 @@ class TransformOrchestrator:
             data = np.load(row['path'])
             img = data['image']
 
-            matrix, concentrations = StainEstimator.get_profile(img, method='macenko')
+            matrix, concentrations = estimator.get_profile(img, method='macenko')
 
             if matrix is None or concentrations is None:
                 continue

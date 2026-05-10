@@ -18,12 +18,6 @@ INGESTOR_MAP = {
     'csv_poly': CSVPolygonIngestor,
 }
 
-_INGESTOR_MAP_LEGACY = {
-    1: ParquetIngestor,
-    4: GeoJSONIngestor,
-    5: CSVPolygonIngestor,
-}
-
 
 def test_all_datasets():
     print('--- 🚀 Starting Global Pipeline Test ---')
@@ -56,9 +50,6 @@ def test_all_datasets():
             dataset_cfg = config_manager.get_dataset_config(dataset_name)
 
             ingestor_key = dataset_cfg.get('ingestor')
-            if not ingestor_key:
-                method_int = dataset_cfg.get('ingestion_method')
-                ingestor_key = {1: 'parquet', 4: 'geojson', 5: 'csv_poly'}.get(method_int)
             IngestorClass = INGESTOR_MAP.get(ingestor_key)
 
             if not IngestorClass:

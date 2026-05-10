@@ -13,9 +13,6 @@ from raycasted.data.etl import CSVPolygonIngestor, ETLConfig, GeoJSONIngestor, P
 def get_ingestor(dataset_name: str, config: dict):
     """Factory to instantiate the correct ingestor based on config."""
     ingestor_key = config.get('ingestor')
-    if not ingestor_key:
-        method = config.get('ingestion_method')
-        ingestor_key = {1: 'parquet', 2: 'parquet', 3: 'parquet', 4: 'geojson', 5: 'csv_poly'}.get(method)
 
     registry = {
         'parquet': ParquetIngestor,

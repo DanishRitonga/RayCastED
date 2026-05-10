@@ -61,7 +61,7 @@ def _write_puma_only_config(tmp_dir: str) -> str:
         'datasets': {
             'PUMA': {
                 'root_dir': 'PUMA',
-                'ingestion_method': 4,
+                'ingestor': 'geojson',
                 'native_mpp': 0.22,
                 'split_separation': 'filename_regex',
                 'split_args': {

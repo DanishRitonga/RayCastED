@@ -56,9 +56,6 @@ def cache_ingested_data():
         try:
             dataset_cfg = config_manager.get_dataset_config(dataset_name)
             ingestor_key = dataset_cfg.get('ingestor')
-            if not ingestor_key:
-                method_int = dataset_cfg.get('ingestion_method')
-                ingestor_key = {1: 'parquet', 4: 'geojson', 5: 'csv_poly'}.get(method_int)
             IngestorClass = INGESTOR_MAP.get(ingestor_key)
 
             if not IngestorClass:

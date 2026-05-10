@@ -107,13 +107,25 @@ class RayCastGPU:
     @staticmethod
     def _compute_centroids(v_padded, mask, k_max, torch):
         """Area-weighted centroid via shoelace formula, vectorized over all polygons."""
-        v_next = torch.roll(v_padded, -1, dims=1)
+        n_polys, n_verts, _ = v_padded.shape
+        n_real = mask.sum(dim=1).long()
+        poly_idx = torch.arange(n_polys, device=v_padded.device)
+
+        v_next = torch.empty_like(v_padded)
+        v_next[:, :-1, :] = v_padded[:, 1:, :]
+        close_idx = n_real - 1
+        v_next[poly_idx, close_idx] = v_padded[poly_idx, 0]
+
+        last_edge = torch.arange(n_verts, device=v_padded.device).unsqueeze(0) == close_idx.unsqueeze(1)
+        edge_mask = mask & (torch.arange(n_verts, device=v_padded.device).unsqueeze(0) < close_idx.unsqueeze(1))
+        edge_mask = edge_mask | last_edge
+
         cross = v_padded[:, :, 0] * v_next[:, :, 1] - v_next[:, :, 0] * v_padded[:, :, 1]
-        cross = cross * mask.float()
+        cross = cross * edge_mask.float()
         area = 0.5 * cross.sum(dim=1)
 
-        cx = ((v_padded[:, :, 0] + v_next[:, :, 0]) * cross * mask.float()).sum(dim=1)
-        cy = ((v_padded[:, :, 1] + v_next[:, :, 1]) * cross * mask.float()).sum(dim=1)
+        cx = ((v_padded[:, :, 0] + v_next[:, :, 0]) * cross * edge_mask.float()).sum(dim=1)
+        cy = ((v_padded[:, :, 1] + v_next[:, :, 1]) * cross * edge_mask.float()).sum(dim=1)
 
         safe_area = torch.where(area.abs() > 1e-12, area, torch.ones_like(area))
         cx = cx / (6.0 * safe_area)
@@ -128,46 +140,59 @@ class RayCastGPU:
     @staticmethod
     def _point_in_polygon(centroids, v_padded, mask, k_max, torch):
         """Crossing-number test to detect centroids outside their polygon."""
-        n_polys = centroids.shape[0]
-        n_verts = v_padded.shape[1]
-        inside = torch.zeros(n_polys, dtype=torch.bool, device=centroids.device)
+        n_polys, n_verts, _ = v_padded.shape
+        n_real = mask.sum(dim=1).long()
+        poly_idx = torch.arange(n_polys, device=centroids.device)
 
-        j_indices = torch.arange(n_verts, device=centroids.device)
-        j_next = (j_indices + 1) % n_verts
+        v_next = torch.empty_like(v_padded)
+        v_next[:, :-1, :] = v_padded[:, 1:, :]
+        close_idx = n_real - 1
+        v_next[poly_idx, close_idx] = v_padded[poly_idx, 0]
 
-        vj = v_padded[:, j_indices, :]
-        vjn = v_padded[:, j_next, :]
+        last_edge = torch.arange(n_verts, device=centroids.device).unsqueeze(0) == close_idx.unsqueeze(1)
+        edge_mask = mask & (torch.arange(n_verts, device=centroids.device).unsqueeze(0) < close_idx.unsqueeze(1))
+        edge_mask = edge_mask | last_edge
 
-        y_cond = (vj[:, :, 1] > centroids[:, 1:2]) != (vjn[:, :, 1] > centroids[:, 1:2])
-        slope = (vjn[:, :, 0] - vj[:, :, 0]) * (centroids[:, 1:2] - vj[:, :, 1])
-        denom = vjn[:, :, 1] - vj[:, :, 1]
+        y_cond = (v_padded[:, :, 1] > centroids[:, 1:2]) != (v_next[:, :, 1] > centroids[:, 1:2])
+        slope = (v_next[:, :, 0] - v_padded[:, :, 0]) * (centroids[:, 1:2] - v_padded[:, :, 1])
+        denom = v_next[:, :, 1] - v_padded[:, :, 1]
         safe_denom = torch.where(denom.abs() > 1e-12, denom, torch.ones_like(denom))
-        x_intersect = vj[:, :, 0] + slope / safe_denom
+        x_intersect = v_padded[:, :, 0] + slope / safe_denom
         cross_right = x_intersect > centroids[:, 0:1]
 
-        crossings = (y_cond & cross_right & mask).sum(dim=1)
+        crossings = (y_cond & cross_right & edge_mask).sum(dim=1)
         inside = crossings % 2 == 1
 
         return inside
 
     @staticmethod
     def _fallback_centroid(centroids, inside, v_padded, mask, torch):
-        """Snap exterior centroids to their closest polygon vertex."""
+        """Move exterior centroids inside via binary search toward centroid of 3 nearest vertices."""
         outside = ~inside
         if not outside.any():
             return centroids
 
-        diff = v_padded.unsqueeze(2) - centroids.unsqueeze(1).unsqueeze(1)
+        n_polys = v_padded.shape[0]
+        k_max = v_padded.shape[1]
+        poly_idx = torch.arange(n_polys, device=centroids.device)
+
+        diff = v_padded - centroids.unsqueeze(1)
         dist_sq = (diff * diff).sum(dim=-1)
-        dist_sq = dist_sq.masked_fill(~mask.unsqueeze(2), float('inf'))
-        closest_flat = dist_sq.view(v_padded.shape[0], -1).argmin(dim=1)
+        dist_sq = dist_sq.masked_fill(~mask, float('inf'))
 
-        n_verts = v_padded.shape[1]
-        vert_idx = closest_flat // n_verts
-        pt_idx = closest_flat % n_verts
+        n_nearest = min(3, k_max)
+        _, topk_idx = dist_sq.topk(n_nearest, dim=1, largest=False)
 
-        snapped = v_padded[vert_idx, pt_idx]
-        centroids = torch.where(outside.unsqueeze(1), snapped, centroids)
+        topk_verts = v_padded[poly_idx.unsqueeze(1), topk_idx]
+        target = topk_verts.mean(dim=1)
+
+        candidates = centroids.clone()
+        for frac in [0.5, 0.75, 0.875, 0.9375, 0.96875]:
+            mid = centroids + frac * (target - centroids)
+            mid_inside = RayCastGPU._point_in_polygon(mid, v_padded, mask, k_max, torch)
+            candidates = torch.where(mid_inside.unsqueeze(1), mid, candidates)
+
+        centroids = torch.where(outside.unsqueeze(1), candidates, centroids)
 
         return centroids
 
@@ -175,10 +200,17 @@ class RayCastGPU:
     def _solve_ray_intersections(centroids, v_padded, mask, directions, k_max, torch):
         """Cramer's rule batch solve for all (polygon, ray, edge) triples."""
         cos_d, sin_d = directions
-        n_verts = v_padded.shape[1]
+        n_polys, n_verts, _ = v_padded.shape
+        poly_idx = torch.arange(n_polys, device=centroids.device)
+        n_real = mask.sum(dim=1).long()
 
-        j_next = (torch.arange(n_verts, device=centroids.device) + 1) % n_verts
-        vjn = v_padded[:, j_next, :]
+        vjn = torch.empty_like(v_padded)
+        vjn[:, :-1, :] = v_padded[:, 1:, :]
+        vjn[poly_idx, n_real - 1] = v_padded[poly_idx, 0]
+
+        last_edge = torch.arange(n_verts, device=centroids.device).unsqueeze(0) == (n_real - 1).unsqueeze(1)
+        edge_mask = mask & (torch.arange(n_verts, device=centroids.device).unsqueeze(0) < n_real.unsqueeze(1))
+        edge_mask = edge_mask | last_edge
 
         v1x = v_padded[:, :, 0].unsqueeze(1)
         v1y = v_padded[:, :, 1].unsqueeze(1)
@@ -203,7 +235,7 @@ class RayCastGPU:
         u = u_num / safe_det
 
         valid = det_valid & (t > 1e-6) & (u >= 0) & (u <= 1)
-        valid = valid & mask.unsqueeze(1).unsqueeze(3)
+        valid = valid & edge_mask.unsqueeze(1)
 
         dists = torch.where(valid, t, torch.full_like(t, 1e10))
         min_dists, _ = dists.min(dim=-1)
@@ -217,6 +249,7 @@ class RayCastGPU:
         out[:, 0] = torch.from_numpy(class_ids.astype(np.float32)).to(distances.device)
         out[:, 1] = centroids[:, 0]
         out[:, 2] = centroids[:, 1]
-        out[:, 3:] = distances
+        hit = distances < 1e9
+        out[:, 3:] = torch.where(hit, distances, torch.zeros_like(distances))
 
         return out.cpu().numpy()

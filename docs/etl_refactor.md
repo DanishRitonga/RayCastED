@@ -305,10 +305,8 @@ datasets:
     ingestor: parquet     # self-documenting
 ```
 
-**Backward compatibility:** Support both `ingestor` (new) and `ingestion_method` (legacy)
-in the Pydantic validator. If `ingestion_method` is provided, translate it to the string
-key using a lookup table. Emit a `DeprecationWarning` in that case. Remove the legacy path
-after all configs are migrated.
+**Done:** The legacy `ingestion_method` integer field has been fully removed from
+`DatasetConfig`. All YAML configs now use the string `ingestor` field directly.
 
 ---
 
@@ -367,10 +365,11 @@ Before completing the task, verify the following strict rules:
 - [ ] **Empty Array Fallback:** If bounding boxes are completely empty in a patch, the
   array must be initialized safely as `np.empty((0, 5), dtype=np.int32)` to prevent
   downstream PyTorch slicing crashes.
-- [ ] **DISPATCH_MAP Migration:** The integer-based `DISPATCH_MAP` is replaced by
-  a string-based `INGESTOR_REGISTRY`. All YAML configs use `ingestion_method: parquet`
-  instead of `ingestion_method: 1`. The old integer keys are removed.
-- [ ] **Config Validation:** `DatasetConfig.ingestion_method` type is `str` (not `int`).
+- [x] **DISPATCH_MAP Migration:** The integer-based `DISPATCH_MAP` is replaced by
+  a string-based `INGESTOR_REGISTRY`. All YAML configs use `ingestor: parquet`
+  instead of `ingestion_method: 1`. The old integer keys and backward-compat
+  validator have been removed.
+- [x] **Config Validation:** `DatasetConfig.ingestor` type is `str`.
   Pydantic validates against the set of registered ingestor names.
 - [ ] **MatInst Raycast Stub:** `mat_inst_parser.py`'s `_extract_raycast_annotations`
   is currently a `NotImplementedError`. When implementing, it uses the same
