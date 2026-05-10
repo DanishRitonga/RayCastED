@@ -3,21 +3,26 @@
 RayCastAssigner subclasses TaskAlignedAssigner to replace box-based
 assignment with polygon-aware logic:
   - select_candidates_in_gts: 75th-percentile radius containment
-  - get_box_metrics: unified cost matrix (focal cls + L2 centroid + log-space L1 rays)
+  - get_box_metrics: Polar-IoU geometric overlap for one2many alignment
+  - _compute_cost_matrix: unified additive cost for Hungarian one2one
   - select_topk_candidates: dynamic topk cap per GT to avoid garbage padding
 
-Both one2many and one2one branches share the identical cost formulation:
-  cost = w_cls * focal_cls_cost + w_xy * L2(pred_xy, gt_xy) + w_ray * mean(|log(pred) - log(gt)|)
+The two branches use different ranking strategies:
 
-One2many inverts the cost to a similarity metric: align = 1 / (1 + cost)
-Hungarian uses the raw cost for linear_sum_assignment (minimisation).
+  one2many:  align = cls_score^α × PolarIoU^β  (multiplicative, geometric dominance)
+  one2one:   cost = w_cls*focal + w_xy*L2 + w_ray*log_l1  (additive, Hungarian)
+
+Polar-IoU in the one2many branch provides absolute geometric discrimination
+critical for dense touching-cell scenes: even a 1-pixel boundary overshoot
+between adjacent nuclei is harshly penalised by β=6 exponentiation,
+preventing anchor assignment collisions.
 
 HungarianRayCastAssigner extends RayCastAssigner with globally optimal
 bipartite matching (scipy.linear_sum_assignment) for the one2one branch.
 
 get_targets is NOT overridden — the parent implementation is dimension-
-agnostic (uses gt_bboxes.shape[-1] dynamically) and works for 34-dim
-polygon targets without modification.
+agnostic (uses gt_bboxes.shape[-1] dynamically) and works for any
+polygon dimensionality (2 + N_RAYS) without modification.
 
 Spec reference: docs/project.md §11
 """
@@ -26,21 +31,29 @@ import torch
 from scipy.optimize import linear_sum_assignment
 from ultralytics.utils.tal import TaskAlignedAssigner
 
+from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
+
 
 class RayCastAssigner(TaskAlignedAssigner):
-    """Polygon-aware assigner with unified cost matrix for both branches.
+    """Polygon-aware assigner with dual-metric assignment.
 
-    Uses identical cost terms for one2many and one2one assignment:
+    One2many branch uses Polar-IoU geometric overlap (multiplicative):
+      align = cls_score^alpha * PolarIoU^beta
+    This provides absolute geometric discrimination critical for dense
+    touching-cell scenes — even a 1-pixel boundary overshoot is harshly
+    penalised by beta=6 exponentiation.
+
+    One2one branch (Hungarian) uses additive unified cost:
       cost = w_cls * focal_cls + w_xy * L2_centroid + w_ray * log_l1_rays
 
     Overrides three methods from TaskAlignedAssigner:
       - select_candidates_in_gts: radius containment instead of box containment
-      - get_box_metrics: unified cost → inverted similarity for topk selection
+      - get_box_metrics: Polar-IoU overlap for one2many alignment metric
       - select_topk_candidates: dynamic topk cap per GT to avoid garbage padding
 
     get_targets is inherited as-is — the parent implementation is dimension-
-    agnostic (uses gt_bboxes.shape[-1] dynamically) and works for 34-dim
-    polygon targets without modification.
+    agnostic (uses gt_bboxes.shape[-1] dynamically) and works for any
+    polygon dimensionality (2 + N_RAYS) without modification.
     """
 
     def __init__(
@@ -105,8 +118,8 @@ class RayCastAssigner(TaskAlignedAssigner):
 
         Args:
             xy_centers: Anchor grid positions, shape (N_anchors, 2).
-            gt_bboxes: GT polygon targets, shape (B, N_max_gt, 34).
-                       Columns: [cx, cy, d_1..d_32] in normalised coords.
+            gt_bboxes: GT polygon targets, shape (B, N_max_gt, 2+N_RAYS).
+                       Columns: [cx, cy, d_1..d_R] in normalised coords.
             mask_gt: Valid GT mask, shape (B, N_max_gt, 1).
             eps: Unused (kept for API compatibility).
 
@@ -166,11 +179,11 @@ class RayCastAssigner(TaskAlignedAssigner):
 
         Args:
             pd_scores: Classification scores, shape (B, N_anchors, nc).
-            pd_bboxes: Decoded polygon predictions, shape (B, N_anchors, 34).
-                       Columns: [decoded_xy(2), softplus_rays(32)].
+            pd_bboxes: Decoded polygon predictions, shape (B, N_anchors, 2+N_RAYS).
+                       Columns: [decoded_xy(2), softplus_rays(N_RAYS)].
             gt_labels: GT class labels, shape (B, N_max_gt, 1).
-            gt_bboxes: GT polygon targets, shape (B, N_max_gt, 34).
-                       Columns: [cx, cy, d_1..d_32].
+            gt_bboxes: GT polygon targets, shape (B, N_max_gt, 2+N_RAYS).
+                       Columns: [cx, cy, d_1..d_R].
             mask_gt_bool: Boolean GT mask, shape (B, N_max_gt, 1).
 
         Returns:
@@ -228,36 +241,74 @@ class RayCastAssigner(TaskAlignedAssigner):
         return cost, overlaps
 
     # -----------------------------------------------------------------
-    # Override 2: get_box_metrics (one2many similarity from unified cost)
+    # Override 2: get_box_metrics (one2many — absolute geometric overlap)
     # -----------------------------------------------------------------
 
     def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
-        """Compute alignment metric from unified cost matrix.
+        """Compute alignment metric using absolute Polar-IoU overlap.
 
-        Calls _compute_cost_matrix to get the same cost used by Hungarian,
-        then inverts to a similarity metric: align = 1 / (1 + cost).
+        For the one2many branch, geometric overlap must dominate the
+        assignment metric.  In dense nuclei scenes a small absolute boundary
+        error can merge touching instances — a topologically fatal mistake.
+        Polar-IoU measures *absolute* area overlap so that even a 1 px
+        overshoot on a small nucleus is penalised harshly when raised to a
+        high power (beta).
 
-        The parent's select_topk_candidates picks anchors with largest
-        align_metric, which correctly prefers lowest-cost anchors.
+        Formula (matches ultralytics parent):
+            align_metric = cls_score^alpha * piou^beta
+
+        The Hungarian one2one branch continues to use the additive unified
+        cost matrix (_compute_cost_matrix) — the two branches serve
+        different purposes and need different metrics.
 
         Args:
             pd_scores: Classification scores, shape (B, N_anchors, nc).
-            pd_bboxes: Decoded polygon predictions, shape (B, N_anchors, 34).
+            pd_bboxes: Decoded polygon predictions, shape (B, N_anchors, 2+N_RAYS).
             gt_labels: GT class labels, shape (B, N_max_gt, 1).
-            gt_bboxes: GT polygon targets, shape (B, N_max_gt, 34).
+            gt_bboxes: GT polygon targets, shape (B, N_max_gt, 2+N_RAYS).
             mask_gt: Valid GT mask, shape (B, N_max_gt, 1).
 
         Returns:
             align_metric: (B, N_max_gt, N_anchors).
             overlaps: (B, N_max_gt, N_anchors).
         """
+        na = pd_bboxes.shape[-2]
         mask_gt_bool = mask_gt.bool()
-        cost, overlaps = self._compute_cost_matrix(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt_bool)
+        overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=torch.float32, device=pd_bboxes.device)
+        bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
+
+        ind = torch.zeros([2, self.bs, self.n_max_boxes], dtype=torch.long)
+        ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)
+        ind[1] = gt_labels.squeeze(-1)
+        bbox_scores[mask_gt_bool] = pd_scores[ind[0], :, ind[1]][mask_gt_bool]
+
+        for b in range(self.bs):
+            candidate_mask = mask_gt_bool[b].any(dim=0)
+            cand_idx = candidate_mask.nonzero(as_tuple=False).squeeze(-1)
+            n_cand = cand_idx.shape[0]
+            if n_cand == 0:
+                continue
+
+            valid_gt_mask = mask_gt_bool[b].any(dim=1)
+            valid_gt_idx = valid_gt_mask.nonzero(as_tuple=False).squeeze(-1)
+            n_valid_gt = valid_gt_idx.shape[0]
+
+            pd_rays = pd_bboxes[b, cand_idx, 2:]
+            gt_rays = gt_bboxes[b, valid_gt_idx, 2:]
+
+            pd_exp = pd_rays[:, None, :].expand(-1, n_valid_gt, -1)
+            gt_exp = gt_rays[None, :, :].expand(n_cand, -1, -1)
+            iou = polar_iou_pairwise_flat_torch(pd_exp, gt_exp)
+
+            pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
+            overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = iou.T.to(overlaps.dtype) * pair_mask.to(
+                overlaps.dtype
+            )
 
         if self.align_threshold > 0:
             overlaps = overlaps * (overlaps >= self.align_threshold).float()
 
-        align_metric = 1.0 / (1.0 + cost)
+        align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
         return align_metric, overlaps
 
     # -----------------------------------------------------------------
@@ -339,10 +390,10 @@ class HungarianRayCastAssigner(RayCastAssigner):
 
         Args:
             pd_scores: Predicted classification scores, shape (B, N_anchors, nc).
-            pd_bboxes: Predicted polygon targets, shape (B, N_anchors, 34).
+            pd_bboxes: Predicted polygon targets, shape (B, N_anchors, 2+N_RAYS).
             anc_points: Anchor grid positions, shape (N_anchors, 2).
             gt_labels: GT class labels, shape (B, N_max_gt, 1).
-            gt_bboxes: GT polygon targets, shape (B, N_max_gt, 34).
+            gt_bboxes: GT polygon targets, shape (B, N_max_gt, 2+N_RAYS).
             mask_gt: Valid GT mask, shape (B, N_max_gt, 1).
 
         Returns:
