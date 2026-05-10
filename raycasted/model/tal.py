@@ -213,21 +213,9 @@ class RayCastAssigner(TaskAlignedAssigner):
             log_l1 = (log_pd - log_gt).abs().mean(dim=-1)  # (n_cand, n_valid_gt)
             cost_ray = log_l1
 
-            # --- Normalize each cost term to [0, 1] for scale-independent weighting ---
-            def _norm(c):
-                c_min, c_max = c.min(), c.max()
-                rng = c_max - c_min
-                if rng < 1e-8:
-                    return torch.zeros_like(c)
-                return (c - c_min) / rng
-
-            cost_cls_n = _norm(cost_cls)
-            cost_xy_n = _norm(cost_xy)
-            cost_ray_n = _norm(cost_ray)
-
-            # --- Combined cost (all terms in [0, 1]) ---
+            # --- Combined cost ---
             total = (
-                self.cost_class * cost_cls_n + self.cost_centroid * cost_xy_n + self.cost_ray * cost_ray_n
+                self.cost_class * cost_cls + self.cost_centroid * cost_xy + self.cost_ray * cost_ray
             )  # (n_cand, n_valid_gt)
 
             # Ray similarity for overlaps (used by parent's normalisation)
