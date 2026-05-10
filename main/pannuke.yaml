@@ -38,7 +38,6 @@ global_settings:
     "Uterus": 18
 
 # Training settings — recommended values for improved detection quality.
-# Omit the entire section for legacy behavior (backward compat).
 training:
   # Head architecture
   head_channel_scale: 0.5    # c2 = max(head_channel_min, ch * scale). Was 0.25
