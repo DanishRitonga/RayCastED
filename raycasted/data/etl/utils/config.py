@@ -1,5 +1,6 @@
 from pathlib import Path
 from typing import Any, Literal
+import warnings
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -119,12 +120,22 @@ class GlobalSettings(BaseModel):
 
 
 # === DATASET CONFIG ===
+_LEGACY_METHOD_MAP: dict[int, str] = {
+    1: 'parquet',
+    3: 'mat_inst',
+    4: 'geojson',
+    5: 'csv_poly',
+}
+
+
 class DatasetConfig(BaseModel):
     root_dir: str
-    ingestion_method: int
     native_mpp: float
     split_separation: Literal['physical', 'filename_regex', 'none']
     modality_separation: Literal['physical_parallel', 'physical_flat', 'bundled_archive']
+
+    ingestor: str | None = None
+    ingestion_method: int | None = None
 
     # Conditional fields
     split_dirs: dict[str, str] | None = None
@@ -137,6 +148,31 @@ class DatasetConfig(BaseModel):
     namespace_map: dict[str, str] = Field(default_factory=dict)
     tissue_map: dict[str, str] = Field(default_factory=dict)
     tissue_type: str | None = None
+
+    @model_validator(mode='after')
+    def resolve_ingestor_field(self):
+        if self.ingestor is not None and self.ingestion_method is not None:
+            raise ValueError(
+                f"Specify either 'ingestor' or 'ingestion_method', not both. "
+                f'Got ingestor={self.ingestor!r}, ingestion_method={self.ingestion_method}'
+            )
+        if self.ingestor is not None:
+            return self
+        if self.ingestion_method is not None:
+            resolved = _LEGACY_METHOD_MAP.get(self.ingestion_method)
+            if resolved is None:
+                raise ValueError(
+                    f'Unknown ingestion_method={self.ingestion_method}. '
+                    f'Supported legacy codes: {list(_LEGACY_METHOD_MAP.keys())}'
+                )
+            warnings.warn(
+                f"'ingestion_method: {self.ingestion_method}' is deprecated — use 'ingestor: {resolved}' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.ingestor = resolved
+            return self
+        raise ValueError("Either 'ingestor' or 'ingestion_method' must be specified.")
 
     @model_validator(mode='after')
     def validate_split_separation_requirements(self):

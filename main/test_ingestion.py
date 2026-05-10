@@ -6,18 +6,22 @@ import polars as pl
 
 # Adjust these imports based on your actual project structure
 from raycasted.data.etl import (
-    CSVPolygonIngestor,
+    CSVPolyParser,
     ETLConfig,
-    GeoJSONIngestor,
-    ParquetIngestor,
+    GeoJSONParser,
+    ParquetParser,
 )
 
-# 1. The Ingestor Factory
-# Maps the integer from your YAML to the actual Python class
 INGESTOR_MAP = {
-    1: ParquetIngestor,
-    4: GeoJSONIngestor,  # PUMA
-    5: CSVPolygonIngestor,  # PanopTILs
+    'parquet': ParquetParser,
+    'geojson': GeoJSONParser,
+    'csv_poly': CSVPolyParser,
+}
+
+_INGESTOR_MAP_LEGACY = {
+    1: ParquetParser,
+    4: GeoJSONParser,
+    5: CSVPolyParser,
 }
 
 
@@ -51,12 +55,14 @@ def test_all_datasets():
             # Fetch the dataset-specific config block
             dataset_cfg = config_manager.get_dataset_config(dataset_name)
 
-            # Identify which ingestion class to use
-            method_int = dataset_cfg.get('ingestion_method')
-            IngestorClass = INGESTOR_MAP.get(method_int)
+            ingestor_key = dataset_cfg.get('ingestor')
+            if not ingestor_key:
+                method_int = dataset_cfg.get('ingestion_method')
+                ingestor_key = {1: 'parquet', 4: 'geojson', 5: 'csv_poly'}.get(method_int)
+            IngestorClass = INGESTOR_MAP.get(ingestor_key)
 
             if not IngestorClass:
-                print(f"⚠️  Skipping {dataset_name}: Unknown ingestion_method '{method_int}'")
+                print(f'⚠️  Skipping {dataset_name}: Unknown ingestor "{ingestor_key}"')
                 continue
 
             # Initialize the Ingestor using our new 2-argument contract

@@ -4,22 +4,24 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-# Updated imports to match your package structure
 from raycasted.data.etl import (
-    CSVPolygonIngestor,
+    CSVPolyParser,
     ETLConfig,
-    GeoJSONIngestor,
-    ParquetIngestor,
-    # Assuming MatInstanceIngestor is also in this module for CoNSeP
-    # MatInstanceIngestor
+    GeoJSONParser,
+    ParquetParser,
 )
 
-# 1. The Ingestor Factory
 INGESTOR_MAP = {
-    1: ParquetIngestor,
-    # 3: MatInstanceIngestor,
-    4: GeoJSONIngestor,
-    5: CSVPolygonIngestor,
+    'parquet': ParquetParser,
+    'geojson': GeoJSONParser,
+    'csv_poly': CSVPolyParser,
+}
+
+# Legacy int-key map for backward compat
+_INGESTOR_MAP_LEGACY = {
+    1: ParquetParser,
+    4: GeoJSONParser,
+    5: CSVPolyParser,
 }
 
 
@@ -54,11 +56,14 @@ def cache_ingested_data():
 
         try:
             dataset_cfg = config_manager.get_dataset_config(dataset_name)
-            method_int = dataset_cfg.get('ingestion_method')
-            IngestorClass = INGESTOR_MAP.get(method_int)
+            ingestor_key = dataset_cfg.get('ingestor')
+            if not ingestor_key:
+                method_int = dataset_cfg.get('ingestion_method')
+                ingestor_key = {1: 'parquet', 4: 'geojson', 5: 'csv_poly'}.get(method_int)
+            IngestorClass = INGESTOR_MAP.get(ingestor_key)
 
             if not IngestorClass:
-                print(f'⚠️  Skipping {dataset_name}: Unknown ingestion_method "{method_int}"')
+                print(f'⚠️  Skipping {dataset_name}: Unknown ingestor "{ingestor_key}"')
                 continue
 
             # Initialize the Ingestor
