@@ -27,6 +27,7 @@ polygon dimensionality (2 + N_RAYS) without modification.
 Spec reference: docs/project.md §11
 """
 
+import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
 from ultralytics.utils.tal import TaskAlignedAssigner
@@ -230,6 +231,7 @@ class RayCastAssigner(TaskAlignedAssigner):
             total = (
                 self.cost_class * cost_cls + self.cost_centroid * cost_xy + self.cost_ray * cost_ray
             )  # (n_cand, n_valid_gt)
+            total = total.nan_to_num(nan=1e8, posinf=1e8, neginf=-1e8)
 
             # Ray similarity for overlaps (used by parent's normalisation)
             ray_sim = 1.0 / (1.0 + log_l1)
@@ -432,6 +434,7 @@ class HungarianRayCastAssigner(RayCastAssigner):
 
             # Extract (n_valid_gt, n_cand) sub-matrix for Hungarian
             cost_np = cost_matrix[b, valid_gt_idx][:, cand_idx].cpu().numpy()
+            cost_np = np.nan_to_num(cost_np, nan=1e8, posinf=1e8, neginf=-1e8)
 
             # Solve bipartite matching
             row_idx, col_idx = linear_sum_assignment(cost_np)
