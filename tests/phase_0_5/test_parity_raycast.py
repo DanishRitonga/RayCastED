@@ -262,11 +262,9 @@ def test_fallback_parity():
         class_ids = np.array([1], dtype=np.int64)
 
         counter = collections.Counter()
-        with np.testing.suppress_warnings() as sup:
-            sup.filter(UserWarning, 'GPU unavailable')
-            new_ann = RayCastGPU.batch_polygon_to_raycast(
-                [verts], class_ids, n_rays=N_RAYS, fallback_counter=counter
-            )
+        new_ann = RayCastGPU._fallback_shapely(
+            [verts], class_ids, n_rays=N_RAYS, fallback_counter=counter
+        )
 
         total += 1
         if old_ann is None and new_ann.shape[0] == 0:
