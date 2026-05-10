@@ -306,12 +306,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
             cost_ray=cost_ray,
         )
 
-        # Loss weights — balanced for foreground-mean cls normalization.
-        # cls raw ~0.5 (fg-mean BCE), xy raw ~1.35, l1 raw ~0.34.
-        # GradNorm will dynamically tune these after warmup.
-        self.lambda_cls = 20.0
-        self.lambda_xy = 15.0
-        self.lambda_l1 = 25.0
+        # Loss weights — manual balance for foreground-mean cls normalization.
+        # Raw scales: cls ~0.4 (fg-mean), xy ~1.3 (Huber/n_fg), l1 ~0.3 (MAE/n_fg).
+        # Target gradient budget: xy ~50%, cls ~25%, l1 ~25%.
+        self.lambda_cls = 35.0
+        self.lambda_xy = 22.0
+        self.lambda_l1 = 47.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
 
     def preprocess(self, targets, batch_size, scale_tensor=None):

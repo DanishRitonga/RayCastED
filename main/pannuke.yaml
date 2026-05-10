@@ -66,10 +66,8 @@ training:
   focal_gamma: 0.0            # Focal loss gamma (0 = BCE)
   focal_alpha: 1.0            # Focal loss alpha (1.0 = no class weighting)
 
-  # GradNorm — dynamic per-task weight balancing
-  gradnorm: true               # Enable GradNorm (Chen et al., 2018) for gradient equalisation
-  gradnorm_alpha: 0.5          # Restoring force (0=uniform, 1=full inverse-rate)
-  gradnorm_warmup_epochs: 5    # Epochs before GradNorm activates
+  # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
+  gradnorm: false
 
   # Weighted class/tissue sampling
   weighted_sampling: false     # Enable class+ tissue balanced sampling (off by default)
