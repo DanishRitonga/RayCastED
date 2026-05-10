@@ -53,8 +53,8 @@ training:
   # E2E dual-assignment (NMS-free)
   tal_topk: 20                # one2many positives per GT (increased for dense cell scenes)
   assigner_radius_scale: 1.5  # containment radius multiplier
-  assigner_alpha: 0.5         # unused (kept for API compat with parent TAL)
-  assigner_beta: 3.0          # unused (kept for API compat with parent TAL)
+  assigner_alpha: 0.5         # cls score exponent in align = cls^α × piou^β
+  assigner_beta: 6.0          # Polar-IoU exponent — high β creates geometric dominance for dense cells
   align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
   use_hungarian_o2o: true     # Hungarian matching for one2one branch (globally optimal)
 
@@ -66,6 +66,11 @@ training:
   # Classification loss
   focal_gamma: 0.0            # Focal loss gamma (0 = BCE)
   focal_alpha: 1.0            # Focal loss alpha (1.0 = no class weighting)
+
+  # GradNorm — dynamic per-task weight balancing
+  gradnorm: true               # Enable GradNorm (Chen et al., 2018) for gradient equalisation
+  gradnorm_alpha: 0.5          # Restoring force (0=uniform, 1=full inverse-rate)
+  gradnorm_warmup_epochs: 5    # Epochs before GradNorm activates
 
   # Weighted class/tissue sampling
   weighted_sampling: false     # Enable class+ tissue balanced sampling (off by default)

@@ -406,8 +406,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
             mask_gt,
         )
 
-        # --- L_cls: BCE or Focal loss normalised by target_scores_sum ---
-        target_scores_sum = max(target_scores.sum(), 1)
+        # --- L_cls: BCE or Focal loss (mean over all elements) ---
+        # Previous: sum() / target_scores_sum inflated cls by ~10x vs regression,
+        # causing gradient dominance. Mean BCE (/ B*N*nc) puts cls on the same
+        # ~0.1-1.0 scale as xy and l1, letting GradNorm or static lambdas work.
         if self.focal_gamma > 0:
             cls_targets = target_scores.float().clone()
             cls_targets[cls_targets > 0] = 1.0
@@ -419,7 +421,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
             )
         else:
             loss_cls = self.bce(pred_scores.float(), target_scores.float())
-        loss[1] = loss_cls.sum() / target_scores_sum
+        loss[1] = loss_cls.mean()
 
         # --- Polygon regression losses (foreground only, uniform weight) ---
         if fg_mask.sum():
