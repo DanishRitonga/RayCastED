@@ -306,11 +306,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
             cost_ray=cost_ray,
         )
 
-        # Loss weights (rebalanced so xy and L1 share gradient signal equally)
-        # xy and L1 both produce tiny raw values (Huber on normalised coords, log-space rays),
-        # so both need high lambda to contribute meaningfully.
-        # smooth starts at 0, reverse-anneals to peak over 40% of training (shape prior).
-        self.lambda_cls = 2.0
+        # Loss weights — balanced for foreground-mean cls normalization.
+        # cls raw ~0.5 (fg-mean BCE), xy raw ~1.35, l1 raw ~0.34.
+        # GradNorm will dynamically tune these after warmup.
+        self.lambda_cls = 20.0
         self.lambda_xy = 15.0
         self.lambda_l1 = 25.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
@@ -406,10 +405,14 @@ class RayCastDetectionLoss(v8DetectionLoss):
             mask_gt,
         )
 
-        # --- L_cls: BCE or Focal loss (mean over all elements) ---
-        # Previous: sum() / target_scores_sum inflated cls by ~10x vs regression,
-        # causing gradient dominance. Mean BCE (/ B*N*nc) puts cls on the same
-        # ~0.1-1.0 scale as xy and l1, letting GradNorm or static lambdas work.
+        # --- L_cls: BCE or Focal loss (foreground-only, mean per element) ---
+        # Previous attempts:
+        #   sum()/target_scores_sum → cls≈9.5, 10x dominant (gradient starves regression)
+        #   .mean() over all B*N*nc → cls≈0.001, 1000x starved (no classification signal)
+        #   sum()/n_fg → cls≈60, bg terms dominate sum
+        # Current: mean BCE over foreground anchors only (n_fg * nc elements).
+        # Background suppression handled naturally: sigmoid→0 from lack of positive signal.
+        # Scale ~0.3-0.8, comparable to raw l1 (~0.34) and xy (~1.35).
         if self.focal_gamma > 0:
             cls_targets = target_scores.float().clone()
             cls_targets[cls_targets > 0] = 1.0
@@ -421,12 +424,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
             )
         else:
             loss_cls = self.bce(pred_scores.float(), target_scores.float())
-        loss[1] = loss_cls.mean()
+        loss[1] = loss_cls[fg_mask].mean()
 
         # --- Polygon regression losses (foreground only, uniform weight) ---
-        if fg_mask.sum():
-            n_fg = max(fg_mask.sum(), 1)
-
+        n_fg = max(fg_mask.sum(), 1)
+        if n_fg > 0:
             fg_pred_xy = pred_xy[fg_mask]
             fg_pred_rays = pred_rays[fg_mask]
             fg_target_xy = target_bboxes[fg_mask][:, :2]
