@@ -482,6 +482,7 @@ class RayCastTrainer(DetectionTrainer):
             num_workers=self.args.workers,
             collate_fn=_raycast_collate_fn,
             drop_last=self.args.compile and mode == 'train',
+            multiprocessing_context='forkserver' if self.args.workers > 0 else None,
         )
 
     def preprocess_batch(self, batch):
