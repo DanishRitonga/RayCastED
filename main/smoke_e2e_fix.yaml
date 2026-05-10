@@ -30,7 +30,7 @@ training:
 datasets:
   PanNuke:
     root_dir: "PanNuke/data"
-    ingestion_method: 1
+    ingestor: parquet
     native_mpp: 0.25
 
     # Use only fold1 for quick smoke test

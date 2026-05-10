@@ -67,6 +67,10 @@ training:
   focal_gamma: 0.0            # Focal loss gamma (0 = BCE)
   focal_alpha: 1.0            # Focal loss alpha (1.0 = no class weighting)
 
+  # Weighted class/tissue sampling
+  weighted_sampling: false     # Enable class+ tissue balanced sampling (off by default)
+  sampler_gamma: 0.85          # Re-weighting strength (0=uniform, 1=full inverse-frequency)
+
   # Augmentation (polygon-safe)
   stain_jitter: true         # HSV color jitter for histopathology. Was false
   stain_hsv_h: 0.05          # hue shift range
@@ -97,7 +101,7 @@ training:
 datasets:
   PanNuke:
     root_dir: "PanNuke/data"
-    ingestion_method: 1
+    ingestor: parquet
     native_mpp: 0.25
 
     split_separation: "filename_regex"

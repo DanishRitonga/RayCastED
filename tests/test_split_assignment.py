@@ -93,7 +93,7 @@ class TestDatasetConfigSplitValidation:
     def test_filename_regex_with_split_map_valid(self):
         cfg = DatasetConfig(
             root_dir='/tmp',
-            ingestion_method=1,
+            ingestor='parquet',
             native_mpp=0.25,
             split_separation='filename_regex',
             modality_separation='bundled_archive',
@@ -108,7 +108,7 @@ class TestDatasetConfigSplitValidation:
         with pytest.raises(ValueError, match='not a recognized split name'):
             DatasetConfig(
                 root_dir='/tmp',
-                ingestion_method=1,
+                ingestor='parquet',
                 native_mpp=0.25,
                 split_separation='filename_regex',
                 modality_separation='bundled_archive',
@@ -122,7 +122,7 @@ class TestDatasetConfigSplitValidation:
         with pytest.raises(ValueError, match='sum to ~1.0'):
             DatasetConfig(
                 root_dir='/tmp',
-                ingestion_method=1,
+                ingestor='parquet',
                 native_mpp=0.25,
                 split_separation='none',
                 modality_separation='bundled_archive',
@@ -132,7 +132,7 @@ class TestDatasetConfigSplitValidation:
     def test_none_separation_valid_ratios(self):
         cfg = DatasetConfig(
             root_dir='/tmp',
-            ingestion_method=1,
+            ingestor='parquet',
             native_mpp=0.25,
             split_separation='none',
             modality_separation='bundled_archive',
@@ -144,7 +144,7 @@ class TestDatasetConfigSplitValidation:
         with pytest.raises(ValueError, match='split_dirs required'):
             DatasetConfig(
                 root_dir='/tmp',
-                ingestion_method=1,
+                ingestor='parquet',
                 native_mpp=0.25,
                 split_separation='physical',
                 modality_separation='bundled_archive',

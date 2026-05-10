@@ -4,20 +4,21 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-# Updated imports to match your package structure
 from raycasted.data.etl import (
     CSVPolygonIngestor,
     ETLConfig,
     GeoJSONIngestor,
     ParquetIngestor,
-    # Assuming MatInstanceIngestor is also in this module for CoNSeP
-    # MatInstanceIngestor
 )
 
-# 1. The Ingestor Factory
 INGESTOR_MAP = {
+    'parquet': ParquetIngestor,
+    'geojson': GeoJSONIngestor,
+    'csv_poly': CSVPolygonIngestor,
+}
+
+_INGESTOR_MAP_LEGACY = {
     1: ParquetIngestor,
-    # 3: MatInstanceIngestor,
     4: GeoJSONIngestor,
     5: CSVPolygonIngestor,
 }
@@ -54,11 +55,11 @@ def cache_ingested_data():
 
         try:
             dataset_cfg = config_manager.get_dataset_config(dataset_name)
-            method_int = dataset_cfg.get('ingestion_method')
-            IngestorClass = INGESTOR_MAP.get(method_int)
+            ingestor_key = dataset_cfg.get('ingestor')
+            IngestorClass = INGESTOR_MAP.get(ingestor_key)
 
             if not IngestorClass:
-                print(f'⚠️  Skipping {dataset_name}: Unknown ingestion_method "{method_int}"')
+                print(f'⚠️  Skipping {dataset_name}: Unknown ingestor "{ingestor_key}"')
                 continue
 
             # Initialize the Ingestor

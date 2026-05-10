@@ -12,12 +12,10 @@ from raycasted.data.etl import (
     ParquetIngestor,
 )
 
-# 1. The Ingestor Factory
-# Maps the integer from your YAML to the actual Python class
 INGESTOR_MAP = {
-    1: ParquetIngestor,
-    4: GeoJSONIngestor,  # PUMA
-    5: CSVPolygonIngestor,  # PanopTILs
+    'parquet': ParquetIngestor,
+    'geojson': GeoJSONIngestor,
+    'csv_poly': CSVPolygonIngestor,
 }
 
 
@@ -51,12 +49,11 @@ def test_all_datasets():
             # Fetch the dataset-specific config block
             dataset_cfg = config_manager.get_dataset_config(dataset_name)
 
-            # Identify which ingestion class to use
-            method_int = dataset_cfg.get('ingestion_method')
-            IngestorClass = INGESTOR_MAP.get(method_int)
+            ingestor_key = dataset_cfg.get('ingestor')
+            IngestorClass = INGESTOR_MAP.get(ingestor_key)
 
             if not IngestorClass:
-                print(f"⚠️  Skipping {dataset_name}: Unknown ingestion_method '{method_int}'")
+                print(f'⚠️  Skipping {dataset_name}: Unknown ingestor "{ingestor_key}"')
                 continue
 
             # Initialize the Ingestor using our new 2-argument contract

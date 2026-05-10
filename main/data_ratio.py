@@ -11,18 +11,18 @@ from raycasted.data.etl import CSVPolygonIngestor, ETLConfig, GeoJSONIngestor, P
 
 
 def get_ingestor(dataset_name: str, config: dict):
-    """Factory to instantiate the correct ingestor based on method."""
-    method = config.get('ingestion_method')
+    """Factory to instantiate the correct ingestor based on config."""
+    ingestor_key = config.get('ingestor')
 
-    # Ingestor routing based on your method definitions
-    if method in [1, 2, 3]:
-        return ParquetIngestor(config=config)
-    elif method == 4:
-        return GeoJSONIngestor(config=config)
-    elif method == 5:
-        return CSVPolygonIngestor(config=config)
-    else:
-        raise ValueError(f'Unknown ingestion_method {method} for {dataset_name}')
+    registry = {
+        'parquet': ParquetIngestor,
+        'geojson': GeoJSONIngestor,
+        'csv_poly': CSVPolygonIngestor,
+    }
+    cls = registry.get(ingestor_key)
+    if cls is None:
+        raise ValueError(f'Unknown ingestor "{ingestor_key}" for {dataset_name}')
+    return cls(config=config)
 
 
 def extract_categories_from_registry(dataset_name: str, ingestor, limit: int = 10):

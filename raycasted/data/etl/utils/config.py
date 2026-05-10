@@ -119,12 +119,16 @@ class GlobalSettings(BaseModel):
 
 
 # === DATASET CONFIG ===
+_VALID_INGESTORS = frozenset({'parquet', 'geojson', 'csv_poly', 'mat_inst'})
+
+
 class DatasetConfig(BaseModel):
     root_dir: str
-    ingestion_method: int
     native_mpp: float
     split_separation: Literal['physical', 'filename_regex', 'none']
     modality_separation: Literal['physical_parallel', 'physical_flat', 'bundled_archive']
+
+    ingestor: str
 
     # Conditional fields
     split_dirs: dict[str, str] | None = None
@@ -137,6 +141,15 @@ class DatasetConfig(BaseModel):
     namespace_map: dict[str, str] = Field(default_factory=dict)
     tissue_map: dict[str, str] = Field(default_factory=dict)
     tissue_type: str | None = None
+
+    @model_validator(mode='after')
+    def validate_ingestor(self):
+        if self.ingestor not in _VALID_INGESTORS:
+            raise ValueError(
+                f"Unknown ingestor={self.ingestor!r}. "
+                f'Supported: {sorted(_VALID_INGESTORS)}'
+            )
+        return self
 
     @model_validator(mode='after')
     def validate_split_separation_requirements(self):

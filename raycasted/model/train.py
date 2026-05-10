@@ -119,7 +119,7 @@ def _raycast_collate_fn(batch: list) -> dict:
         targets = torch.from_numpy(np.concatenate(target_list, axis=0))
     else:
         # Empty batch — shape must match 2 + n_rays (cx, cy, d_1..d_n) for bboxes
-        from raycasted.data.etl.utils.constants import N_RAYS as _n_rays
+        from raycasted.data.etl.utils.constants import N_RAYS as _n_rays  # noqa: N811
 
         targets = torch.zeros((0, 4 + _n_rays), dtype=torch.float32)
 
@@ -418,11 +418,18 @@ class RayCastTrainer(DetectionTrainer):
                 )
             }
 
+        num_classes = None
+        if hasattr(self, 'model') and hasattr(self.model, 'model'):
+            head = self.model.model[-1]
+            if hasattr(head, 'nc'):
+                num_classes = head.nc
+
         return RayCastTileDataset(
             data_dir=img_path,
             crop_size=self.args.imgsz,
             augment=(mode == 'train'),
             augment_config=augment_config if augment_config else None,
+            num_classes=num_classes,
         )
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode='train'):
@@ -453,10 +460,25 @@ class RayCastTrainer(DetectionTrainer):
                 f'but model head expects {head.n_rays}. '
                 f'Re-ingest with --n-rays {head.n_rays} or train with --n-rays {dataset.n_rays}.'
             )
+        use_weighted = (
+            mode == 'train'
+            and (self.training_config or {}).get('weighted_sampling', False)
+            and dataset.num_classes is not None
+        )
+
+        sampler = None
+        shuffle = False
+        if use_weighted:
+            gamma = self.training_config.get('sampler_gamma', 0.85)
+            sampler = dataset.get_sampler(gamma=gamma)
+        else:
+            shuffle = mode == 'train'
+
         return InfiniteDataLoader(
             dataset,
             batch_size=batch_size,
-            shuffle=(mode == 'train'),
+            shuffle=shuffle,
+            sampler=sampler,
             num_workers=self.args.workers,
             collate_fn=_raycast_collate_fn,
             drop_last=self.args.compile and mode == 'train',

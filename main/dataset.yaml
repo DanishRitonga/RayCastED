@@ -25,7 +25,7 @@ global_settings:
 datasets:
   MoNuSAC:
     root_dir: "MoNuSAC/data"
-    ingestion_method: 1 # Parquet
+    ingestor: parquet
     native_mpp : 0.25
 
     split_separation: "filename_regex"
@@ -47,7 +47,7 @@ datasets:
 
   PanopTILs:
     root_dir: "PanopTILs"
-    ingestion_method: 5 # CSV Polygons
+    ingestor: csv_poly
     native_mpp : 0.25
 
     split_separation: "physical"
@@ -79,7 +79,7 @@ datasets:
 
   PUMA:
     root_dir: "PUMA"
-    ingestion_method: 4 # GeoJSON
+    ingestor: geojson
     native_mpp : 0.22
 
     split_separation: "filename_regex"
@@ -110,7 +110,7 @@ datasets:
 # -- optional additions ---
   # PanNuke:
   #   root_dir: "PanNuke/data"
-  #   ingestion_method: 1
+  #   ingestor: parquet
   #   split_separation: "filename_regex"
   #   split_args:
   #     regex: "(fold[1-3])"
@@ -145,7 +145,7 @@ datasets:
 
   # CoNSeP:
   #   root_dir: "CoNSeP"
-  #   ingestion_method: 3
+  #   ingestor: mat_inst
   #   split_separation: "physical"
   #   split_dirs:
   #     train_dir: "Train"

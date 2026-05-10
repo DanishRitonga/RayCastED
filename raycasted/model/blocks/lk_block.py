@@ -26,7 +26,6 @@ References:
 
 import torch
 import torch.nn as nn
-from ultralytics.nn.modules.block import C2f
 from ultralytics.nn.modules.conv import Conv
 
 

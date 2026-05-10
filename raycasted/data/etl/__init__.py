@@ -1,6 +1,9 @@
 from .ingestors import (
+    PARSER_REGISTRY,
     CSVPolygonIngestor,
     GeoJSONIngestor,
+    IngestionOrchestrator,
+    MatInstanceIngestor,
     ParquetIngestor,
 )
 from .utils import (
@@ -12,4 +15,7 @@ __all__ = [
     'ParquetIngestor',
     'GeoJSONIngestor',
     'CSVPolygonIngestor',
+    'MatInstanceIngestor',
+    'IngestionOrchestrator',
+    'PARSER_REGISTRY',
 ]

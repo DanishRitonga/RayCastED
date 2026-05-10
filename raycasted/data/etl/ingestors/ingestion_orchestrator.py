@@ -28,14 +28,11 @@ from .geojson_ingestor import GeoJSONIngestor
 from .mat_inst_ingestor import MatInstanceIngestor
 from .parquet_ingestor import ParquetIngestor
 
-# Dispatch map: ingestion_method → Ingestor class
-# Method 3 (MatInstanceIngestor) registered per GAP-01 — must be present even
-# if CoNSeP is commented out in the YAML config.
-DISPATCH_MAP: dict[int, type] = {
-    1: ParquetIngestor,
-    3: MatInstanceIngestor,
-    4: GeoJSONIngestor,
-    5: CSVPolygonIngestor,
+PARSER_REGISTRY: dict[str, type] = {
+    'parquet': ParquetIngestor,
+    'mat_inst': MatInstanceIngestor,
+    'geojson': GeoJSONIngestor,
+    'csv_poly': CSVPolygonIngestor,
 }
 
 # Matches path traversal: "..", leading "/" or "\", any backslash
@@ -54,7 +51,7 @@ def _safe_path_component(value: str) -> str:
 
 def _worker_process_row(
     merged_config: dict,
-    method: int,
+    ingestor_key: str,
     row: dict,
     output_dir: str,
     dataset_name: str,
@@ -66,13 +63,12 @@ def _worker_process_row(
     """
     import collections as _collections
 
-    # Configure ray count for this worker process (spawn doesn't inherit globals)
     n_rays = merged_config.get('n_rays', 32)
     from raycasted.data.etl.utils.constants import configure_rays
 
     configure_rays(n_rays)
 
-    ingestor_cls = DISPATCH_MAP[method]
+    ingestor_cls = PARSER_REGISTRY[ingestor_key]
     ingestor = ingestor_cls(merged_config)
     output_path = Path(output_dir)
 
@@ -139,23 +135,26 @@ class IngestionOrchestrator:
         Datasets are processed sequentially, but rows within a dataset
         are processed in parallel when workers > 1.
 
-        ParquetIngestor (method 1) handles its own internal parallelism
-        across ROIs within each parquet file, so rows (folds) are always
-        processed sequentially to avoid nested process pools.
+        ParquetIngestor handles its own internal parallelism across ROIs
+        within each parquet file, so rows (folds) are always processed
+        sequentially to avoid nested process pools.
         """
         merged_config = self.config.get_dataset_config(dataset_name)
 
-        method = merged_config.get('ingestion_method')
-        if method not in DISPATCH_MAP:
+        ingestor_key = self._resolve_ingestor_key(merged_config, dataset_name)
+        if ingestor_key not in PARSER_REGISTRY:
             raise ValueError(
-                f"Unknown ingestion_method={method} for dataset '{dataset_name}'. "
-                f'Supported: {list(DISPATCH_MAP.keys())}'
+                f"Unknown ingestor='{ingestor_key}' for dataset '{dataset_name}'. "
+                f'Supported: {list(PARSER_REGISTRY.keys())}'
             )
 
-        ingestor_cls = DISPATCH_MAP[method]
+        ingestor_cls = PARSER_REGISTRY[ingestor_key]
 
-        # ParquetIngestor accepts workers for internal ROI-level parallelism
-        ingestor = ingestor_cls(merged_config, workers=self.workers) if method == 1 else ingestor_cls(merged_config)
+        ingestor = (
+            ingestor_cls(merged_config, workers=self.workers)
+            if ingestor_key == 'parquet'
+            else ingestor_cls(merged_config)
+        )
 
         registry = ingestor.get_registry()
         if registry.is_empty():
@@ -167,12 +166,10 @@ class IngestionOrchestrator:
 
         rows = list(registry.iter_rows(named=True))
 
-        # ParquetIngestor parallelizes internally — always process its rows sequentially.
-        # Other ingestors: each row is a single ROI, parallelize at the row level.
-        if method == 1 or self.workers == 1:
+        if ingestor_key == 'parquet' or self.workers == 1:
             stats = self._process_rows_sequential(dataset_name, ingestor, rows, total)
         else:
-            stats = self._process_rows_parallel(dataset_name, merged_config, method, rows, total)
+            stats = self._process_rows_parallel(dataset_name, merged_config, ingestor_key, rows, total)
 
         print(
             f'[{dataset_name}] Done. '
@@ -180,6 +177,15 @@ class IngestionOrchestrator:
             f'skipped={stats["skipped"]}, '
             f'errors={stats["errors"]}'
         )
+
+    @staticmethod
+    def _resolve_ingestor_key(merged_config: dict, dataset_name: str) -> str:
+        """Resolve the string ingestor key from config."""
+        ingestor_key = merged_config.get('ingestor')
+        if ingestor_key:
+            return ingestor_key
+
+        raise ValueError(f"Dataset '{dataset_name}' must specify 'ingestor' key.")
 
     def _process_rows_sequential(
         self, dataset_name: str, ingestor: Any, rows: list[dict], total: int
@@ -196,7 +202,7 @@ class IngestionOrchestrator:
         self,
         dataset_name: str,
         merged_config: dict,
-        method: int,
+        ingestor_key: str,
         rows: list[dict],
         total: int,
     ) -> collections.Counter:
@@ -215,7 +221,7 @@ class IngestionOrchestrator:
                 future = pool.submit(
                     _worker_process_row,
                     merged_config,
-                    method,
+                    ingestor_key,
                     row,
                     str(self.output_dir),
                     dataset_name,

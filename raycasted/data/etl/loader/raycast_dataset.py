@@ -8,7 +8,10 @@ Annotation column layout: [class_id, cx, cy, d_1, ..., d_n]
 Ray count is derived from the actual .npz annotation shape.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -16,6 +19,9 @@ from torch.utils.data import Dataset
 
 from ..ops.augment import flip_horizontal, flip_vertical, random_scale, random_translate, rotate_90, stain_jitter
 from ..ops.filter import filter_and_clip_annotations
+
+if TYPE_CHECKING:
+    from .sampler import WeightedClassSampler
 
 
 class RayCastTileDataset(Dataset):
@@ -34,12 +40,14 @@ class RayCastTileDataset(Dataset):
         augment: bool = True,
         min_rays_after_clip: float = 0.3,
         augment_config: dict | None = None,
+        num_classes: int | None = None,
     ):
         self.data_dir = Path(data_dir)
         self.crop_size = crop_size
         self.augment = augment
         self.min_rays_after_clip = min_rays_after_clip
         self.augment_config = augment_config or {}
+        self.num_classes = num_classes
         self.rng = np.random.default_rng()
 
         self.tile_paths = sorted(self.data_dir.glob('*.npz'))
@@ -51,6 +59,10 @@ class RayCastTileDataset(Dataset):
 
         # Compatibility: Ultralytics plot_training_labels reads dataset.labels
         self.labels = self._build_labels()
+
+        # Class and tissue distributions for weighted sampling (lazy — built on first access)
+        self._tile_classes: list[np.ndarray] | None = None
+        self._tissues: np.ndarray | None = None
 
     def __len__(self) -> int:
         """Return the number of tiles in the dataset."""
@@ -105,6 +117,67 @@ class RayCastTileDataset(Dataset):
             cls = valid[:, 0].astype(np.float32)
             labels.append({'bboxes': bboxes, 'cls': cls})
         return labels
+
+    def _build_class_tissue_index(self) -> None:
+        """Scan all tiles once to build per-tile class lists and tissue IDs.
+
+        Populates self._tile_classes and self._tissues for WeightedClassSampler.
+        Called lazily on first call to get_sampler().
+        """
+        from ..utils import constants as _const
+
+        tile_classes: list[np.ndarray] = []
+        tissues: list[int] = []
+
+        for path in self.tile_paths:
+            data = np.load(path)
+            anns = data.get('annotations', data.get('bboxes'))
+            tissue_val = data.get('tissue', None)
+
+            if anns is not None and len(anns) > 0:
+                valid = anns[anns[:, _const.CLASS_IDX] != 255]
+                if len(valid) > 0:
+                    classes = np.unique(valid[:, _const.CLASS_IDX].astype(np.intp))
+                else:
+                    classes = np.array([], dtype=np.intp)
+            else:
+                classes = np.array([], dtype=np.intp)
+
+            tile_classes.append(classes)
+            tissues.append(int(tissue_val) if tissue_val is not None else 0)
+
+        self._tile_classes = tile_classes
+        self._tissues = np.array(tissues, dtype=np.intp)
+
+    def get_sampler(self, gamma: float = 0.85) -> WeightedClassSampler:
+        """Build a WeightedClassSampler from this dataset's class/tissue distribution.
+
+        Args:
+            gamma: Re-weighting strength in [0, 1]. 0 = uniform, 1 = full inverse-frequency.
+
+        Returns:
+            WeightedClassSampler instance ready to pass to DataLoader(sampler=...).
+
+        Raises:
+            ValueError: If num_classes was not provided at construction time.
+        """
+        from .sampler import WeightedClassSampler
+
+        if self.num_classes is None:
+            raise ValueError(
+                'num_classes must be provided to RayCastTileDataset to use weighted sampling. '
+                'Pass num_classes=<N> when constructing the dataset.'
+            )
+
+        if self._tile_classes is None:
+            self._build_class_tissue_index()
+
+        return WeightedClassSampler(
+            tile_classes=self._tile_classes,
+            tissues=self._tissues,
+            num_classes=self.num_classes,
+            gamma=gamma,
+        )
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, np.ndarray]:
         """Load, crop, augment, normalise, and return a single tile."""
