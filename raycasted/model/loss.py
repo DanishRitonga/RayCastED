@@ -306,12 +306,13 @@ class RayCastDetectionLoss(v8DetectionLoss):
             cost_ray=cost_ray,
         )
 
-        # Loss weights — manual balance for foreground-mean cls normalization.
-        # Raw scales: cls ~0.4 (fg-mean), xy ~1.3 (Huber/n_fg), l1 ~0.3 (MAE/n_fg).
-        # Target gradient budget: xy ~50%, cls ~25%, l1 ~25%.
-        self.lambda_cls = 35.0
-        self.lambda_xy = 22.0
-        self.lambda_l1 = 47.0
+        # Loss weights — original normalization with reduced cls weight.
+        # cls raw ~9.5 (sum/target_scores_sum), xy raw ~1.35, l1 raw ~0.34.
+        # lambda_cls=0.5 brings weighted cls ~4.75, comparable to xy(15*1.35=20.25).
+        # Background BCE suppression is essential for assignment quality.
+        self.lambda_cls = 0.5
+        self.lambda_xy = 15.0
+        self.lambda_l1 = 25.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
 
     def preprocess(self, targets, batch_size, scale_tensor=None):
@@ -405,14 +406,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
             mask_gt,
         )
 
-        # --- L_cls: BCE or Focal loss (foreground-only, mean per element) ---
-        # Previous attempts:
-        #   sum()/target_scores_sum → cls≈9.5, 10x dominant (gradient starves regression)
-        #   .mean() over all B*N*nc → cls≈0.001, 1000x starved (no classification signal)
-        #   sum()/n_fg → cls≈60, bg terms dominate sum
-        # Current: mean BCE over foreground anchors only (n_fg * nc elements).
-        # Background suppression handled naturally: sigmoid→0 from lack of positive signal.
-        # Scale ~0.3-0.8, comparable to raw l1 (~0.34) and xy (~1.35).
+        # --- L_cls: BCE or Focal loss normalised by target_scores_sum ---
+        # Ultralytics standard normalization. sum() includes bg BCE for false-positive
+        # suppression. target_scores_sum ≈ 800-1200 produces cls ≈ 9.5 — dominant,
+        # but bg suppression is critical for assignment quality. We compensate by
+        # using a smaller lambda_cls.
+        target_scores_sum = max(target_scores.sum(), 1)
         if self.focal_gamma > 0:
             cls_targets = target_scores.float().clone()
             cls_targets[cls_targets > 0] = 1.0
@@ -424,7 +423,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
             )
         else:
             loss_cls = self.bce(pred_scores.float(), target_scores.float())
-        loss[1] = loss_cls[fg_mask].mean()
+        loss[1] = loss_cls.sum() / target_scores_sum
 
         # --- Polygon regression losses (foreground only, uniform weight) ---
         n_fg = max(fg_mask.sum(), 1)
