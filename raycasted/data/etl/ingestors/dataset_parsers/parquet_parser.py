@@ -137,7 +137,7 @@ def _process_roi_worker(task: dict) -> tuple[str, np.ndarray, np.ndarray, int] |
             )
             if vertices_list:
                 annotations = RayCastGPU.batch_polygon_to_raycast(
-                    vertices_list, np.array(class_ids_list, dtype=np.int64)
+                    vertices_list, np.array(class_ids_list, dtype=np.int64), n_rays=n_rays
                 )
             else:
                 annotations = np.zeros((0, 3 + n_rays), dtype=np.float32)

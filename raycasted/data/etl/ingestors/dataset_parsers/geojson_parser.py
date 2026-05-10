@@ -136,5 +136,7 @@ class GeoJSONParser(BaseDataIngestor):
                         class_ids.append(class_id)
 
         if vertices:
-            return RayCastGPU.batch_polygon_to_raycast(vertices, np.array(class_ids, dtype=np.int64))
-        return np.zeros((0, 35), dtype=np.float32)
+            return RayCastGPU.batch_polygon_to_raycast(
+                vertices, np.array(class_ids, dtype=np.int64), n_rays=self.n_rays
+            )
+        return np.zeros((0, 3 + self.n_rays), dtype=np.float32)

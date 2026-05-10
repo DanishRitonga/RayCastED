@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 import polars as pl
 
-from ...utils.constants import N_RAYS
 from .._base import BaseDataIngestor
 from ..file_handlers import ImageHandler, RayCastGPU
 
@@ -127,5 +126,7 @@ class CSVPolyParser(BaseDataIngestor):
             class_ids.append(class_id)
 
         if vertices:
-            return RayCastGPU.batch_polygon_to_raycast(vertices, np.array(class_ids, dtype=np.int64))
-        return np.zeros((0, 3 + N_RAYS), dtype=np.float32)
+            return RayCastGPU.batch_polygon_to_raycast(
+                vertices, np.array(class_ids, dtype=np.int64), n_rays=self.n_rays
+            )
+        return np.zeros((0, 3 + self.n_rays), dtype=np.float32)

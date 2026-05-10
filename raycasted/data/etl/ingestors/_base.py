@@ -35,6 +35,8 @@ class BaseDataIngestor(ABC):
         # The dynamic annotation routing key (defaults to 'bbox')
         self.annotation_type = config.get('annotation_type', 'bbox').lower()
 
+        self.n_rays = config.get('n_rays', 32)
+
         if self.target_mpp and self.native_mpp:
             self.scale_factor = self.native_mpp / self.target_mpp
         else:

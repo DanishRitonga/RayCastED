@@ -7,7 +7,10 @@ from ._base import BaseDataIngestor
 
 
 class MatInstanceIngestor(BaseDataIngestor):
+    """Legacy ingestor for .mat instance-map datasets."""
+
     def process_item(self, row: dict):
+        """Process a single ROI: load image + .mat, route by annotation_type."""
         image_path = row['image_path']
         mask_path = row['mask_path']
         roi_id = row['roi_id']
@@ -113,8 +116,60 @@ class MatInstanceIngestor(BaseDataIngestor):
     def _extract_raycast_annotations(self, mat_data: dict, image_array: np.ndarray) -> np.ndarray:
         """Extracts raycast annotations from .mat instance map.
 
-        Not needed for Phase 1 — MatInstIngestor uses instance masks, not polygon
-        coordinates. Raycast extraction requires contour extraction from each
-        instance ID's mask, which is deferred to a later phase.
+        For each instance ID, extract binary mask → cv2.findContours →
+        collect vertices → shapely polygon_to_raycast per cell.
         """
-        raise NotImplementedError('Raycast annotation extraction not yet implemented for MatInstIngestor')
+        if 'inst_map' not in mat_data:
+            raise KeyError("'inst_map' key not found in .mat file")
+
+        instance_matrix = mat_data['inst_map'].astype(np.int32)
+
+        if 'inst_type' not in mat_data:
+            raise KeyError("'inst_type' key not found in .mat file")
+
+        raw_types = mat_data['inst_type'].flatten()
+
+        cats = [0]
+        for raw_cat in raw_types:
+            cats.append(self.standardize_label(raw_cat))
+
+        slices = find_objects(instance_matrix)
+        annotations = []
+
+        for i, slc in enumerate(slices):
+            if slc is None:
+                continue
+
+            instance_id = i + 1
+            if instance_id >= len(cats):
+                continue
+
+            binary_mask = (instance_matrix[slc] == instance_id).astype(np.uint8)
+            contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+            if not contours:
+                continue
+
+            contour = max(contours, key=cv2.contourArea)
+            if len(contour) < 3:
+                continue
+
+            pts = contour.squeeze(axis=1).astype(np.float64)
+            pts[:, 0] += slc[1].start
+            pts[:, 1] += slc[0].start
+
+            from shapely.geometry import Polygon as ShapelyPolygon
+
+            from ...ops import polygon_to_raycast
+
+            poly = ShapelyPolygon(pts.tolist())
+            class_id = cats[instance_id]
+            ann = polygon_to_raycast(poly, int(class_id))
+            if ann is not None:
+                annotations.append(ann)
+
+        if annotations:
+            return np.stack(annotations).astype(np.float32)
+        from ...utils.constants import N_RAYS
+
+        return np.zeros((0, 3 + N_RAYS), dtype=np.float32)
