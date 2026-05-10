@@ -59,6 +59,7 @@ class RayCastPipeline:
         self.transformed_dir = self.output_dir / 'transformed'
         self.training_overrides = training_overrides or {}
         self.ingest_workers = ingest_workers
+        self.use_gpu = self.training_overrides.get('device') is not None
 
         # n_rays comes from config YAML only (data property, not a training flag)
         self.n_rays = int(self.config.global_settings.get('n_rays', 32))
@@ -120,6 +121,7 @@ class RayCastPipeline:
             config_manager=self.config,
             ingested_dir=str(self.ingested_dir),
             final_output_dir=str(self.transformed_dir),
+            use_gpu=self.use_gpu,
         )
         t.run_pipeline()
 
