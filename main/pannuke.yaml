@@ -53,19 +53,19 @@ training:
   # E2E dual-assignment (NMS-free)
   tal_topk: 20                # one2many positives per GT (increased for dense cell scenes)
   assigner_radius_scale: 1.5  # containment radius multiplier
-  assigner_alpha: 0.5         # cls^alpha in alignment metric
-  assigner_beta: 3.0          # iou^beta in alignment metric (one2many only)
-  align_threshold: 0.2        # minimum overlap proxy for positive assignment (0=disabled)
+  assigner_alpha: 0.5         # unused (kept for API compat with parent TAL)
+  assigner_beta: 3.0          # unused (kept for API compat with parent TAL)
+  align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
   use_hungarian_o2o: true     # Hungarian matching for one2one branch (globally optimal)
 
-  # L1-based Hungarian assignment cost (one2one branch)
+  # Unified assignment cost (both one2many and one2one branches)
   cost_class: 1.0             # focal classification cost weight
-  cost_centroid: 1.0          # L1 centroid cost weight
-  cost_ray: 1.0               # relative-L1 ray cost weight (scale-invariant)
+  cost_centroid: 1.0          # L2 centroid distance cost weight
+  cost_ray: 1.0               # log-space L1 ray cost weight
 
   # Classification loss
-  focal_gamma: 1.0           # Focal loss gamma (0 = BCE, 1.0 = recommended start)
-  focal_alpha: 1.0           # Focal loss alpha (1.0 = no class weighting)
+  focal_gamma: 0.0            # Focal loss gamma (0 = BCE)
+  focal_alpha: 1.0            # Focal loss alpha (1.0 = no class weighting)
 
   # Augmentation (polygon-safe)
   stain_jitter: true         # HSV color jitter for histopathology. Was false

@@ -154,9 +154,7 @@ class C3k2_LK(nn.Module):
         self.c = int(c2 * e)
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)
-        self.m = nn.ModuleList(
-            LKBottleneck(self.c, self.c, kernel_size, shortcut) for _ in range(n)
-        )
+        self.m = nn.ModuleList(LKBottleneck(self.c, self.c, kernel_size, shortcut) for _ in range(n))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = list(self.cv1(x).chunk(2, 1))

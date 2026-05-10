@@ -271,6 +271,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
         gradnorm_manager: GradNormManager | None = None,
         focal_gamma: float = 0.0,
         focal_alpha: float = 1.0,
+        cost_class: float = 1.0,
+        cost_centroid: float = 1.0,
+        cost_ray: float = 1.0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -298,6 +301,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
             topk2=tal_topk2,
             radius_scale=assigner_radius_scale,
             align_threshold=align_threshold,
+            cost_class=cost_class,
+            cost_centroid=cost_centroid,
+            cost_ray=cost_ray,
         )
 
         # Loss weights (rebalanced so xy and L1 share gradient signal equally)
@@ -529,6 +535,9 @@ class RayCastE2ELoss(E2ELoss):
             focal_gamma=focal_gamma,
             focal_alpha=focal_alpha,
             align_threshold=align_threshold,
+            cost_class=cost_class,
+            cost_centroid=cost_centroid,
+            cost_ray=cost_ray,
         )
         super().__init__(model, loss_fn=loss_fn)
 
@@ -616,9 +625,11 @@ class RayCastE2ELoss(E2ELoss):
             is_hungarian = isinstance(self.one2one.assigner, HungarianRayCastAssigner)
             if is_hungarian:
                 a = self.one2one.assigner
+                o2m = self.one2many.assigner
                 print(
-                    f'✓ E2E NMS-free: o2m.topk={self.one2many.assigner.topk}, '
-                    f'o2o=Hungarian L1-cost (cls={a.cost_class}, xy={a.cost_centroid}, ray={a.cost_ray})'
+                    f'✓ E2E NMS-free: o2m.topk={o2m.topk}, '
+                    f'o2o=Hungarian (cls={a.cost_class}, xy={a.cost_centroid}, ray={a.cost_ray}), '
+                    f'unified_cost=o2m(cls={o2m.cost_class}, xy={o2m.cost_centroid}, ray={o2m.cost_ray})'
                 )
             else:
                 assert self.one2one.assigner.topk2 == 1, (

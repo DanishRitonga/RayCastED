@@ -92,11 +92,10 @@ def test_constructor():
     assert isinstance(loss_fn.assigner, RayCastAssigner), (
         f'Assigner must be RayCastAssigner, got {type(loss_fn.assigner).__name__}'
     )
-    assert loss_fn.lambda_cls == 0.5
-    assert loss_fn.lambda_xy == 50.0  # Updated to proven value from AGENTS.md
-    assert loss_fn.lambda_l1 == 5.0  # Updated: LSP-DETR inspired for topk=1
-    assert loss_fn.lambda_piou == 0.5  # Updated: Minimal for NMS-free topk=1
-    assert loss_fn.lambda_smooth == 0.05
+    assert loss_fn.lambda_cls == 2.0
+    assert loss_fn.lambda_xy == 15.0
+    assert loss_fn.lambda_l1 == 25.0
+    assert loss_fn.lambda_smooth == 0.0
     print('PASS: constructor — assigner swapped, params correct')
 
 
@@ -326,49 +325,49 @@ def test_e2e_constructor():
     assert e2e.one2many.assigner.topk == 13, f'one2many.topk should be 13, got {e2e.one2many.assigner.topk}'
     assert e2e.one2many.assigner.topk2 == 13, f'one2many.topk2 should be 13, got {e2e.one2many.assigner.topk2}'
 
-    assert e2e.one2many.lambda_smooth == 0.05
-    assert e2e.one2one.lambda_smooth == 0.05
-    assert e2e.smooth_start == 0.05
-    assert e2e.smooth_end == 0.0
-    assert e2e.smooth_anneal_epochs == 60  # 200 * 0.3 = 60
+    assert e2e.one2many.lambda_smooth == 0.0
+    assert e2e.one2one.lambda_smooth == 0.0
+    assert e2e.smooth_start == 0.0
+    assert e2e.smooth_end == 1.0
+    assert e2e.smooth_anneal_epochs == 80  # 200 * 0.4 = 80
     print('PASS: E2E constructor — o2m uses RayCastAssigner, o2o uses HungarianRayCastAssigner')
 
 
 def test_smoothness_annealing():
-    """Smoothness lambda anneals from 0.05 to 0.0 over 60 updates."""
+    """Smoothness lambda ramps from 0.0 to 1.0 over 80 updates (40% of 200)."""
     model = _make_mock_model()
     e2e = RayCastE2ELoss(model)
 
     # Initial value
-    assert e2e.one2many.lambda_smooth == 0.05, 'Initial λ should be 0.05'
+    assert e2e.one2many.lambda_smooth == 0.0, 'Initial λ should be 0.0'
 
-    # After 60 updates (full annealing period)
-    for _ in range(60):
+    # After 80 updates (full annealing period)
+    for _ in range(80):
         e2e.update()
-    assert e2e.one2many.lambda_smooth == 0.0, f'After 60 updates λ should be 0.0, got {e2e.one2many.lambda_smooth}'
-    assert e2e.one2one.lambda_smooth == 0.0
+    assert e2e.one2many.lambda_smooth == 1.0, f'After 80 updates λ should be 1.0, got {e2e.one2many.lambda_smooth}'
+    assert e2e.one2one.lambda_smooth == 1.0
 
-    # Stays at 0 after more updates
+    # Stays at 1.0 after more updates
     for _ in range(10):
         e2e.update()
-    assert e2e.one2many.lambda_smooth == 0.0, 'λ should clamp at 0.0'
-    print('PASS: smoothness annealing — 0.05 → 0.0 over 60 updates, clamped at 0.0')
+    assert e2e.one2many.lambda_smooth == 1.0, 'λ should clamp at 1.0'
+    print('PASS: smoothness annealing — 0.0 → 1.0 over 80 updates, clamped at 1.0')
 
 
-def test_smoothness_monotonic_decrease():
-    """Smoothness lambda decreases monotonically."""
+def test_smoothness_monotonic_increase():
+    """Smoothness lambda increases monotonically (reverse annealing)."""
     model = _make_mock_model()
     e2e = RayCastE2ELoss(model)
 
     prev = e2e.one2many.lambda_smooth
-    for i in range(60):
+    for i in range(80):
         e2e.update()
         current = e2e.one2many.lambda_smooth
-        assert current <= prev + 1e-9, (
-            f'λ should be monotonically decreasing: step {i + 1}, prev={prev}, current={current}'
+        assert current >= prev - 1e-9, (
+            f'λ should be monotonically increasing: step {i + 1}, prev={prev}, current={current}'
         )
         prev = current
-    print('PASS: smoothness monotonically decreasing')
+    print('PASS: smoothness monotonically increasing')
 
 
 def test_o2m_decay_preserved():
@@ -444,7 +443,7 @@ if __name__ == '__main__':
     test_smooth_nonzero_alternating()
     test_e2e_constructor()
     test_smoothness_annealing()
-    test_smoothness_monotonic_decrease()
+    test_smoothness_monotonic_increase()
     test_o2m_decay_preserved()
     test_gradient_flows()
 

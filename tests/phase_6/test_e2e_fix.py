@@ -132,11 +132,15 @@ def test_e2e_default_parameters_match_baseline():
     assert e2e.one2many.lambda_l1 == 25.0, f'Default lambda_l1 should be 25.0, got {e2e.one2many.lambda_l1}'
     assert e2e.one2many.lambda_xy == 15.0, f'Default lambda_xy should be 15.0, got {e2e.one2many.lambda_xy}'
     assert e2e.one2many.lambda_cls == 2.0, f'Default lambda_cls should be 2.0, got {e2e.one2many.lambda_cls}'
-    assert e2e.one2many.lambda_piou == 2.0, (
-        f'Default lambda_piou should be 2.0, got {e2e.one2many.lambda_piou}'
+    assert e2e.one2many.assigner.cost_class == 1.0, (
+        f'Default cost_class should be 1.0, got {e2e.one2many.assigner.cost_class}'
     )
-    assert e2e.one2many.assigner.alpha == 0.5, f'Default alpha should be 0.5, got {e2e.one2many.assigner.alpha}'
-    assert e2e.one2many.assigner.beta == 6.0, f'Default beta should be 6.0, got {e2e.one2many.assigner.beta}'
+    assert e2e.one2many.assigner.cost_centroid == 1.0, (
+        f'Default cost_centroid should be 1.0, got {e2e.one2many.assigner.cost_centroid}'
+    )
+    assert e2e.one2many.assigner.cost_ray == 1.0, (
+        f'Default cost_ray should be 1.0, got {e2e.one2many.assigner.cost_ray}'
+    )
 
     print('PASS: Default parameters match NMS-free + LSP-DETR loss configuration')
 
