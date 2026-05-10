@@ -120,6 +120,15 @@ class TransformOrchestrator:
         print(f'Stage 1 complete: {len(records)} chunks from {len(set(r["roi_id"] for r in records))} ROIs.')
         return pl.DataFrame(records)
 
+    def _get_estimator(self):
+        if self.use_gpu:
+            from .stain_estimator_gpu import StainEstimatorGPU
+
+            return StainEstimatorGPU
+        from .stainEstimator import StainEstimator
+
+        return StainEstimator
+
     def _build_population_profile(self) -> str | None:
         """Stage 2: Compute population-level stain normalization profile.
 
