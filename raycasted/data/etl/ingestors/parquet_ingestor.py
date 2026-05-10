@@ -5,65 +5,51 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import cv2
 import numpy as np
 import polars as pl
-from shapely.geometry import Polygon
 
-from ..ops import polygon_to_raycast
 from ._base import BaseDataIngestor
+from .file_handlers import ParquetHandler, RayCastGPU
 
 
-def _decode_image(byte_string: bytes, is_mask: bool = False) -> np.ndarray:
-    """Convert raw bytes to numpy array using OpenCV (module-level for pickling)."""
-    np_arr = np.frombuffer(byte_string, np.uint8)
-    flags = cv2.IMREAD_UNCHANGED if is_mask else cv2.IMREAD_COLOR
-    decoded_img = cv2.imdecode(np_arr, flags)
-    if decoded_img is None:
-        raise ValueError('OpenCV failed to decode the byte array.')
-    if not is_mask and len(decoded_img.shape) == 3:
-        decoded_img = cv2.cvtColor(decoded_img, cv2.COLOR_BGR2RGB)
-    return decoded_img
-
-
-def _extract_raycast_annotations(
+def _extract_contours_from_masks(
     roi_masks_df, mask_col: str, cat_col: str, namespace_map: dict, global_cell_map: dict
-) -> np.ndarray:
-    """Extract raycast annotations from per-cell binary mask contours (module-level for pickling)."""
-    annotations = []
+) -> tuple[list[np.ndarray], list[int]]:
+    """Extract polygon contours and class IDs from per-cell binary masks.
 
-    if roi_masks_df is not None:
-        for mask_row in roi_masks_df.iter_rows(named=True):
-            mask_struct = mask_row[mask_col]
-            mask_bytes = mask_struct['bytes'] if isinstance(mask_struct, dict) else mask_struct
-            category = mask_row[cat_col]
-            mask_array = _decode_image(mask_bytes, is_mask=True)
+    Returns:
+        Tuple of (vertices_list, class_ids_list) for batch ray casting.
+    """
+    vertices_list = []
+    class_ids_list = []
 
-            if mask_array.ndim > 2:
-                mask_array = mask_array[:, :, 0]
+    if roi_masks_df is None:
+        return vertices_list, class_ids_list
 
-            contours, _ = cv2.findContours(mask_array, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-            if not contours:
-                continue
+    for mask_row in roi_masks_df.iter_rows(named=True):
+        mask_struct = mask_row[mask_col]
+        mask_bytes = mask_struct['bytes'] if isinstance(mask_struct, dict) else mask_struct
+        category = mask_row[cat_col]
+        mask_array = ParquetHandler.decode_image_bytes(mask_bytes, is_mask=True)
 
-            contour = max(contours, key=cv2.contourArea)
-            if len(contour) < 3:
-                continue
+        if mask_array.ndim > 2:
+            mask_array = mask_array[:, :, 0]
 
-            pts = contour.squeeze(axis=1)
-            coords = [(float(x), float(y)) for x, y in pts]
-            poly = Polygon(coords)
+        contours, _ = cv2.findContours(mask_array, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        if not contours:
+            continue
 
-            raw_str = str(category)
-            standard_str = namespace_map[raw_str]
-            class_id = global_cell_map[standard_str]
+        contour = max(contours, key=cv2.contourArea)
+        if len(contour) < 3:
+            continue
 
-            ann = polygon_to_raycast(poly, class_id)
-            if ann is not None:
-                annotations.append(ann)
+        pts = contour.squeeze(axis=1).astype(np.float64)
+        raw_str = str(category)
+        standard_str = namespace_map[raw_str]
+        class_id = global_cell_map[standard_str]
 
-    if annotations:
-        return np.stack(annotations).astype(np.float32)
-    from raycasted.data.etl.utils import constants as _c
+        vertices_list.append(pts)
+        class_ids_list.append(class_id)
 
-    return np.zeros((0, 3 + _c.N_RAYS), dtype=np.float32)
+    return vertices_list, class_ids_list
 
 
 def _extract_bbox_annotations(
@@ -77,7 +63,7 @@ def _extract_bbox_annotations(
             mask_struct = mask_row[mask_col]
             mask_bytes = mask_struct['bytes'] if isinstance(mask_struct, dict) else mask_struct
             category = mask_row[cat_col]
-            mask_array = _decode_image(mask_bytes, is_mask=True)
+            mask_array = ParquetHandler.decode_image_bytes(mask_bytes, is_mask=True)
 
             if mask_array.ndim > 2:
                 mask_array = mask_array[:, :, 0]
@@ -126,7 +112,6 @@ def _process_roi_worker(task: dict) -> tuple[str, np.ndarray, np.ndarray, int] |
 
     All config needed for label/tissue resolution is passed in the task dict.
     """
-    # Configure ray count for this worker (spawn doesn't inherit globals)
     n_rays = task.get('n_rays', 32)
     from raycasted.data.etl.utils.constants import configure_rays
 
@@ -134,7 +119,7 @@ def _process_roi_worker(task: dict) -> tuple[str, np.ndarray, np.ndarray, int] |
 
     try:
         rgb_bytes = task['rgb_bytes']
-        image_array = _decode_image(rgb_bytes, is_mask=False)
+        image_array = ParquetHandler.decode_image_bytes(rgb_bytes, is_mask=False)
 
         roi_id = task['roi_id']
         masks_df = task['masks_df']
@@ -147,9 +132,15 @@ def _process_roi_worker(task: dict) -> tuple[str, np.ndarray, np.ndarray, int] |
                 masks_df, mask_col, cat_col, task['namespace_map'], task['global_cell_map']
             )
         elif annotation_type == 'raycast':
-            annotations = _extract_raycast_annotations(
+            vertices_list, class_ids_list = _extract_contours_from_masks(
                 masks_df, mask_col, cat_col, task['namespace_map'], task['global_cell_map']
             )
+            if vertices_list:
+                annotations = RayCastGPU.batch_polygon_to_raycast(
+                    vertices_list, np.array(class_ids_list, dtype=np.int64), n_rays=n_rays
+                )
+            else:
+                annotations = np.zeros((0, 3 + n_rays), dtype=np.float32)
         else:
             raise ValueError(f'Unsupported annotation_type: {annotation_type}')
 
@@ -161,15 +152,24 @@ def _process_roi_worker(task: dict) -> tuple[str, np.ndarray, np.ndarray, int] |
         return None
 
 
-class ParquetIngestor(BaseDataIngestor):  # noqa: D101
+class ParquetIngestor(BaseDataIngestor):
+    """Ingestor for parquet-based datasets (e.g. PanNuke).
+
+    Reads parquet files containing ROI images and per-cell binary masks.
+    Supports ``annotation_type`` of ``bbox`` and ``raycast``.
+    Uses ``ProcessPoolExecutor`` with spawn context for ROI-level parallelism.
+    """
+
     def __init__(self, config: dict, workers: int = 1):
         self._workers = workers
         super().__init__(config)
 
     def process_item(self, row: dict) -> Generator:
-        """Takes a registry row representing a Parquet file, extracts the ROIs,
-        and yields them in the standardized format based on annotation_type.
-        """  # noqa: D205
+        """Extract ROIs from a Parquet file and yield in standardized format.
+
+        Routes by annotation_type (bbox/raycast) and dispatches to workers
+        for parallel ROI processing.
+        """
         parquet_path = row['image_path']
         base_roi_name = row['roi_id']
 
@@ -186,7 +186,6 @@ class ParquetIngestor(BaseDataIngestor):  # noqa: D101
 
         lf = lf.with_row_index('internal_roi_id')
 
-        # Read parquet into memory in the main process (fast with Polars)
         df_rgb = lf.select(['internal_roi_id', rgb_col, tissue_col]).collect()
         df_masks = lf.select(['internal_roi_id', mask_col, cat_col]).explode([mask_col, cat_col]).drop_nulls().collect()
 
@@ -195,7 +194,6 @@ class ParquetIngestor(BaseDataIngestor):  # noqa: D101
             raw_dict = df_masks.partition_by('internal_roi_id', as_dict=True)
             masks_by_roi = {k[0]: v for k, v in raw_dict.items()}
 
-        # Build task list — each task is a self-contained dict with all data needed
         tasks = []
         for rgb_row in df_rgb.iter_rows(named=True):
             internal_id = rgb_row['internal_roi_id']
@@ -219,9 +217,7 @@ class ParquetIngestor(BaseDataIngestor):  # noqa: D101
                 }
             )
 
-        # Dispatch
         if self._workers <= 1 or len(tasks) <= 1:
-            # Sequential path — avoids process pool overhead for small workloads
             for task in tasks:
                 result = _process_roi_worker(task)
                 if result is not None:
@@ -249,28 +245,3 @@ class ParquetIngestor(BaseDataIngestor):  # noqa: D101
                 tissue_col = col_name
 
         return rgb_col, mask_col, cat_col, tissue_col
-
-    def _decode_image(self, byte_string: bytes, is_mask: bool = False) -> np.ndarray:
-        """Helper to convert raw bytes back into numpy arrays using OpenCV."""
-        return _decode_image(byte_string, is_mask)
-
-    def _extract_bbox_annotations(
-        self,
-        roi_masks_df,
-        mask_col: str,
-        cat_col: str,
-        image_array: np.ndarray,  # noqa: ARG002
-    ) -> np.ndarray:
-        return _extract_bbox_annotations(roi_masks_df, mask_col, cat_col, self.namespace_map, self.global_cell_map)
-
-    def _extract_ins_segmentation_annotations(self, roi_masks_df, mask_col: str, cat_col: str, image_array: np.ndarray):
-        raise NotImplementedError('Instance segmentation annotation extraction not yet implemented')
-
-    def _extract_raycast_annotations(
-        self,
-        roi_masks_df,
-        mask_col: str,
-        cat_col: str,
-        image_array: np.ndarray,  # noqa: ARG002
-    ) -> np.ndarray:
-        return _extract_raycast_annotations(roi_masks_df, mask_col, cat_col, self.namespace_map, self.global_cell_map)

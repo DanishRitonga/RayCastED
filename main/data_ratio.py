@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # Adjust these imports to match your project structure
-from raycasted.data.etl import CSVPolyParser, ETLConfig, GeoJSONParser, ParquetParser
+from raycasted.data.etl import CSVPolygonIngestor, ETLConfig, GeoJSONIngestor, ParquetIngestor
 
 
 def get_ingestor(dataset_name: str, config: dict):
@@ -18,9 +18,9 @@ def get_ingestor(dataset_name: str, config: dict):
         ingestor_key = {1: 'parquet', 2: 'parquet', 3: 'parquet', 4: 'geojson', 5: 'csv_poly'}.get(method)
 
     registry = {
-        'parquet': ParquetParser,
-        'geojson': GeoJSONParser,
-        'csv_poly': CSVPolyParser,
+        'parquet': ParquetIngestor,
+        'geojson': GeoJSONIngestor,
+        'csv_poly': CSVPolygonIngestor,
     }
     cls = registry.get(ingestor_key)
     if cls is None:

@@ -15,7 +15,6 @@ import collections
 import multiprocessing
 import os
 import re
-import warnings
 from collections.abc import Generator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -24,30 +23,16 @@ from typing import Any
 import numpy as np
 
 from ..utils.config import ETLConfig
-from .dataset_parsers.csv_poly_parser import CSVPolyParser
-from .dataset_parsers.geojson_parser import GeoJSONParser
-from .dataset_parsers.mat_inst_parser import MatInstParser
-from .dataset_parsers.parquet_parser import ParquetParser
+from .csv_poly_ingestor import CSVPolygonIngestor
+from .geojson_ingestor import GeoJSONIngestor
+from .mat_inst_ingestor import MatInstanceIngestor
+from .parquet_ingestor import ParquetIngestor
 
 PARSER_REGISTRY: dict[str, type] = {
-    'parquet': ParquetParser,
-    'mat_inst': MatInstParser,
-    'geojson': GeoJSONParser,
-    'csv_poly': CSVPolyParser,
-}
-
-_LEGACY_METHOD_MAP: dict[int, str] = {
-    1: 'parquet',
-    3: 'mat_inst',
-    4: 'geojson',
-    5: 'csv_poly',
-}
-
-DISPATCH_MAP: dict[int, type] = {
-    1: ParquetParser,
-    3: MatInstParser,
-    4: GeoJSONParser,
-    5: CSVPolyParser,
+    'parquet': ParquetIngestor,
+    'mat_inst': MatInstanceIngestor,
+    'geojson': GeoJSONIngestor,
+    'csv_poly': CSVPolygonIngestor,
 }
 
 # Matches path traversal: "..", leading "/" or "\", any backslash
@@ -150,7 +135,7 @@ class IngestionOrchestrator:
         Datasets are processed sequentially, but rows within a dataset
         are processed in parallel when workers > 1.
 
-        ParquetParser handles its own internal parallelism across ROIs
+        ParquetIngestor handles its own internal parallelism across ROIs
         within each parquet file, so rows (folds) are always processed
         sequentially to avoid nested process pools.
         """
@@ -195,27 +180,12 @@ class IngestionOrchestrator:
 
     @staticmethod
     def _resolve_ingestor_key(merged_config: dict, dataset_name: str) -> str:
-        """Resolve the string ingestor key from config, with legacy int fallback."""
+        """Resolve the string ingestor key from config."""
         ingestor_key = merged_config.get('ingestor')
         if ingestor_key:
             return ingestor_key
 
-        legacy_method = merged_config.get('ingestion_method')
-        if legacy_method is not None:
-            key = _LEGACY_METHOD_MAP.get(legacy_method)
-            if key is None:
-                raise ValueError(
-                    f"Unknown ingestion_method={legacy_method} for dataset '{dataset_name}'. "
-                    f'Supported legacy codes: {list(_LEGACY_METHOD_MAP.keys())}'
-                )
-            warnings.warn(
-                f"'ingestion_method: {legacy_method}' is deprecated — use 'ingestor: {key}' instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            return key
-
-        raise ValueError(f"Dataset '{dataset_name}' must specify either 'ingestor' or legacy 'ingestion_method'.")
+        raise ValueError(f"Dataset '{dataset_name}' must specify 'ingestor' key.")
 
     def _process_rows_sequential(
         self, dataset_name: str, ingestor: Any, rows: list[dict], total: int
@@ -289,7 +259,7 @@ class IngestionOrchestrator:
             stats['errors'] += 1
             return
 
-        # ParquetParser.process_item() is a generator; others return a tuple.
+        # ParquetIngestor.process_item() is a generator; others return a tuple.
         # Normalise both to an iterable of result tuples.
         results = result if isinstance(result, Generator) else [result]
 

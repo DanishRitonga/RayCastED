@@ -1,6 +1,6 @@
+import warnings
 from pathlib import Path
 from typing import Any, Literal
-import warnings
 
 import yaml
 from pydantic import BaseModel, Field, model_validator

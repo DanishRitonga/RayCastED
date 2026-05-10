@@ -15,10 +15,10 @@ from ultralytics.models.yolo.detect.val import DetectionValidator
 from ultralytics.utils.metrics import DetMetrics, Metric, ap_per_class
 
 from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
-from raycasted.model.blocks.head import RayCastDetect
 
 # Backward compat constant (tests import this). At runtime, use self.raycast_dim.
 from raycasted.data.etl.utils import constants as _val_const
+from raycasted.model.blocks.head import RayCastDetect
 
 RAYCAST_DIM = 2 + _val_const.N_RAYS
 

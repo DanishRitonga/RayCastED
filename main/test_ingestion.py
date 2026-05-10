@@ -6,22 +6,22 @@ import polars as pl
 
 # Adjust these imports based on your actual project structure
 from raycasted.data.etl import (
-    CSVPolyParser,
+    CSVPolygonIngestor,
     ETLConfig,
-    GeoJSONParser,
-    ParquetParser,
+    GeoJSONIngestor,
+    ParquetIngestor,
 )
 
 INGESTOR_MAP = {
-    'parquet': ParquetParser,
-    'geojson': GeoJSONParser,
-    'csv_poly': CSVPolyParser,
+    'parquet': ParquetIngestor,
+    'geojson': GeoJSONIngestor,
+    'csv_poly': CSVPolygonIngestor,
 }
 
 _INGESTOR_MAP_LEGACY = {
-    1: ParquetParser,
-    4: GeoJSONParser,
-    5: CSVPolyParser,
+    1: ParquetIngestor,
+    4: GeoJSONIngestor,
+    5: CSVPolygonIngestor,
 }
 
 
