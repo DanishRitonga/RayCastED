@@ -311,7 +311,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Loss weights — decoded normalised xy space [0,1].
         # High lambda compensates for stride/imgsz gradient attenuation (~0.03x).
         # Raw ~0.088; lambda=500 gives weighted~44, effective grad_mult~7.8.
-        self.lambda_cls = 0.5
+        self.lambda_cls = 2.0
         self.lambda_xy = 500.0
         self.lambda_l1 = 25.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
@@ -407,12 +407,15 @@ class RayCastDetectionLoss(v8DetectionLoss):
             mask_gt,
         )
 
-        # --- L_cls: BCE or Focal loss normalised by target_scores_sum ---
-        # Ultralytics standard normalization. sum() includes bg BCE for false-positive
-        # suppression. target_scores_sum ≈ 800-1200 produces cls ≈ 9.5 — dominant,
-        # but bg suppression is critical for assignment quality. We compensate by
-        # using a smaller lambda_cls.
-        target_scores_sum = max(target_scores.sum(), 1)
+        # --- L_cls: BCE with separate fg/bg normalization ---
+        # Previous normalization (sum / target_scores_sum) diluted background gradients
+        # because target_scores_sum is dominated by foreground alignment scores (~800-1200).
+        # With high positive rates (20 topk → 74% fg), the classifier never learned to
+        # suppress false negatives. Normalizing fg and bg separately gives each equal
+        # per-sample gradient magnitude regardless of the positive/negative ratio.
+        n_fg_cls = max(fg_mask.sum(), 1)
+        n_bg = max(batch_size * pred_scores.shape[1] - n_fg_cls, 1)
+
         if self.focal_gamma > 0:
             cls_targets = target_scores.float().clone()
             cls_targets[cls_targets > 0] = 1.0
@@ -424,7 +427,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
             )
         else:
             loss_cls = self.bce(pred_scores.float(), target_scores.float())
-        loss[1] = loss_cls.sum() / target_scores_sum
+
+        fg_mask_bc = fg_mask.unsqueeze(-1).expand_as(loss_cls)
+        loss_fg = loss_cls[fg_mask_bc].sum() / n_fg_cls
+        loss_bg = loss_cls[~fg_mask_bc].sum() / n_bg
+        loss[1] = loss_fg + loss_bg
 
         # --- Polygon regression losses (foreground only, uniform weight) ---
         n_fg = max(fg_mask.sum(), 1)

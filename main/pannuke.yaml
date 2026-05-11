@@ -50,7 +50,7 @@ training:
   cos_lr: true               # cosine LR schedule. Was false
 
   # E2E dual-assignment (NMS-free)
-  tal_topk: 20                # one2many positives per GT (increased for dense cell scenes)
+  tal_topk: 6                 # one2many positives per GT (reduced from 20 to fix positive-rate flooding)
   assigner_radius_scale: 1.5  # containment radius multiplier
   assigner_alpha: 0.5         # cls score exponent in align = cls^α × piou^β
   assigner_beta: 6.0          # Polar-IoU exponent — high β creates geometric dominance for dense cells
