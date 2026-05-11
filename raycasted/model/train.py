@@ -24,6 +24,7 @@ from copy import deepcopy
 
 import numpy as np
 import torch
+import torch.nn as nn
 from ultralytics.data.build import InfiniteDataLoader
 from ultralytics.models.yolo.detect.train import DetectionTrainer
 from ultralytics.nn.modules.head import Detect
