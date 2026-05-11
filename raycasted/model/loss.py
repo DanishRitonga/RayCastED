@@ -308,13 +308,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
             warmup_epochs=assigner_warmup_epochs,
         )
 
-        # Loss weights — xy in offset space (sigmoid×2-0.5) to bypass decode
-        # gradient bottleneck (stride/imgsz kills sigmoid gradient).
-        # xy raw ~28 (offset space), cls raw ~9.5, l1 raw ~0.34.
-        # lambda_xy=0.2 gives weighted~5.6, comparable to old decoded-space 4.4
-        # but with 32x larger gradient w.r.t. head parameters.
+        # Loss weights — xy in grid-cell offset space (sigmoid*2-0.5 range [-0.5,1.5]).
+        # Raw xy ~0.12 initially, converges to ~0.04. GT offset now within model range.
+        # lambda_xy=50: weighted ~6 initially → strong centroid signal for assignment.
         self.lambda_cls = 0.5
-        self.lambda_xy = 0.2
+        self.lambda_xy = 50.0
         self.lambda_l1 = 25.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
 
@@ -441,11 +439,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
             fg_idx = fg_mask.nonzero(as_tuple=False)
             fg_anchor_idx = fg_idx[:, 1]
-            fg_anchor_norm = anchor_points_norm[fg_anchor_idx].float()
+            fg_anchor = anchor_points[fg_anchor_idx].float()
             fg_stride = stride_tensor[fg_anchor_idx].float()
 
             fg_xy_offset = xy_raw[fg_mask].float().sigmoid() * 2.0 - 0.5
-            fg_gt_offset = (fg_target_xy * imgsz[[1, 0]] / fg_stride - fg_anchor_norm) * 2.0 - 0.5
+            fg_gt_offset = fg_target_xy * imgsz[[1, 0]] / fg_stride - fg_anchor
             loss_xy = F.huber_loss(fg_xy_offset, fg_gt_offset, reduction='none', delta=1.0).mean(-1)
             loss[0] = loss_xy.sum() / n_fg
 
