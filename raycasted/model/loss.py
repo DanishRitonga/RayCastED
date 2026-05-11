@@ -274,6 +274,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         cost_class: float = 1.0,
         cost_centroid: float = 1.0,
         cost_ray: float = 1.0,
+        assigner_warmup_epochs: int = 0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -304,14 +305,14 @@ class RayCastDetectionLoss(v8DetectionLoss):
             cost_class=cost_class,
             cost_centroid=cost_centroid,
             cost_ray=cost_ray,
+            warmup_epochs=assigner_warmup_epochs,
         )
 
-        # Loss weights — original normalization with reduced cls weight.
+        # Loss weights — reduced cls weight to prevent gradient dominance.
         # cls raw ~9.5 (sum/target_scores_sum), xy raw ~1.35, l1 raw ~0.34.
-        # lambda_cls=0.5 brings weighted cls ~4.75, comparable to xy(15*1.35=20.25).
-        # Background BCE suppression is essential for assignment quality.
+        # AGENTS.md: lambda_xy=50.0, delta=1.0 for centroid collapse prevention.
         self.lambda_cls = 0.5
-        self.lambda_xy = 15.0
+        self.lambda_xy = 50.0
         self.lambda_l1 = 25.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
 
@@ -514,6 +515,8 @@ class RayCastE2ELoss(E2ELoss):
         gradnorm: bool = False,
         gradnorm_alpha: float = 0.5,
         gradnorm_warmup_epochs: int = 5,
+        assigner_warmup_epochs: int = 0,
+        steps_per_epoch: int = 133,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -541,6 +544,7 @@ class RayCastE2ELoss(E2ELoss):
             cost_class=cost_class,
             cost_centroid=cost_centroid,
             cost_ray=cost_ray,
+            assigner_warmup_epochs=assigner_warmup_epochs,
         )
         super().__init__(model, loss_fn=loss_fn)
 
@@ -585,6 +589,7 @@ class RayCastE2ELoss(E2ELoss):
                 topk2=1,
                 radius_scale=assigner_radius_scale,
                 align_threshold=align_threshold,
+                warmup_epochs=assigner_warmup_epochs,
             )
         else:
             one2one_pool = max(tal_topk // 2, 7)
@@ -597,6 +602,7 @@ class RayCastE2ELoss(E2ELoss):
                 topk2=1,
                 radius_scale=assigner_radius_scale,
                 align_threshold=align_threshold,
+                warmup_epochs=assigner_warmup_epochs,
             )
 
         # Validate E2E architecture integrity
@@ -611,6 +617,17 @@ class RayCastE2ELoss(E2ELoss):
         assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
             f'E2E violation: one2many.topk2 ({self.one2many.assigner.topk2}) != topk ({self.one2many.assigner.topk})'
         )
+
+        # Assignment warmup: centroid-distance matching for early training.
+        # Random backbone features produce garbage ray predictions, making
+        # Polar-IoU meaningless. Centroid distance gives stable assignments
+        # even with random features, bootstrapping feature learning.
+        self.assigner_warmup_epochs = assigner_warmup_epochs
+        self.steps_per_epoch = steps_per_epoch
+        for assigner in (self.one2many.assigner, self.one2one.assigner):
+            if hasattr(assigner, 'warmup_steps'):
+                assigner.warmup_steps = assigner_warmup_epochs * steps_per_epoch
+
         # Smooth loss: reverse anneal — starts at 0, ramps up to peak, then holds.
         # Early training: model focuses on detection (xy, cls, L1).
         # After ramp: smoothness pressure helps refine polygon boundaries.
@@ -646,8 +663,18 @@ class RayCastE2ELoss(E2ELoss):
                 f'E2E violation: one2many topk={self.one2many.assigner.topk} != topk2={self.one2many.assigner.topk2}'
             )
 
+            warmup = getattr(self.one2many.assigner, 'warmup_epochs', 0)
+            if warmup > 0:
+                print(f'  Assignment warmup: centroid-distance for epochs 0-{warmup}, then Polar-IoU (sigma=0.15)')
+
         # Reverse anneal: ramp from smooth_start → smooth_end over smooth_anneal_epochs
         t = min(self.updates / self.smooth_anneal_epochs, 1.0)
         new_lambda = self.smooth_start + t * (self.smooth_end - self.smooth_start)
         self.one2many.lambda_smooth = new_lambda
         self.one2one.lambda_smooth = new_lambda
+
+        # Propagate epoch estimate to assigners for warmup scheduling
+        current_epoch = self.updates / max(self._steps_per_epoch, 1)
+        for assigner in (self.one2many.assigner, self.one2one.assigner):
+            if hasattr(assigner, 'set_epoch'):
+                assigner.set_epoch(current_epoch)

@@ -177,6 +177,8 @@ class _RayCastCriterionWrapper:
             gradnorm=tcfg.get('gradnorm', False),
             gradnorm_alpha=tcfg.get('gradnorm_alpha', 0.5),
             gradnorm_warmup_epochs=tcfg.get('gradnorm_warmup_epochs', 5),
+            assigner_warmup_epochs=tcfg.get('assigner_warmup_epochs', 0),
+            steps_per_epoch=tcfg.get('steps_per_epoch', 133),
         )
 
 

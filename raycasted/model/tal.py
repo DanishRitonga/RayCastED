@@ -17,6 +17,14 @@ critical for dense touching-cell scenes: even a 1-pixel boundary overshoot
 between adjacent nuclei is harshly penalised by β=6 exponentiation,
 preventing anchor assignment collisions.
 
+Assignment warmup (first N epochs): During scratch training, predicted rays are
+meaningless noise until the backbone learns spatial features. Using Polar-IoU
+for assignment produces garbage matches → noisy regression targets → no
+convergence. The warmup replaces Polar-IoU with a Gaussian centroid-distance
+similarity metric: exp(-d²/2σ²). This only requires centroid proximity (not
+shape), producing clean xy/l1 targets from epoch 0. After warmup, switches to
+full Polar-IoU for precise geometric matching.
+
 HungarianRayCastAssigner extends RayCastAssigner with globally optimal
 bipartite matching (scipy.linear_sum_assignment) for the one2one branch.
 
@@ -36,13 +44,20 @@ from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 
 
 class RayCastAssigner(TaskAlignedAssigner):
-    """Polygon-aware assigner with dual-metric assignment.
+    """Polygon-aware assigner with dual-metric assignment and warmup.
 
     One2many branch uses Polar-IoU geometric overlap (multiplicative):
       align = cls_score^alpha * PolarIoU^beta
     This provides absolute geometric discrimination critical for dense
     touching-cell scenes — even a 1-pixel boundary overshoot is harshly
     penalised by beta=6 exponentiation.
+
+    During the first ``warmup_epochs`` epochs (scratch training), the one2many
+    branch uses Gaussian centroid similarity instead of Polar-IoU:
+      align = cls_score^alpha * exp(-sigma * L2^2)
+    This avoids the chicken-and-egg problem where random backbone features
+    produce garbage Polar-IoU, causing noisy assignments that prevent the
+    model from learning spatial structure.
 
     One2one branch (Hungarian) uses additive unified cost:
       cost = w_cls * focal_cls + w_xy * L2_centroid + w_ray * log_l1_rays
@@ -71,14 +86,15 @@ class RayCastAssigner(TaskAlignedAssigner):
         cost_class=1.0,
         cost_centroid=1.0,
         cost_ray=1.0,
+        warmup_epochs=0,
     ):
         """Initialize RayCastAssigner.
 
         Args:
             topk: Number of top-k candidate anchors per GT.
             num_classes: Number of object classes.
-            alpha: Unused (kept for API compatibility).
-            beta: Unused (kept for API compatibility).
+            alpha: Exponent on cls_score in alignment metric.
+            beta: Exponent on Polar-IoU in alignment metric.
             stride: Feature map strides (default [8, 16, 32]).
             eps: Small value to prevent division by zero.
             topk2: Secondary topk for additional filtering.
@@ -91,6 +107,9 @@ class RayCastAssigner(TaskAlignedAssigner):
             cost_class: Weight for focal classification cost.
             cost_centroid: Weight for L2 centroid distance cost.
             cost_ray: Weight for log-space L1 ray cost.
+            warmup_epochs: Number of epochs to use centroid-distance assignment
+                instead of Polar-IoU. During warmup, get_box_metrics uses
+                Gaussian(L2_centroid) similarity. Set to 0 to disable.
         """
         super().__init__(
             topk=topk,
@@ -106,6 +125,18 @@ class RayCastAssigner(TaskAlignedAssigner):
         self.cost_class = cost_class
         self.cost_centroid = cost_centroid
         self.cost_ray = cost_ray
+        self.warmup_epochs = warmup_epochs
+        self._current_epoch = 0
+
+    def set_epoch(self, epoch: float):
+        """Update the current epoch for warmup scheduling.
+
+        Called by RayCastE2ELoss.update() after each training step.
+
+        Args:
+            epoch: Current epoch (may be fractional).
+        """
+        self._current_epoch = epoch
 
     # -----------------------------------------------------------------
     # Override 1: radius-based containment
@@ -228,9 +259,12 @@ class RayCastAssigner(TaskAlignedAssigner):
             cost_ray = log_l1
 
             # --- Combined cost ---
-            total = (
-                self.cost_class * cost_cls + self.cost_centroid * cost_xy + self.cost_ray * cost_ray
-            )  # (n_cand, n_valid_gt)
+            # During warmup, suppress ray cost (random predictions) and boost centroid
+            is_warmup = self._current_epoch < self.warmup_epochs
+            w_cls = self.cost_class
+            w_xy = self.cost_centroid * (3.0 if is_warmup else 1.0)
+            w_ray = self.cost_ray * (0.1 if is_warmup else 1.0)
+            total = w_cls * cost_cls + w_xy * cost_xy + w_ray * cost_ray
             total = total.nan_to_num(nan=1e8, posinf=1e8, neginf=-1e8)
 
             # Ray similarity for overlaps (used by parent's normalisation)
@@ -247,32 +281,19 @@ class RayCastAssigner(TaskAlignedAssigner):
     # -----------------------------------------------------------------
 
     def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
-        """Compute alignment metric using absolute Polar-IoU overlap.
+        """Compute alignment metric for one2many branch.
 
-        For the one2many branch, geometric overlap must dominate the
-        assignment metric.  In dense nuclei scenes a small absolute boundary
-        error can merge touching instances — a topologically fatal mistake.
-        Polar-IoU measures *absolute* area overlap so that even a 1 px
-        overshoot on a small nucleus is penalised harshly when raised to a
-        high power (beta).
+        During warmup (epoch < warmup_epochs), uses Gaussian centroid similarity
+        instead of Polar-IoU. With random backbone features, predicted rays are
+        meaningless noise — Polar-IoU produces garbage alignment metrics. Centroid
+        distance is a reliable signal even with random features because anchors
+        near GT centroids produce clean regression targets.
 
-        Formula (matches ultralytics parent):
-            align_metric = cls_score^alpha * piou^beta
+        After warmup, switches to Polar-IoU for precise geometric matching.
 
-        The Hungarian one2one branch continues to use the additive unified
-        cost matrix (_compute_cost_matrix) — the two branches serve
-        different purposes and need different metrics.
-
-        Args:
-            pd_scores: Classification scores, shape (B, N_anchors, nc).
-            pd_bboxes: Decoded polygon predictions, shape (B, N_anchors, 2+N_RAYS).
-            gt_labels: GT class labels, shape (B, N_max_gt, 1).
-            gt_bboxes: GT polygon targets, shape (B, N_max_gt, 2+N_RAYS).
-            mask_gt: Valid GT mask, shape (B, N_max_gt, 1).
-
-        Returns:
-            align_metric: (B, N_max_gt, N_anchors).
-            overlaps: (B, N_max_gt, N_anchors).
+        Formula:
+          warmup:    align = cls_score^alpha * exp(-dist^2 / (2*sigma^2))^beta
+          normal:    align = cls_score^alpha * PolarIoU^beta
         """
         na = pd_bboxes.shape[-2]
         mask_gt_bool = mask_gt.bool()
@@ -283,6 +304,8 @@ class RayCastAssigner(TaskAlignedAssigner):
         ind[0] = torch.arange(end=self.bs).view(-1, 1).expand(-1, self.n_max_boxes)
         ind[1] = gt_labels.squeeze(-1)
         bbox_scores[mask_gt_bool] = pd_scores[ind[0], :, ind[1]][mask_gt_bool]
+
+        in_warmup = self.warmup_epochs > 0 and self._current_epoch < self.warmup_epochs
 
         for b in range(self.bs):
             candidate_mask = mask_gt_bool[b].any(dim=0)
@@ -295,17 +318,28 @@ class RayCastAssigner(TaskAlignedAssigner):
             valid_gt_idx = valid_gt_mask.nonzero(as_tuple=False).squeeze(-1)
             n_valid_gt = valid_gt_idx.shape[0]
 
-            pd_rays = pd_bboxes[b, cand_idx, 2:]
-            gt_rays = gt_bboxes[b, valid_gt_idx, 2:]
+            if in_warmup:
+                pd_xy = pd_bboxes[b, cand_idx, :2].float()
+                gt_xy = gt_bboxes[b, valid_gt_idx, :2].float()
+                dist = torch.cdist(pd_xy, gt_xy, p=2)
+                sigma = 0.15
+                sim = torch.exp(-dist.pow(2) / (2 * sigma**2))
+                pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
+                overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = sim.T.to(overlaps.dtype) * pair_mask.to(
+                    overlaps.dtype
+                )
+            else:
+                pd_rays = pd_bboxes[b, cand_idx, 2:]
+                gt_rays = gt_bboxes[b, valid_gt_idx, 2:]
 
-            pd_exp = pd_rays[:, None, :].expand(-1, n_valid_gt, -1)
-            gt_exp = gt_rays[None, :, :].expand(n_cand, -1, -1)
-            iou = polar_iou_pairwise_flat_torch(pd_exp, gt_exp)
+                pd_exp = pd_rays[:, None, :].expand(-1, n_valid_gt, -1)
+                gt_exp = gt_rays[None, :, :].expand(n_cand, -1, -1)
+                iou = polar_iou_pairwise_flat_torch(pd_exp, gt_exp)
 
-            pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
-            overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = iou.T.to(overlaps.dtype) * pair_mask.to(
-                overlaps.dtype
-            )
+                pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
+                overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = iou.T.to(overlaps.dtype) * pair_mask.to(
+                    overlaps.dtype
+                )
 
         if self.align_threshold > 0:
             overlaps = overlaps * (overlaps >= self.align_threshold).float()
