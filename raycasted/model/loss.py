@@ -716,6 +716,11 @@ class RayCastE2ELoss(E2ELoss):
 
         has_aux = self.aux_xy_lambda > 0 and 'aux_xy_raw' in one2many_preds
 
+        if not has_aux and self.aux_xy_lambda > 0 and not hasattr(self, '_aux_missing_logged'):
+            self._aux_missing_logged = True
+            print(f'[AUX WARN] aux_xy_lambda={self.aux_xy_lambda} but no aux_xy_raw in preds. '
+                  f'Keys: {sorted(one2many_preds.keys())}')
+
         if has_aux:
             aux_raw = one2many_preds['aux_xy_raw'].permute(0, 2, 1).contiguous()
             feats = one2many_preds['feats']

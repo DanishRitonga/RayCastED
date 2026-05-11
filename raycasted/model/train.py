@@ -341,6 +341,7 @@ class RayCastTrainer(DetectionTrainer):
                 old_head.aux_xy = nn.ModuleList(nn.Conv2d(c, 2, 1) for c in neck_ch)
                 for layer in old_head.aux_xy:
                     nn.init.zeros_(layer.bias)
+                    nn.init.zeros_(layer.weight)
         else:
             ch = _extract_neck_channels(old_head)
             nc = old_head.nc
