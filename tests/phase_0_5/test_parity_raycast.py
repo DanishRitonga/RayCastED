@@ -63,16 +63,24 @@ def _star_polygon(cx, cy, r_outer, r_inner, n_points):
 
 def _l_shape_polygon(ox, oy, w, h, t):
     return [
-        (ox, oy), (ox + w, oy), (ox + w, oy + t),
-        (ox + t, oy + t), (ox + t, oy + h), (ox, oy + h),
+        (ox, oy),
+        (ox + w, oy),
+        (ox + w, oy + t),
+        (ox + t, oy + t),
+        (ox + t, oy + h),
+        (ox, oy + h),
     ]
 
 
 def _crescent_polygon(cx, cy, r_outer, r_inner, offset):
-    outer = [(cx + r_outer * math.cos(a), cy + r_outer * math.sin(a))
-             for a in np.linspace(0, 2 * math.pi, 40, endpoint=False)]
-    inner = [(cx + offset + r_inner * math.cos(a), cy + r_inner * math.sin(a))
-             for a in np.linspace(2 * math.pi, 0, 40, endpoint=False)]
+    outer = [
+        (cx + r_outer * math.cos(a), cy + r_outer * math.sin(a))
+        for a in np.linspace(0, 2 * math.pi, 40, endpoint=False)
+    ]
+    inner = [
+        (cx + offset + r_inner * math.cos(a), cy + r_inner * math.sin(a))
+        for a in np.linspace(2 * math.pi, 0, 40, endpoint=False)
+    ]
     return outer + inner
 
 
@@ -113,17 +121,38 @@ def _generate_test_polygons():
         shapes.append((f'circle_r{r}', Polygon(_regular_polygon(200, 200, r, 32)), False))
 
     for offset in [(0, 0), (500, 500), (1000, 1000), (0.5, 0.5)]:
-        shapes.append((f'circle_offset_{offset[0]}_{offset[1]}',
-                        Polygon(_regular_polygon(offset[0] + 100, offset[1] + 100, 30, 32)), False))
+        shapes.append(
+            (
+                f'circle_offset_{offset[0]}_{offset[1]}',
+                Polygon(_regular_polygon(offset[0] + 100, offset[1] + 100, 30, 32)),
+                False,
+            )
+        )
 
-    shapes.append(('ellipse_wide', Polygon(
-        [(200 + 60 * math.cos(a), 200 + 20 * math.sin(a))
-         for a in np.linspace(0, 2 * math.pi, 48, endpoint=False)]
-    ), False))
-    shapes.append(('ellipse_tall', Polygon(
-        [(200 + 15 * math.cos(a), 200 + 50 * math.sin(a))
-         for a in np.linspace(0, 2 * math.pi, 48, endpoint=False)]
-    ), False))
+    shapes.append(
+        (
+            'ellipse_wide',
+            Polygon(
+                [
+                    (200 + 60 * math.cos(a), 200 + 20 * math.sin(a))
+                    for a in np.linspace(0, 2 * math.pi, 48, endpoint=False)
+                ]
+            ),
+            False,
+        )
+    )
+    shapes.append(
+        (
+            'ellipse_tall',
+            Polygon(
+                [
+                    (200 + 15 * math.cos(a), 200 + 50 * math.sin(a))
+                    for a in np.linspace(0, 2 * math.pi, 48, endpoint=False)
+                ]
+            ),
+            False,
+        )
+    )
 
     shapes.append(('self_intersect', Polygon(_self_intersecting_polygon(200, 200, 30)), True))
 
@@ -143,9 +172,7 @@ def _run_analytical_cpu(vertices_list, class_ids, n_rays):
     centroids = RayCastGPU._compute_centroids(v_padded, mask, k_max, torch)
     inside = RayCastGPU._point_in_polygon(centroids, v_padded, mask, k_max, torch)
     centroids = RayCastGPU._fallback_centroid(centroids, inside, v_padded, mask, torch)
-    distances = RayCastGPU._solve_ray_intersections(
-        centroids, v_padded, mask, directions, k_max, torch
-    )
+    distances = RayCastGPU._solve_ray_intersections(centroids, v_padded, mask, directions, k_max, torch)
 
     return RayCastGPU._assemble_output(distances, centroids, class_ids, n_rays, n_polys, torch)
 
@@ -191,9 +218,11 @@ def _compare_annotations(old_ann, new_ann, name, verbose=False):
     }
 
     if verbose:
-        print(f'  {name}: cx_err={cx_err:.3f}  cy_err={cy_err:.3f}  '
-              f'max_ray={max_ray_err:.3f}  mean_ray={mean_ray_err:.3f}  '
-              f'IoU={iou:.4f}  zero_old={result["zero_rays_old"]}  zero_new={result["zero_rays_new"]}')
+        print(
+            f'  {name}: cx_err={cx_err:.3f}  cy_err={cy_err:.3f}  '
+            f'max_ray={max_ray_err:.3f}  mean_ray={mean_ray_err:.3f}  '
+            f'IoU={iou:.4f}  zero_old={result["zero_rays_old"]}  zero_new={result["zero_rays_new"]}'
+        )
 
     return result
 
@@ -262,9 +291,7 @@ def test_fallback_parity():
         class_ids = np.array([1], dtype=np.int64)
 
         counter = collections.Counter()
-        new_ann = RayCastGPU._fallback_shapely(
-            [verts], class_ids, n_rays=N_RAYS, fallback_counter=counter
-        )
+        new_ann = RayCastGPU._fallback_shapely([verts], class_ids, n_rays=N_RAYS, fallback_counter=counter)
 
         total += 1
         if old_ann is None and new_ann.shape[0] == 0:
@@ -308,13 +335,9 @@ def test_batch_consistency():
     batch_anns = _run_analytical_cpu(vertices_list, class_ids, N_RAYS)
 
     for i, verts in enumerate(vertices_list):
-        single_ann = _run_analytical_cpu(
-            [verts], np.array([1], dtype=np.int64), N_RAYS
-        )
+        single_ann = _run_analytical_cpu([verts], np.array([1], dtype=np.int64), N_RAYS)
         diff = np.abs(batch_anns[i] - single_ann[0])
-        assert diff.max() < 1e-4, (
-            f'Batch/single mismatch for polygon {i}: max_diff={diff.max():.6f}'
-        )
+        assert diff.max() < 1e-4, f'Batch/single mismatch for polygon {i}: max_diff={diff.max():.6f}'
 
     print(f'  Batch/single consistency: {len(vertices_list)} polygons — PASS\n')
 
@@ -349,15 +372,11 @@ def _assert_thresholds(results, label):
     assert len(valid) > 0, f'[{label}] No valid results to check'
 
     for r in valid:
-        assert r['iou'] >= 0.85, (
-            f"[{label}] IoU too low for '{r['name']}': {r['iou']:.4f}"
-        )
+        assert r['iou'] >= 0.85, f"[{label}] IoU too low for '{r['name']}': {r['iou']:.4f}"
 
     ious = [r['iou'] for r in valid]
     mean_iou = np.mean(ious)
-    assert mean_iou >= 0.93, (
-        f'[{label}] Mean IoU too low: {mean_iou:.4f}'
-    )
+    assert mean_iou >= 0.93, f'[{label}] Mean IoU too low: {mean_iou:.4f}'
 
     print(f'  [{label}] All assertions passed (mean IoU={mean_iou:.4f}, min IoU={min(ious):.4f})')
     print()
@@ -367,6 +386,7 @@ def _visualize_worst(results, vertices_list, class_ids):
     """Save visual comparison of worst-IoU polygons."""
     try:
         import matplotlib
+
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt
     except ImportError:
@@ -377,16 +397,14 @@ def _visualize_worst(results, vertices_list, class_ids):
         return
 
     valid.sort(key=lambda r: r['iou'])
-    worst = valid[:min(6, len(valid))]
+    worst = valid[: min(6, len(valid))]
 
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
     axes = axes.flatten()
 
     for ax, r in zip(axes, worst):
         name = r['name']
-        old_ann = polygon_to_raycast(
-            Polygon(vertices_list[0]), class_id=1, n_rays=N_RAYS
-        )
+        old_ann = polygon_to_raycast(Polygon(vertices_list[0]), class_id=1, n_rays=N_RAYS)
 
     plt.savefig(os.path.join(OUT_DIR, 'parity_worst.png'), dpi=150, bbox_inches='tight')
     plt.close()

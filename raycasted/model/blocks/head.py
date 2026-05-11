@@ -125,6 +125,7 @@ class RayCastDetect(Detect):
         head_channel_scale: float = 0.5,
         head_channel_min: int = 64,
         refinement_kernel_size: int = 3,
+        aux_xy: bool = False,
     ):
         """Initialize polygon detection head.
 
@@ -139,6 +140,8 @@ class RayCastDetect(Detect):
             refinement_kernel_size: Kernel size for polygon refinement block.
                 3 = standard RayRefinementBlock (default).
                 7 or 13 = LargeKernelRefinementBlock (LKCell-style, wider receptive field).
+            aux_xy: If True, attach a lightweight 1x1 conv head for auxiliary xy regression
+                directly on neck features, bypassing the 4-layer head stack.
         """
         self.n_rays = n_rays if n_rays is not None else _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays  # xy + rays
@@ -172,6 +175,16 @@ class RayCastDetect(Detect):
         # Remove DFL — not applicable to polygon regression
         self.dfl = nn.Identity()
 
+        # Auxiliary xy head: lightweight 1x1 conv directly on neck features
+        # Bypasses the 4-layer head stack to give backbone direct xy gradient
+        if aux_xy:
+            self.aux_xy = nn.ModuleList(nn.Conv2d(c, 2, 1) for c in ch)
+            for layer in self.aux_xy:
+                nn.init.zeros_(layer.bias)
+                nn.init.zeros_(layer.weight)
+        else:
+            self.aux_xy = None
+
         # Recreate one2one heads with polygon cv2
         if self._end2end_arg:
             self.one2one_cv2 = copy.deepcopy(self.cv2)
@@ -202,7 +215,13 @@ class RayCastDetect(Detect):
         bs = x[0].shape[0]
         poly = torch.cat([box_head[i](x[i]).view(bs, self.raycast_dim, -1) for i in range(self.nl)], dim=-1)
         scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
-        return dict(boxes=poly, scores=scores, feats=x)
+        result = dict(boxes=poly, scores=scores, feats=x)
+
+        if hasattr(self, 'aux_xy') and self.aux_xy is not None:
+            aux_raw = torch.cat([self.aux_xy[i](x[i]).view(bs, 2, -1) for i in range(self.nl)], dim=-1)
+            result['aux_xy_raw'] = aux_raw
+
+        return result
 
     def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode polygon predictions for inference.
@@ -283,3 +302,7 @@ class RayCastDetect(Detect):
                 bias[:2] = 0.0
                 bias[2:] = ray_bias
                 b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (crop_size / self.stride[i]) ** 2)
+
+        if hasattr(self, 'aux_xy') and self.aux_xy is not None:
+            for layer in self.aux_xy:
+                layer.bias.data.zero_()

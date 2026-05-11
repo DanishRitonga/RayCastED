@@ -66,6 +66,12 @@ training:
   assigner_warmup_epochs: 50  # epochs of centroid-distance before switching to Polar-IoU
   steps_per_epoch: 133        # batches per epoch (for warmup scheduling)
 
+  # Auxiliary XY head: bypasses 4-layer head stack to give backbone direct xy gradient
+  # Addresses H7 (backbone feature poverty) — backbone can't learn spatial features
+  # because the head attenuates xy gradients through 4 Conv layers.
+  aux_xy_weight: 10.0           # Huber loss weight for aux xy predictions
+  aux_xy_ramp_epochs: 100       # epochs over which aux weight decays (start decay at 80% of training)
+
   # Classification loss
   focal_gamma: 0.0            # Focal loss gamma (0 = BCE)
   focal_alpha: 1.0            # Focal loss alpha (1.0 = no class weighting)

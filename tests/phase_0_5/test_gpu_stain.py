@@ -18,18 +18,14 @@ def _assert_stain_close(a, b, tol=1e-3, label=''):
     direct = np.abs(a - b).max()
     swapped = np.abs(a - b[::-1]).max()
     best = min(direct, swapped)
-    assert best < tol, (
-        f'{label} stain matrix mismatch: direct={direct:.6e}, swapped={swapped:.6e}'
-    )
+    assert best < tol, f'{label} stain matrix mismatch: direct={direct:.6e}, swapped={swapped:.6e}'
 
 
 def _assert_conc_close(a, b, tol=1e-3, label=''):
     direct = np.abs(a - b).max()
     swapped = np.abs(a - b[::-1]).max()
     best = min(direct, swapped)
-    assert best < tol, (
-        f'{label} concentration mismatch: direct={direct:.6e}, swapped={swapped:.6e}'
-    )
+    assert best < tol, f'{label} concentration mismatch: direct={direct:.6e}, swapped={swapped:.6e}'
 
 
 def _make_stain_image(h: int, w: int) -> np.ndarray:
@@ -130,12 +126,8 @@ def test_batch_consistency():
             print(f'    NP:  {matrix_np}')
             print(f'    GPU: {matrix_gpu}')
 
-        assert matrix_diff < 0.1, (
-            f'Stain matrix mismatch on iter {i}: max_diff={matrix_diff:.6e}'
-        )
-        assert conc_diff < 0.1, (
-            f'Concentration mismatch on iter {i}: max_diff={conc_diff:.6e}'
-        )
+        assert matrix_diff < 0.1, f'Stain matrix mismatch on iter {i}: max_diff={matrix_diff:.6e}'
+        assert conc_diff < 0.1, f'Concentration mismatch on iter {i}: max_diff={conc_diff:.6e}'
 
     print('PASS: test_batch_consistency')
 

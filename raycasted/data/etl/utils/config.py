@@ -145,10 +145,7 @@ class DatasetConfig(BaseModel):
     @model_validator(mode='after')
     def validate_ingestor(self):
         if self.ingestor not in _VALID_INGESTORS:
-            raise ValueError(
-                f"Unknown ingestor={self.ingestor!r}. "
-                f'Supported: {sorted(_VALID_INGESTORS)}'
-            )
+            raise ValueError(f'Unknown ingestor={self.ingestor!r}. Supported: {sorted(_VALID_INGESTORS)}')
         return self
 
     @model_validator(mode='after')

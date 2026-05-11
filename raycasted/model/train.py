@@ -179,6 +179,8 @@ class _RayCastCriterionWrapper:
             gradnorm_warmup_epochs=tcfg.get('gradnorm_warmup_epochs', 5),
             assigner_warmup_epochs=tcfg.get('assigner_warmup_epochs', 0),
             steps_per_epoch=tcfg.get('steps_per_epoch', 133),
+            lambda_aux_xy=tcfg.get('aux_xy_weight', 0.0),
+            aux_xy_ramp_epochs=tcfg.get('aux_xy_ramp_epochs', 100),
         )
 
 
@@ -321,6 +323,9 @@ class RayCastTrainer(DetectionTrainer):
 
         # Replace Detect head → RayCastDetect
         old_head = model.model[-1]
+        tcfg = self.training_config
+        aux_xy = bool(tcfg.get('aux_xy_weight', 0) > 0) if tcfg else False
+
         if isinstance(old_head, RayCastDetect):
             # YAML already specifies RayCastDetect — ensure n_rays matches
             # the configured value (YAML args don't include n_rays, so it
@@ -329,6 +334,13 @@ class RayCastTrainer(DetectionTrainer):
                 old_head.n_rays = _const.N_RAYS
                 old_head.raycast_dim = 2 + _const.N_RAYS
                 old_head.no = old_head.nc + old_head.raycast_dim
+
+            # Attach auxiliary xy head if configured
+            if aux_xy and (not hasattr(old_head, 'aux_xy') or getattr(old_head, 'aux_xy', None) is None):
+                neck_ch = tuple(old_head.cv2[i][0].conv.in_channels for i in range(old_head.nl))
+                old_head.aux_xy = nn.ModuleList(nn.Conv2d(c, 2, 1) for c in neck_ch)
+                for layer in old_head.aux_xy:
+                    nn.init.zeros_(layer.bias)
         else:
             ch = _extract_neck_channels(old_head)
             nc = old_head.nc
@@ -346,6 +358,7 @@ class RayCastTrainer(DetectionTrainer):
                 head_channel_scale=head_channel_scale,
                 head_channel_min=head_channel_min,
                 refinement_kernel_size=refinement_kernel_size,
+                aux_xy=aux_xy,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):
@@ -377,7 +390,7 @@ class RayCastTrainer(DetectionTrainer):
 
     def get_validator(self):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
-        self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'smooth_loss')
+        self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'smooth_loss', 'aux_xy_loss')
         args_copy = copy.copy(self.args)
         if self.training_config and 'inference_conf' in self.training_config:
             args_copy.conf = self.training_config['inference_conf']

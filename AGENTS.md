@@ -184,6 +184,15 @@ Pipeline defaults `imgsz` from config's `crop_size`.
 - Ingestor diagnostic counters not yet wired
 - MLflow logging of annealing values requires custom callback
 
+### XY Plateau (Scratch Training)
+- **Root cause**: Backbone feature poverty — the head cannot learn centroid regression from random backbone features (proven by simulation in `docs/xy_plateau_analysis.md`). Chicken-and-egg: head needs spatial features, backbone needs xy gradient to learn them.
+- **No pretrained weights**: This is a new architecture with a custom RayCast head. YOLO COCO pretrained weights have negligible impact because the domain shift from natural images to histopathology negates most benefits. `pretrained_backbone: null` is the default.
+- **What works**: Classification converges first (easier task, only needs object presence), then backbone features become spatially informative, then xy regression breaks through the plateau.
+- **Assigner warmup** (`assigner_warmup_epochs=50`): First N epochs use Gaussian centroid-distance instead of Polar-IoU for assignment. Prevents garbage matches from meaningless early ray predictions.
+- **Lambda_l1 warmup suppression**: During warmup `lambda_l1=0.1` (floor), jumps to `25.0` after warmup.
+- **Rejected hypotheses**: Muon orthogonalization does NOT suppress xy (lambda_xy=500 makes xy gradient dominate 99.9% of head weight matrix). Sigmoid saturation and decode range are not the bottleneck.
+- **Current config**: `lambda_xy=500.0`, `optimizer=MuSGD`, `lr0=0.01`, `cos_lr=true`, `tal_topk=20`, `assigner_warmup_epochs=50`.
+
 ## Deployment
 
 Target: NVIDIA Jetson (Orin/Xavier) via ONNX → TensorRT FP16 inference.

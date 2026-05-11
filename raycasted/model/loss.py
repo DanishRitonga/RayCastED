@@ -515,6 +515,8 @@ class RayCastE2ELoss(E2ELoss):
         gradnorm_warmup_epochs: int = 5,
         assigner_warmup_epochs: int = 0,
         steps_per_epoch: int = 133,
+        lambda_aux_xy: float = 0.0,
+        aux_xy_ramp_epochs: int = 100,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -631,6 +633,12 @@ class RayCastE2ELoss(E2ELoss):
         self.smooth_anneal_fraction = 0.4  # ramp over first 40% of training
         self.smooth_anneal_epochs = max(1, int(max_epochs * self.smooth_anneal_fraction))
 
+        # Auxiliary xy head: direct backbone→xy bypass for feature poverty
+        self._aux_xy_base = lambda_aux_xy
+        self.aux_xy_lambda = lambda_aux_xy
+        self._max_epochs = max_epochs
+        self.aux_xy_decay_epoch = max(1, int(max_epochs * 0.8))
+
     def update(self):
         """Update o2m/o2o weights (inherited) + anneal smoothness + validate E2E integrity."""
         super().update()
@@ -662,6 +670,9 @@ class RayCastE2ELoss(E2ELoss):
             if warmup > 0:
                 print(f'  Assignment warmup: centroid-distance for epochs 0-{warmup}, then Polar-IoU (sigma=0.15)')
 
+            if self._aux_xy_base > 0:
+                print(f'  Auxiliary XY head: weight={self._aux_xy_base}, decay_epoch={self.aux_xy_decay_epoch}')
+
         # Loss weight annealing
         current_epoch = self.updates / max(self.steps_per_epoch, 1)
 
@@ -678,7 +689,75 @@ class RayCastE2ELoss(E2ELoss):
             branch.lambda_smooth = lambda_smooth
             branch.lambda_l1 = lambda_l1
 
+        # Auxiliary XY: decay after aux_xy_decay_epoch
+        if self._aux_xy_base > 0 and current_epoch >= self.aux_xy_decay_epoch:
+            decay_progress = (current_epoch - self.aux_xy_decay_epoch) / max(
+                self._max_epochs - self.aux_xy_decay_epoch, 1
+            )
+            self.aux_xy_lambda = self._aux_xy_base * max(1.0 - decay_progress, 0.0)
+        elif self._aux_xy_base > 0:
+            self.aux_xy_lambda = self._aux_xy_base
+
         # Propagate epoch to assigners for warmup scheduling
         for assigner in (self.one2many.assigner, self.one2one.assigner):
             if hasattr(assigner, 'set_epoch'):
                 assigner.set_epoch(current_epoch)
+
+    def __call__(self, preds, batch):
+        """Compute E2E losses + auxiliary xy loss on neck features."""
+        parsed = self.one2many.parse_output(preds)
+        one2many_preds = parsed['one2many']
+        one2one_preds = parsed['one2one']
+
+        loss_one2many = self.one2many.loss(one2many_preds, batch)
+        loss_one2one = self.one2one.loss(one2one_preds, batch)
+        total_loss = loss_one2many[0] * self.o2m + loss_one2one[0] * self.o2o
+        loss_detach = loss_one2many[1]
+
+        has_aux = self.aux_xy_lambda > 0 and 'aux_xy_raw' in one2many_preds
+
+        if has_aux:
+            aux_raw = one2many_preds['aux_xy_raw'].permute(0, 2, 1).contiguous()
+            feats = one2many_preds['feats']
+            anchor_points, stride_tensor = make_anchors(feats, self.one2many.stride, 0.5)
+            imgsz = torch.tensor(feats[0].shape[2:], device=aux_raw.device, dtype=aux_raw.dtype) * stride_tensor[0]
+
+            aux_xy_offset = aux_raw.sigmoid()
+            aux_xy_pixel = (aux_xy_offset * 2.0 - 0.5 + anchor_points) * stride_tensor
+            aux_pred_xy = aux_xy_pixel / imgsz[[1, 0]]
+
+            targets = torch.cat((batch['batch_idx'].view(-1, 1), batch['cls'].view(-1, 1), batch['bboxes']), 1)
+            targets = self.one2many.preprocess(targets.to(self.one2many.device), aux_raw.shape[0])
+            _, gt_bboxes = targets.split((1, self.one2many.raycast_dim), 2)
+            mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+
+            _, target_bboxes, _, fg_mask, _ = self.one2many.assigner(
+                one2many_preds['scores'].permute(0, 2, 1).contiguous().detach().sigmoid(),
+                torch.cat(
+                    [
+                        aux_pred_xy.detach(),
+                        F.softplus(one2many_preds['boxes'].permute(0, 2, 1).contiguous()[..., 2:].detach()),
+                    ],
+                    dim=-1,
+                ),
+                anchor_points * stride_tensor / imgsz[[1, 0]],
+                targets.split((1, self.one2many.raycast_dim), 2)[0],
+                gt_bboxes,
+                mask_gt,
+            )
+
+            n_fg = max(fg_mask.sum(), 1)
+            if n_fg > 0:
+                fg_target_xy = target_bboxes[fg_mask][:, :2].float()
+                fg_aux_xy = aux_pred_xy[fg_mask].float()
+                aux_loss = F.huber_loss(fg_aux_xy, fg_target_xy, reduction='none', delta=1.0).mean(-1)
+                aux_loss_val = aux_loss.sum() / n_fg * self.aux_xy_lambda
+                total_loss = total_loss + aux_loss_val
+
+                loss_detach = torch.cat([loss_detach, aux_loss_val.detach().unsqueeze(0)])
+            else:
+                loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
+        else:
+            loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
+
+        return total_loss, loss_detach
