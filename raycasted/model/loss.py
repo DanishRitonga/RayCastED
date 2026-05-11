@@ -624,9 +624,6 @@ class RayCastE2ELoss(E2ELoss):
         # even with random features, bootstrapping feature learning.
         self.assigner_warmup_epochs = assigner_warmup_epochs
         self.steps_per_epoch = steps_per_epoch
-        for assigner in (self.one2many.assigner, self.one2one.assigner):
-            if hasattr(assigner, 'warmup_steps'):
-                assigner.warmup_steps = assigner_warmup_epochs * steps_per_epoch
 
         # Smooth loss: reverse anneal — starts at 0, ramps up to peak, then holds.
         # Early training: model focuses on detection (xy, cls, L1).
@@ -667,14 +664,23 @@ class RayCastE2ELoss(E2ELoss):
             if warmup > 0:
                 print(f'  Assignment warmup: centroid-distance for epochs 0-{warmup}, then Polar-IoU (sigma=0.15)')
 
-        # Reverse anneal: ramp from smooth_start → smooth_end over smooth_anneal_epochs
-        t = min(self.updates / self.smooth_anneal_epochs, 1.0)
-        new_lambda = self.smooth_start + t * (self.smooth_end - self.smooth_start)
-        self.one2many.lambda_smooth = new_lambda
-        self.one2one.lambda_smooth = new_lambda
+        # Loss weight annealing
+        current_epoch = self.updates / max(self.steps_per_epoch, 1)
 
-        # Propagate epoch estimate to assigners for warmup scheduling
-        current_epoch = self.updates / max(self._steps_per_epoch, 1)
+        # Smooth: reverse-anneal (0 → 1) over first 40% of training
+        t_smooth = min(self.updates / self.smooth_anneal_epochs, 1.0)
+        lambda_smooth = self.smooth_start + t_smooth * (self.smooth_end - self.smooth_start)
+
+        # L1 ray loss: near-zero during assignment warmup, ramp to full after
+        # Warmup focuses gradient budget on centroids + classification.
+        # Small floor (0.1) keeps ray parameters alive for DDP.
+        lambda_l1 = 0.1 if self.assigner_warmup_epochs > 0 and current_epoch < self.assigner_warmup_epochs else 25.0
+
+        for branch in (self.one2many, self.one2one):
+            branch.lambda_smooth = lambda_smooth
+            branch.lambda_l1 = lambda_l1
+
+        # Propagate epoch to assigners for warmup scheduling
         for assigner in (self.one2many.assigner, self.one2one.assigner):
             if hasattr(assigner, 'set_epoch'):
                 assigner.set_epoch(current_epoch)
