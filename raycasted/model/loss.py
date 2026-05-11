@@ -308,11 +308,13 @@ class RayCastDetectionLoss(v8DetectionLoss):
             warmup_epochs=assigner_warmup_epochs,
         )
 
-        # Loss weights — reduced cls weight to prevent gradient dominance.
-        # cls raw ~9.5 (sum/target_scores_sum), xy raw ~1.35, l1 raw ~0.34.
-        # AGENTS.md: lambda_xy=50.0, delta=1.0 for centroid collapse prevention.
+        # Loss weights — xy in offset space (sigmoid×2-0.5) to bypass decode
+        # gradient bottleneck (stride/imgsz kills sigmoid gradient).
+        # xy raw ~28 (offset space), cls raw ~9.5, l1 raw ~0.34.
+        # lambda_xy=0.2 gives weighted~5.6, comparable to old decoded-space 4.4
+        # but with 32x larger gradient w.r.t. head parameters.
         self.lambda_cls = 0.5
-        self.lambda_xy = 50.0
+        self.lambda_xy = 0.2
         self.lambda_l1 = 25.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
 
@@ -429,18 +431,22 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # --- Polygon regression losses (foreground only, uniform weight) ---
         n_fg = max(fg_mask.sum(), 1)
         if n_fg > 0:
-            fg_pred_xy = pred_xy[fg_mask]
             fg_pred_rays = pred_rays[fg_mask]
             fg_target_xy = target_bboxes[fg_mask][:, :2]
             fg_target_rays = target_bboxes[fg_mask][:, 2:]
 
-            fg_pred_xy = fg_pred_xy.float()
             fg_target_xy = fg_target_xy.float()
             fg_pred_rays = fg_pred_rays.float()
             fg_target_rays = fg_target_rays.float()
 
-            # L_xy: Huber on decoded centroid
-            loss_xy = F.huber_loss(fg_pred_xy, fg_target_xy, reduction='none', delta=1.0).mean(-1)
+            fg_idx = fg_mask.nonzero(as_tuple=False)
+            fg_anchor_idx = fg_idx[:, 1]
+            fg_anchor_norm = anchor_points_norm[fg_anchor_idx].float()
+            fg_stride = stride_tensor[fg_anchor_idx].float()
+
+            fg_xy_offset = xy_raw[fg_mask].float().sigmoid() * 2.0 - 0.5
+            fg_gt_offset = (fg_target_xy * imgsz[[1, 0]] / fg_stride - fg_anchor_norm) * 2.0 - 0.5
+            loss_xy = F.huber_loss(fg_xy_offset, fg_gt_offset, reduction='none', delta=1.0).mean(-1)
             loss[0] = loss_xy.sum() / n_fg
 
             # L_L1: Uniform MAE on 32 rays (linear or log-space)

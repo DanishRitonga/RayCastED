@@ -92,8 +92,8 @@ def test_constructor():
     assert isinstance(loss_fn.assigner, RayCastAssigner), (
         f'Assigner must be RayCastAssigner, got {type(loss_fn.assigner).__name__}'
     )
-    assert loss_fn.lambda_cls == 2.0
-    assert loss_fn.lambda_xy == 15.0
+    assert loss_fn.lambda_cls == 0.5
+    assert loss_fn.lambda_xy == 0.2
     assert loss_fn.lambda_l1 == 25.0
     assert loss_fn.lambda_smooth == 0.0
     print('PASS: constructor — assigner swapped, params correct')

@@ -255,7 +255,9 @@ class RayCastDetect(Detect):
     def bias_init(self, crop_size: int = 640):
         """Initialize polygon head biases.
 
-        XY channels (0-1): scale-aware bias based on stride. P2 (dense) gets lower bias to reduce false positives.
+        XY channels (0-1): bias=0 for maximum sigmoid gradient (0.25) at init.
+            sigmoid(0)=0.5 → offset=0.5 → decoded=(anchor+0.5)*stride/imgsz ≈ anchor_norm.
+            This maximises gradient flow through the sigmoid bottleneck.
         Ray channels (2..2+n_rays): calibrated for ~15px radius cells at 0.25 MPP
             (lymphocytes 7-10μm → 28-40px diameter → radius ≈15px).
             During training, GT rays are normalized by crop_size, so
@@ -271,30 +273,13 @@ class RayCastDetect(Detect):
         o2m = self.one2many
         for i, (a, b) in enumerate(zip(o2m['box_head'], o2m['cls_head'])):
             bias = a[-1].bias.data
-            # Scale-aware XY bias: denser scales (P2) get lower initial bias
-            stride_val = self.stride[i].item()
-            if stride_val <= 4:
-                # P2/4: very dense, more conservative to reduce false positives
-                bias[:2] = 1.5  # sigmoid → ~0.82
-            elif stride_val <= 8:
-                # P3/8: medium density
-                bias[:2] = 2.0  # sigmoid → ~0.88
-            else:
-                # P4+/16+: sparse, more permissive
-                bias[:2] = 2.5  # sigmoid → ~0.92
+            bias[:2] = 0.0
             bias[2:] = ray_bias  # rays: softplus → target_px / crop_size
             b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (crop_size / self.stride[i]) ** 2)
         if self._end2end_arg:
             o2o = self.one2one
             for i, (a, b) in enumerate(zip(o2o['box_head'], o2o['cls_head'])):
                 bias = a[-1].bias.data
-                # Same scale-aware XY bias for one2one branch
-                stride_val = self.stride[i].item()
-                if stride_val <= 4:
-                    bias[:2] = 1.5
-                elif stride_val <= 8:
-                    bias[:2] = 2.0
-                else:
-                    bias[:2] = 2.5
+                bias[:2] = 0.0
                 bias[2:] = ray_bias
                 b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (crop_size / self.stride[i]) ** 2)
