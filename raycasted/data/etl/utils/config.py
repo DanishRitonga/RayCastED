@@ -91,6 +91,10 @@ class TrainingSettings(BaseModel):
     assigner_beta: float = 6.0  # iou^beta in alignment metric
     use_hungarian_o2o: bool = False  # Hungarian matching for one2one branch
 
+    # Auxiliary xy head — bypass backbone→head bottleneck
+    aux_xy_weight: float = 0.0  # Huber loss weight (0 = disabled, 10.0 = recommended)
+    aux_xy_ramp_epochs: int = 100  # epochs over which aux weight decays
+
     # Pretrained backbone
     pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
 

@@ -220,16 +220,6 @@ class RayCastDetect(Detect):
         if hasattr(self, 'aux_xy') and self.aux_xy is not None:
             aux_raw = torch.cat([self.aux_xy[i](x[i]).view(bs, 2, -1) for i in range(self.nl)], dim=-1)
             result['aux_xy_raw'] = aux_raw
-        elif hasattr(self, '_aux_diag_done'):
-            pass
-        else:
-            self._aux_diag_done = True
-            import traceback
-            print('[AUX WARN] aux_xy missing in forward_head!')
-            print(f'  hasattr(aux_xy)={hasattr(self, "aux_xy")}')
-            if hasattr(self, 'aux_xy'):
-                print(f'  aux_xy is None: {self.aux_xy is None}')
-            traceback.print_stack(limit=8)
 
         return result
 
