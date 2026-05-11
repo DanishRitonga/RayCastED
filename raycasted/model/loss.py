@@ -426,7 +426,13 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 alpha=self.focal_alpha,
             )
         else:
-            loss_cls = self.bce(pred_scores.float(), target_scores.float())
+            # Binarize targets — use hard 0/1 instead of soft alignment scores.
+            # Soft target_scores (0.3-0.8) from the assigner are noisy and prevent
+            # the classifier from converging. Alignment quality belongs in the
+            # centerness branch, not the classification branch.
+            cls_targets = target_scores.float().clone()
+            cls_targets[cls_targets > 0] = 1.0
+            loss_cls = self.bce(pred_scores.float(), cls_targets)
 
         fg_mask_bc = fg_mask.unsqueeze(-1).expand_as(loss_cls)
         loss_fg = loss_cls[fg_mask_bc].sum() / n_fg_cls
@@ -759,7 +765,10 @@ class RayCastE2ELoss(E2ELoss):
                 fg_aux_xy = aux_pred_xy[fg_mask].float()
                 aux_loss = F.huber_loss(fg_aux_xy, fg_target_xy, reduction='none', delta=1.0).mean(-1)
                 aux_loss_val = aux_loss.sum() / n_fg * self.aux_xy_lambda
-                total_loss = total_loss + aux_loss_val
+                # Add as a 5th element to avoid broadcasting into the 4-element loss tensor.
+                # Ultralytics calls .sum() on total_loss for backward, so a scalar aux loss
+                # added to a 4-element tensor would be counted 4x via broadcast.
+                total_loss = torch.cat([total_loss, aux_loss_val.unsqueeze(0)])
 
                 loss_detach = torch.cat([loss_detach, aux_loss_val.detach().unsqueeze(0)])
             else:
