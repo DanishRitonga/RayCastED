@@ -308,12 +308,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
             warmup_epochs=assigner_warmup_epochs,
         )
 
-        # Loss weights — xy in grid-cell offset space (sigmoid*2-0.5, clamped to [-0.5,1.5]).
-        # Bypasses stride/imgsz gradient bottleneck. Raw ~0.17 initially.
-        # lambda_xy=25: weighted ~4.2, comparable to old decoded-space 4.4
-        # but with ~30x stronger gradient w.r.t. head parameters.
+        # Loss weights — decoded normalised xy space [0,1].
+        # High lambda compensates for stride/imgsz gradient attenuation (~0.03x).
+        # Raw ~0.088; lambda=500 gives weighted~44, effective grad_mult~7.8.
         self.lambda_cls = 0.5
-        self.lambda_xy = 25.0
+        self.lambda_xy = 500.0
         self.lambda_l1 = 25.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
 
@@ -438,15 +437,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
             fg_pred_rays = fg_pred_rays.float()
             fg_target_rays = fg_target_rays.float()
 
-            fg_idx = fg_mask.nonzero(as_tuple=False)
-            fg_anchor_idx = fg_idx[:, 1]
-            fg_anchor = anchor_points[fg_anchor_idx].float()
-            fg_stride = stride_tensor[fg_anchor_idx].float()
-
-            fg_xy_offset = xy_raw[fg_mask].float().sigmoid() * 2.0 - 0.5
-            fg_gt_offset = fg_target_xy * imgsz[[1, 0]] / fg_stride - fg_anchor
-            fg_gt_offset = fg_gt_offset.clamp(-0.5, 1.5)
-            loss_xy = F.huber_loss(fg_xy_offset, fg_gt_offset, reduction='none', delta=1.0).mean(-1)
+            fg_pred_xy = pred_xy[fg_mask]
+            loss_xy = F.huber_loss(fg_pred_xy.float(), fg_target_xy, reduction='none', delta=1.0).mean(-1)
             loss[0] = loss_xy.sum() / n_fg
 
             # L_L1: Uniform MAE on 32 rays (linear or log-space)
