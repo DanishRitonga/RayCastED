@@ -437,7 +437,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         fg_mask_bc = fg_mask.unsqueeze(-1).expand_as(loss_cls)
         loss_fg = loss_cls[fg_mask_bc].sum() / n_fg_cls
         loss_bg = loss_cls[~fg_mask_bc].sum() / n_bg
-        loss[1] = loss_fg + loss_bg
+        loss[1] = 3.0 * loss_fg + loss_bg
 
         # --- Polygon regression losses (foreground only, uniform weight) ---
         n_fg = max(fg_mask.sum(), 1)
