@@ -185,9 +185,16 @@ class RayCastDetect(Detect):
         else:
             self.aux_xy = None
 
-        # Recreate one2one heads with polygon cv2
+        # Recreate one2one box head with polygon cv2; share cls head (cv3).
+        # Sharing cv3 lets one2many's dense cls training (topk=6, ~1200
+        # positives) directly benefit the one2one branch at inference.
+        # The box head stays separate because regression targets differ
+        # (one2many learns from dense TAL positives, one2one from Hungarian).
         if self._end2end_arg:
             self.one2one_cv2 = copy.deepcopy(self.cv2)
+            # Remove the deepcopy of cv3 — both branches share the same cls head
+            if hasattr(self, 'one2one_cv3'):
+                del self.one2one_cv3
 
     @property
     def one2many(self):
@@ -196,8 +203,8 @@ class RayCastDetect(Detect):
 
     @property
     def one2one(self):
-        """Return one2one head components."""
-        return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
+        """Return one2one head components — cls head shared with one2many."""
+        return dict(box_head=self.one2one_cv2, cls_head=self.cv3)
 
     def forward_head(
         self,
