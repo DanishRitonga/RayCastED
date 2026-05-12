@@ -72,9 +72,9 @@ training:
   aux_xy_weight: 10.0           # Huber loss weight for aux xy predictions
   aux_xy_ramp_epochs: 100       # epochs over which aux weight decays (start decay at 80% of training)
 
-  # Classification loss
-  focal_gamma: 0.0            # Focal loss gamma (0 = BCE)
-  focal_alpha: 1.0            # Focal loss alpha (1.0 = no class weighting)
+  # Classification loss — focal loss for one2one (extreme fg/bg imbalance)
+  focal_gamma: 2.0            # Focal loss gamma (DETR-style for Hungarian matching)
+  focal_alpha: 0.25           # Focal loss alpha (positive class weight)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false

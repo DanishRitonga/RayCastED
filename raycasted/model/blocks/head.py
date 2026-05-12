@@ -199,6 +199,26 @@ class RayCastDetect(Detect):
         """Return one2one head components."""
         return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
 
+    def forward(
+        self, x: list[torch.Tensor]
+    ) -> dict[str, torch.Tensor] | torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Override Detect.forward() to pass LIVE features to the one2one head.
+
+        In stock Ultralytics, Detect.forward() detaches features before passing
+        them to the one2one head. This is fine when one2many trains the backbone,
+        but for one2one-only training the one2one branch MUST receive live
+        (non-detached) features so gradients flow back through the backbone.
+        """
+        if not self.training:
+            return super().forward(x)
+
+        # Training: run both heads with LIVE features.
+        # One2many still runs (aux_xy reads from one2many_preds), but its loss
+        # weight is 0 in RayCastE2ELoss. Both branches train the backbone.
+        preds_o2m = self.forward_head(x, **self.one2many)
+        preds_o2o = self.forward_head(x, **self.one2one)
+        return {"one2many": preds_o2m, "one2one": preds_o2o}
+
     def forward_head(
         self,
         x: list[torch.Tensor],

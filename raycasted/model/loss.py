@@ -653,8 +653,18 @@ class RayCastE2ELoss(E2ELoss):
         self.aux_xy_decay_epoch = max(1, int(max_epochs * 0.8))
 
     def update(self):
-        """Update o2m/o2o weights (inherited) + anneal smoothness + validate E2E integrity."""
-        super().update()
+        """Update loss weight annealing + validate E2E integrity.
+
+        Overrides parent's o2m/o2o decay schedule: forces o2m=0, o2o=1 for
+        one2one-only training. The backbone receives gradient from the one2one
+        branch (live features) and the aux_xy head.
+        """
+        # Increment update counter (parent does this in its update())
+        self.updates += 1
+
+        # Force one2one-only: skip parent's o2m/o2o decay schedule
+        self.o2m = 0.0
+        self.o2o = 1.0
 
         # Validate E2E integrity on first update (catches config drift)
         if self.updates == 1:
@@ -717,15 +727,15 @@ class RayCastE2ELoss(E2ELoss):
                 assigner.set_epoch(current_epoch)
 
     def __call__(self, preds, batch):
-        """Compute E2E losses + auxiliary xy loss on neck features."""
+        """Compute one2one loss only + auxiliary xy loss on neck features."""
         parsed = self.one2many.parse_output(preds)
         one2many_preds = parsed['one2many']
         one2one_preds = parsed['one2one']
 
-        loss_one2many = self.one2many.loss(one2many_preds, batch)
+        # One2one-only: skip one2many loss (o2m=0), only compute one2one
         loss_one2one = self.one2one.loss(one2one_preds, batch)
-        total_loss = loss_one2many[0] * self.o2m + loss_one2one[0] * self.o2o
-        loss_detach = loss_one2many[1]
+        total_loss = loss_one2one[0]
+        loss_detach = loss_one2one[1]
 
         has_aux = self.aux_xy_lambda > 0 and 'aux_xy_raw' in one2many_preds
 
