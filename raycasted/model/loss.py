@@ -275,6 +275,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         cost_centroid: float = 1.0,
         cost_ray: float = 1.0,
         assigner_warmup_epochs: int = 0,
+        ignore_halo_radius: float = 0.0,
+        ohem_ratio: float = 0.0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -291,6 +293,15 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Focal loss configuration (gamma=0 disables focal, uses pure BCE)
         self.focal_gamma = focal_gamma
         self.focal_alpha = focal_alpha
+
+        # Ignore halo: anchors within this radius × GT containment radius
+        # but NOT in fg_mask are ignored (target=-1). Set 0 to disable.
+        # E.g. 2.0 = ignore anchors up to 2× the containment radius.
+        self.ignore_halo_radius = ignore_halo_radius
+
+        # OHEM: keep only the hardest `ohem_ratio × n_fg` negative anchors.
+        # Set 0 to disable. E.g. 3.0 = keep top 3×n_fg hardest negatives.
+        self.ohem_ratio = ohem_ratio
 
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
@@ -408,17 +419,42 @@ class RayCastDetectionLoss(v8DetectionLoss):
         )
 
         # --- L_cls: BCE with separate fg/bg normalization ---
-        # Previous normalization (sum / target_scores_sum) diluted background gradients
-        # because target_scores_sum is dominated by foreground alignment scores (~800-1200).
-        # With high positive rates (20 topk → 74% fg), the classifier never learned to
-        # suppress false negatives. Normalizing fg and bg separately gives each equal
-        # per-sample gradient magnitude regardless of the positive/negative ratio.
+        # Binarize targets — hard 0/1. Soft alignment scores are noisy and
+        # prevent the classifier from converging. Alignment quality belongs
+        # in the centerness branch, not the classification branch.
+        cls_targets = target_scores.float().clone()
+        cls_targets[cls_targets > 0] = 1.0
+
+        # --- Ignore halo: mask anchors near GT boundaries ---
+        # Anchors within `ignore_halo_radius × containment_radius` of a GT
+        # centroid but NOT in fg_mask are excluded from BOTH fg and bg loss.
+        # This prevents conflicting gradients at object boundaries where
+        # anchors see nucleus features but are forced to predict background.
+        ignore_mask = torch.zeros_like(fg_mask)
+        if self.ignore_halo_radius > 0:
+            for b in range(batch_size):
+                valid = mask_gt[b, :, 0].bool()
+                valid_idx = valid.nonzero(as_tuple=False).squeeze(-1)
+                if valid_idx.numel() == 0:
+                    continue
+                gt_xy = gt_bboxes[b, valid_idx, :2]
+                gt_rays = gt_bboxes[b, valid_idx, 2:]
+                # Use mean non-zero ray as containment radius
+                n_nonzero = (gt_rays > 0).sum(dim=1).clamp(min=1)
+                mean_radii = gt_rays.sum(dim=1) / n_nonzero.float()
+                halo_radii = mean_radii * self.ignore_halo_radius
+                dist = torch.cdist(gt_xy.float(), anchor_points_norm.float().unsqueeze(0).expand(batch_size, -1, -1)[b])
+                in_halo = (dist <= halo_radii[:, None]) & (halo_radii[:, None] > 0)
+                # Any anchor in halo but not in fg_mask → ignore
+                halo_any = in_halo.any(dim=0)  # [N_anchors]
+                ignore_mask[b] = halo_any & ~fg_mask[b]
+
+        # Effective background: exclude ignore zone
+        bg_mask = ~fg_mask & ~ignore_mask
         n_fg_cls = max(fg_mask.sum(), 1)
-        n_bg = max(batch_size * pred_scores.shape[1] - n_fg_cls, 1)
+        n_bg = max(bg_mask.sum(), 1)
 
         if self.focal_gamma > 0:
-            cls_targets = target_scores.float().clone()
-            cls_targets[cls_targets > 0] = 1.0
             loss_cls = _focal_loss(
                 pred_scores.float(),
                 cls_targets,
@@ -426,18 +462,27 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 alpha=self.focal_alpha,
             )
         else:
-            # Binarize targets — use hard 0/1 instead of soft alignment scores.
-            # Soft target_scores (0.3-0.8) from the assigner are noisy and prevent
-            # the classifier from converging. Alignment quality belongs in the
-            # centerness branch, not the classification branch.
-            cls_targets = target_scores.float().clone()
-            cls_targets[cls_targets > 0] = 1.0
             loss_cls = self.bce(pred_scores.float(), cls_targets)
 
         fg_mask_bc = fg_mask.unsqueeze(-1).expand_as(loss_cls)
+        bg_mask_bc = bg_mask.unsqueeze(-1).expand_as(loss_cls)
         loss_fg = loss_cls[fg_mask_bc].sum() / n_fg_cls
-        loss_bg = loss_cls[~fg_mask_bc].sum() / n_bg
-        loss[1] = 3.0 * loss_fg + loss_bg
+
+        # --- OHEM: keep only the hardest negatives ---
+        # Instead of averaging over ALL background anchors, sort bg losses
+        # and only keep the top `ohem_ratio × n_fg` hardest ones.
+        # This enforces a healthy fg:bg ratio (e.g. 1:3) and prevents
+        # easy bg anchors from diluting the loss signal.
+        loss_bg_flat = loss_cls[bg_mask_bc]
+        if self.ohem_ratio > 0 and loss_bg_flat.numel() > 0:
+            n_hard = max(int(n_fg_cls * self.ohem_ratio), 1)
+            n_hard = min(n_hard, loss_bg_flat.numel())
+            _, hard_idx = loss_bg_flat.topk(n_hard)
+            loss_bg = loss_bg_flat[hard_idx].sum() / n_hard
+        else:
+            loss_bg = loss_bg_flat.sum() / n_bg
+
+        loss[1] = loss_fg + loss_bg
 
         # --- Polygon regression losses (foreground only, uniform weight) ---
         n_fg = max(fg_mask.sum(), 1)
@@ -530,6 +575,8 @@ class RayCastE2ELoss(E2ELoss):
         steps_per_epoch: int = 133,
         lambda_aux_xy: float = 0.0,
         aux_xy_ramp_epochs: int = 100,
+        ignore_halo_radius: float = 0.0,
+        ohem_ratio: float = 0.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -558,6 +605,8 @@ class RayCastE2ELoss(E2ELoss):
             cost_centroid=cost_centroid,
             cost_ray=cost_ray,
             assigner_warmup_epochs=assigner_warmup_epochs,
+            ignore_halo_radius=ignore_halo_radius,
+            ohem_ratio=ohem_ratio,
         )
         super().__init__(model, loss_fn=loss_fn)
 
