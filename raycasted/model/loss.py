@@ -310,9 +310,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # Loss weights — decoded normalised xy space [0,1].
         # High lambda compensates for stride/imgsz gradient attenuation (~0.03x).
-        # Raw ~0.088; lambda=500 gives weighted~44, effective grad_mult~7.8.
+        # lambda_xy=1500 for one2one-only: 3x higher to compensate for 6x fewer
+        # positive anchors (Hungarian topk=1 vs TAL topk=6).
         self.lambda_cls = 2.0
-        self.lambda_xy = 500.0
+        self.lambda_xy = 1500.0
         self.lambda_l1 = 25.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
 
