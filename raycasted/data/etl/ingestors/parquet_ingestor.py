@@ -107,16 +107,12 @@ def _standardize_mpp(
     return scaled_image, annotations
 
 
-def _process_roi_worker(task: dict) -> tuple[str, np.ndarray, np.ndarray, int] | None:
-    """Process a single ROI in a worker subprocess.
+def _extract_roi_worker(task: dict) -> dict | None:
+    """Extract image and raw contours from a single ROI in a worker subprocess.
 
-    All config needed for label/tissue resolution is passed in the task dict.
+    CPU-only — no GPU/CUDA calls. Returns a dict with everything needed for
+    the main process to run the GPU raycast conversion.
     """
-    n_rays = task.get('n_rays', 32)
-    from raycasted.data.etl.utils.constants import configure_rays
-
-    configure_rays(n_rays)
-
     try:
         rgb_bytes = task['rgb_bytes']
         image_array = ParquetHandler.decode_image_bytes(rgb_bytes, is_mask=False)
@@ -136,11 +132,17 @@ def _process_roi_worker(task: dict) -> tuple[str, np.ndarray, np.ndarray, int] |
                 masks_df, mask_col, cat_col, task['namespace_map'], task['global_cell_map']
             )
             if vertices_list:
-                annotations = RayCastGPU.batch_polygon_to_raycast(
-                    vertices_list, np.array(class_ids_list, dtype=np.int64), n_rays=n_rays
-                )
-            else:
-                annotations = np.zeros((0, 3 + n_rays), dtype=np.float32)
+                return {
+                    'roi_id': roi_id,
+                    'image_array': image_array,
+                    'vertices_list': vertices_list,
+                    'class_ids': np.array(class_ids_list, dtype=np.int64),
+                    'tissue_origin': task['tissue_origin'],
+                    'scale_factor': task['scale_factor'],
+                    'annotation_type': annotation_type,
+                    'n_rays': task['n_rays'],
+                }
+            annotations = np.zeros((0, 3 + task['n_rays']), dtype=np.float32)
         else:
             raise ValueError(f'Unsupported annotation_type: {annotation_type}')
 
@@ -150,6 +152,16 @@ def _process_roi_worker(task: dict) -> tuple[str, np.ndarray, np.ndarray, int] |
     except Exception as e:
         print(f'  Worker error on {task.get("roi_id", "?")}: {e}')
         return None
+
+
+def _finalize_raycast(extracted: dict) -> tuple[str, np.ndarray, np.ndarray, int]:
+    """Run GPU raycast conversion in the main process on pre-extracted contours."""
+    n_rays = extracted['n_rays']
+    annotations = RayCastGPU.batch_polygon_to_raycast(extracted['vertices_list'], extracted['class_ids'], n_rays=n_rays)
+    image_array, annotations = _standardize_mpp(
+        extracted['image_array'], annotations, extracted['scale_factor'], extracted['annotation_type']
+    )
+    return (extracted['roi_id'], image_array, annotations, extracted['tissue_origin'])
 
 
 class ParquetIngestor(BaseDataIngestor):
@@ -219,17 +231,23 @@ class ParquetIngestor(BaseDataIngestor):
 
         if self._workers <= 1 or len(tasks) <= 1:
             for task in tasks:
-                result = _process_roi_worker(task)
-                if result is not None:
-                    yield result
+                result = _extract_roi_worker(task)
+                if result is None:
+                    continue
+                if isinstance(result, dict):
+                    result = _finalize_raycast(result)
+                yield result
         else:
             n_workers = min(self._workers, len(tasks))
             with ProcessPoolExecutor(max_workers=n_workers, mp_context=multiprocessing.get_context('spawn')) as pool:
-                futures = {pool.submit(_process_roi_worker, t): t['roi_id'] for t in tasks}
+                futures = {pool.submit(_extract_roi_worker, t): t['roi_id'] for t in tasks}
                 for future in as_completed(futures):
                     result = future.result()
-                    if result is not None:
-                        yield result
+                    if result is None:
+                        continue
+                    if isinstance(result, dict):
+                        result = _finalize_raycast(result)
+                    yield result
 
     def _identify_columns(self, schema: pl.Schema) -> tuple[str, str, str, str]:
         rgb_col, mask_col, cat_col, tissue_col = None, None, None, None
