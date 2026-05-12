@@ -130,7 +130,7 @@ def test_e2e_default_parameters_match_baseline():
     )
     assert e2e.one2many.assigner.topk == 13, f'Default tal_topk should be 13, got {e2e.one2many.assigner.topk}'
     assert e2e.one2many.lambda_l1 == 25.0, f'Default lambda_l1 should be 25.0, got {e2e.one2many.lambda_l1}'
-    assert e2e.one2many.lambda_xy == 1500.0, f'Default lambda_xy should be 1500.0, got {e2e.one2many.lambda_xy}'
+    assert e2e.one2many.lambda_xy == 500.0, f'Default lambda_xy should be 500.0, got {e2e.one2many.lambda_xy}'
     assert e2e.one2many.lambda_cls == 2.0, f'Default lambda_cls should be 2.0, got {e2e.one2many.lambda_cls}'
     assert e2e.one2many.assigner.cost_class == 1.0, (
         f'Default cost_class should be 1.0, got {e2e.one2many.assigner.cost_class}'

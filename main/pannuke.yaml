@@ -69,7 +69,7 @@ training:
   # Auxiliary XY head: bypasses 4-layer head stack to give backbone direct xy gradient
   # Addresses H7 (backbone feature poverty) — backbone can't learn spatial features
   # because the head attenuates xy gradients through 4 Conv layers.
-  aux_xy_weight: 30.0           # Huber loss weight for aux xy predictions (3x for one2one-only)
+  aux_xy_weight: 10.0           # Huber loss weight for aux xy predictions
   aux_xy_ramp_epochs: 100       # epochs over which aux weight decays (start decay at 80% of training)
 
   # Classification loss — focal loss for one2one (extreme fg/bg imbalance)
