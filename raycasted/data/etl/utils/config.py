@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # === NESTED MODELS FOR COMPLEX OBJECTS ===
@@ -49,15 +49,29 @@ class TrainingSettings(BaseModel):
     cos_lr: bool = True  # cosine LR schedule. Was False
 
     # Assigner
-    assigner_topk: int = 20  # positive anchors per GT. Was 13
     assigner_radius_scale: float = 2.0  # containment radius multiplier. Was 1.5
 
-    # Classification loss — BCE only (focal/QFL tested, both harmful)
+    # Classification loss — Focal or BCE
+    # Previous "focal tested, harmful" result was caused by alpha=1.0 which
+    # zeroed all background gradients. Standard alpha=0.25 works correctly.
+    focal_gamma: float = 0.0      # 0 = BCE, >0 = Focal loss (recommended: 2.0)
+    focal_alpha: float = 0.25     # positive weight (standard: 0.25)
+    log_ray_loss: bool = False    # log-space L1 on rays for scale-invariant errors
+    bg_fg_ratio: int = 3          # max bg anchors per fg anchor in cls loss
 
-    # Assigner cost annealing (beta + sigma curriculum)
-    assigner_beta_start: float = 0.0  # Polar-IoU exponent at start (0 = IoU off)
-    assigner_centroid_sigma_start: float = 0.5  # Gaussian width at start (wide = spatial-only)
-    assigner_anneal_frac: float = 0.4  # ramp assigner cost over first N% of training
+    # Unified assignment cost
+    cost_class: float = 1.0
+    cost_centroid: float = 1.0
+    cost_ray: float = 1.0
+    align_threshold: float = 0.0
+
+    # Assignment warmup
+    assigner_warmup_epochs: int = 0
+    steps_per_epoch: int = 133
+
+    # Weighted sampling
+    weighted_sampling: bool = False
+    sampler_gamma: float = 0.85
 
     # Augmentation (polygon-safe)
     stain_jitter: bool = True  # HSV color jitter for histopathology
@@ -97,6 +111,8 @@ class TrainingSettings(BaseModel):
 
     # Pretrained backbone
     pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
+
+    model_config = ConfigDict(extra='forbid')
 
 
 # === GLOBAL SETTINGS ===

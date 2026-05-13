@@ -239,6 +239,9 @@ class RayCastAssigner(TaskAlignedAssigner):
             # --- Focal classification cost ---
             gt_cls = gt_labels[b, valid_gt_idx, 0].long().clamp(min=0)
             out_prob = pd_scores[b, cand_idx].sigmoid()
+            # NOTE: These are standard DETR focal cost params for the assignment
+            # cost matrix, intentionally independent of the configurable
+            # focal_alpha/focal_gamma used in the training loss.
             alpha_focal = 0.25
             gamma_focal = 2.0
             neg_cost = (1 - alpha_focal) * (out_prob**gamma_focal) * (-(1 - out_prob + 1e-8).log())

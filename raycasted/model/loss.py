@@ -25,6 +25,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from ultralytics.utils import LOGGER
 from ultralytics.utils.loss import E2ELoss, v8DetectionLoss
 from ultralytics.utils.tal import make_anchors
 
@@ -217,7 +218,7 @@ def _focal_loss(
     pred_scores: torch.Tensor,
     target_scores: torch.Tensor,
     gamma: float = 2.0,
-    alpha: float = 1.0,
+    alpha: float = 0.25,
 ) -> torch.Tensor:
     """Standard focal loss (Lin et al., 2017) for multi-label classification.
 
@@ -227,21 +228,25 @@ def _focal_loss(
     Down-weights easy negatives (high p_t) and amplifies hard positives (low p_t),
     critical for dense cell scenes where background anchors vastly outnumber positives.
 
-    When gamma=0 and alpha=0.5, this reduces to standard BCE (with equal weighting).
+    NOTE: Previous default alpha=1.0 killed ALL background gradients (bg weight = 0).
+    The standard value from Lin et al. 2017 is alpha=0.25 (fg=0.25, bg=0.75).
 
     Args:
         pred_scores: [B, N, C] raw logits from the detection head.
         target_scores: [B, N, C] binary classification targets (0 or 1).
         gamma: Focusing parameter. Higher values down-weight easy examples more.
-        alpha: Positive sample weight factor. 0.5 means equal fg/bg weighting.
+        alpha: Positive sample weight factor. Standard: 0.25 (fg=0.25, bg=0.75).
 
     Returns:
         [B, N, C] element-wise focal loss (no reduction).
     """
-    pred = pred_scores.sigmoid()
-    ce = F.binary_cross_entropy(pred, target_scores, reduction='none')
-    focal_weight = alpha * (1 - pred) ** gamma * target_scores + (1 - alpha) * pred**gamma * (1 - target_scores)
-    return focal_weight * ce
+    # Use logits API for numerical stability (avoids separate sigmoid)
+    ce = F.binary_cross_entropy_with_logits(pred_scores.float(), target_scores.float(), reduction='none')
+    pred_prob = pred_scores.float().sigmoid()
+    p_t = target_scores * pred_prob + (1 - target_scores) * (1 - pred_prob)
+    modulating_factor = (1.0 - p_t) ** gamma
+    alpha_factor = target_scores * alpha + (1 - target_scores) * (1 - alpha)
+    return modulating_factor * alpha_factor * ce
 
 
 class RayCastDetectionLoss(v8DetectionLoss):
@@ -270,7 +275,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         log_ray_loss: bool = False,
         gradnorm_manager: GradNormManager | None = None,
         focal_gamma: float = 0.0,
-        focal_alpha: float = 1.0,
+        focal_alpha: float = 0.25,
         cost_class: float = 1.0,
         cost_centroid: float = 1.0,
         cost_ray: float = 1.0,
@@ -453,6 +458,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
         target_scores_sum = max(cls_targets.sum(), 1)
         loss[1] = loss_cls.sum() / target_scores_sum
 
+        # Track fg/bg cls contributions for diagnostics
+        _cls_fg_sum = (loss_cls * cls_targets).sum().item()
+        _cls_bg_sum = (loss_cls * (1 - cls_targets)).sum().item()
+
         # --- Polygon regression losses (foreground only, uniform weight) ---
         n_fg = max(fg_mask.sum(), 1)
         if n_fg > 0:
@@ -496,12 +505,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
         if self._diag_step % 100 == 0:
             _raw = loss.detach().clone()
             n_fg_actual = fg_mask.sum().item() if fg_mask.sum() > 0 else 0
-            import logging
-            logger = logging.getLogger('raycast.loss')
-            logger.info(
-                'DIAG step=%d | fg=%d/%d | raw_loss: xy=%.4f cls=%.4f l1=%.4f piou=%.4f smooth=%.5f',
+            LOGGER.info(
+                'DIAG step=%d | fg=%d/%d | raw: xy=%.4f cls=%.4f(fg=%.3f bg=%.3f) l1=%.4f piou=%.4f smooth=%.5f',
                 self._diag_step, n_fg_actual, fg_mask.numel(),
-                _raw[0].item(), _raw[1].item(), _raw[2].item(), _raw[3].item(), _raw[4].item(),
+                _raw[0].item(), _raw[1].item(), _cls_fg_sum, _cls_bg_sum,
+                _raw[2].item(), _raw[3].item(), _raw[4].item(),
             )
 
         # --- Store unweighted per-task losses for GradNorm ---
@@ -558,7 +566,7 @@ class RayCastE2ELoss(E2ELoss):
         cost_centroid: float = 1.0,
         cost_ray: float = 1.0,
         focal_gamma: float = 0.0,
-        focal_alpha: float = 1.0,
+        focal_alpha: float = 0.25,
         align_threshold: float = 0.0,
         gradnorm: bool = False,
         gradnorm_alpha: float = 0.5,

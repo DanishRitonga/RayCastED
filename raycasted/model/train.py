@@ -173,7 +173,7 @@ class _RayCastCriterionWrapper:
             cost_centroid=tcfg.get('cost_centroid', 1.0),
             cost_ray=tcfg.get('cost_ray', 1.0),
             focal_gamma=tcfg.get('focal_gamma', 0.0),
-            focal_alpha=tcfg.get('focal_alpha', 1.0),
+            focal_alpha=tcfg.get('focal_alpha', 0.25),
             align_threshold=tcfg.get('align_threshold', 0.0),
             gradnorm=tcfg.get('gradnorm', False),
             gradnorm_alpha=tcfg.get('gradnorm_alpha', 0.5),
@@ -307,6 +307,20 @@ def _best_epoch_callback(trainer):
             logger.info(f'  Best so far: fitness={best:.4f}')
 
 
+def _lr_log_callback(trainer):
+    """Log per-param-group learning rates at each epoch boundary.
+
+    Critical for MuSGD which maintains separate LR schedules per param group
+    (backbone, head, cls_head, aux_xy). Without this, LR divergence between
+    groups is invisible and hard to debug.
+    """
+    from ultralytics.utils import LOGGER
+    pg_lrs = [pg['lr'] for pg in trainer.optimizer.param_groups]
+    pg_names = [pg.get('name', f'pg{i}') for i, pg in enumerate(trainer.optimizer.param_groups)]
+    lr_str = ', '.join(f'{n}={lr:.2e}' for n, lr in zip(pg_names, pg_lrs))
+    LOGGER.info(f'Epoch {trainer.epoch + 1} LR: {lr_str}')
+
+
 class RayCastTrainer(DetectionTrainer):
     """Training pipeline for RayCastED polygon detection model.
 
@@ -342,6 +356,8 @@ class RayCastTrainer(DetectionTrainer):
         self.add_callback('on_train_batch_end', _gradnorm_update_callback)
         # Register best-epoch logger — prints after each validation epoch
         self.add_callback('on_fit_epoch_end', _best_epoch_callback)
+        # Register per-epoch LR logging — critical for MuSGD multi-group debugging
+        self.add_callback('on_fit_epoch_end', _lr_log_callback)
 
     def plot_training_labels(self):
         """Skip standard bbox label plotting — incompatible with raycast polygon data."""
