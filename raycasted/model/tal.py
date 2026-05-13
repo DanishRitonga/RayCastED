@@ -407,9 +407,6 @@ class HungarianRayCastAssigner(RayCastAssigner):
             **kwargs: Passed to parent RayCastAssigner (topk, num_classes
                 etc.).
         """
-        self._cost_class_init = cost_class
-        self._cost_centroid_init = cost_centroid
-        self._cost_ray_init = cost_ray
         super().__init__(
             cost_class=cost_class,
             cost_centroid=cost_centroid,

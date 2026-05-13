@@ -284,7 +284,7 @@ def _best_epoch_callback(trainer):
         return
 
     if fitness >= best:
-        logger.info(f"  ⭐ Epoch {epoch} — new best (fitness={fitness:.4f})")
+        logger.info(f'  ⭐ Epoch {epoch} — new best (fitness={fitness:.4f})')
     else:
         # Find best epoch from CSV (last column with max fitness)
         try:
@@ -301,9 +301,9 @@ def _best_epoch_callback(trainer):
                         if val >= best_fit:
                             best_fit = val
                             best_ep = int(float(row.get('epoch', epoch)))
-            logger.info(f"  Best so far: epoch {best_ep} (fitness={best_fit:.4f})")
+            logger.info(f'  Best so far: epoch {best_ep} (fitness={best_fit:.4f})')
         except Exception:
-            logger.info(f"  Best so far: fitness={best:.4f}")
+            logger.info(f'  Best so far: fitness={best:.4f}')
 
 
 class RayCastTrainer(DetectionTrainer):
@@ -361,7 +361,8 @@ class RayCastTrainer(DetectionTrainer):
             RayCastDetectionModel with RayCastDetect head.
         """
         register_raycast_head()
-        model = RayCastDetectionModel(cfg, ch=3, nc=None, verbose=verbose)
+        nc = self.data.get('nc') if hasattr(self, 'data') and self.data else None
+        model = RayCastDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
 
         # Replace Detect head → RayCastDetect
         old_head = model.model[-1]

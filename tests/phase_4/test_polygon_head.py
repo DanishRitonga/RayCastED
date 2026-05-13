@@ -332,7 +332,7 @@ def test_bias_init():
     """bias_init sets ray biases to ~15px at 0.25 MPP across all scales."""
     head = RayCastDetect(nc=NC, reg_max=REG_MAX, end2end=False, ch=CH)
     head.stride = torch.tensor([8.0, 16.0, 32.0])
-    head.bias_init()
+    head.bias_init(crop_size=640)
 
     target_ray_px = 15.0
     strides = [8.0, 16.0, 32.0]

@@ -50,7 +50,7 @@ training:
   cos_lr: true               # cosine LR schedule. Was false
 
   # E2E dual-assignment (NMS-free)
-  tal_topk: 6                 # one2many positives per GT (reduced from 20 to fix positive-rate flooding)
+  tal_topk: 10                 # one2many positives per GT (reduced from 20 to fix positive-rate flooding)
   assigner_radius_scale: 1.5  # containment radius multiplier
   assigner_alpha: 0.5         # cls score exponent in align = cls^α × piou^β
   assigner_beta: 6.0          # Polar-IoU exponent — high β creates geometric dominance for dense cells
@@ -70,12 +70,13 @@ training:
   # Addresses H7 (backbone feature poverty) — backbone can't learn spatial features
   # because the head attenuates xy gradients through 4 Conv layers.
   aux_xy_weight: 10.0           # Huber loss weight for aux xy predictions
-  aux_xy_ramp_epochs: 100       # epochs over which aux weight decays (start decay at 80% of training)
+  aux_xy_ramp_epochs: 100       # epoch at which aux xy weight begins linear decay to zero
 
   # Classification loss — focal loss for one2one (extreme fg/bg imbalance)
   focal_gamma: 2.0            # Focal loss gamma (DETR-style for Hungarian matching)
-  focal_alpha: 0.25           # Focal loss alpha — 0.25 = standard (positive samples get 0.25 weight)
+  focal_alpha: 0.5           # Focal loss alpha — 0.25 = standard (positive samples get 0.25 weight)
                                # Background samples get (1-alpha)=0.75 weight (they dominate numerically)
+  log_ray_loss: true           # Log-space L1 on rays — equalizes relative errors across scales
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false
@@ -98,10 +99,7 @@ training:
   translate_augment: true    # random translation augmentation. Was false
   translate_range: 0.1       # fraction of crop_size
 
-  # Soft polar centerness → IoU-aware quality prediction
-  soft_polar_centerness: true  # Trained to predict Polar-IoU (not centered-ness)
-  centerness_weight: 1.0       # BCE loss weight for IoU quality prediction
-  inference_conf: 0.20         # Optimal threshold with IoU-aware scoring (was 0.25)
+  inference_conf: 0.20         # Confidence threshold for inference (was 0.25)
 
   refinement_kernel_size: 3    # Kernel size for polygon refinement block
                                # 3 = standard RayRefinementBlock (Run 11 baseline)

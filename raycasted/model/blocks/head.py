@@ -289,7 +289,7 @@ class RayCastDetect(Detect):
         poly = poly.gather(dim=1, index=idx.repeat(1, 1, self.raycast_dim))
         return torch.cat([poly, scores, conf], dim=-1)
 
-    def bias_init(self, crop_size: int = 640):
+    def bias_init(self, crop_size: int = 256):
         """Initialize polygon head biases.
 
         XY channels (0-1): bias=0 for maximum sigmoid gradient (0.25) at init.

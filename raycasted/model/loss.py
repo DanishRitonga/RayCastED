@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 from functools import partial
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -32,9 +31,6 @@ from ultralytics.utils.tal import make_anchors
 from raycasted.data.etl.ops.iou import polar_iou_torch
 from raycasted.data.etl.ops.loss import angular_smoothness_loss_torch
 from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -425,7 +421,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # so the normalization constant ≈ n_fg × nc (with binarized targets).
         # This is the normalization used in train4 (mAP50=0.56) and standard
         # Ultralytics — the OHEM + separate fg/bg scheme caused training failure.
-        target_scores_sum = max(target_scores.sum(), 1)
+        target_scores_sum = max(cls_targets.sum(), 1)
         if self.focal_gamma > 0:
             loss_cls = _focal_loss(
                 pred_scores.float(),
@@ -449,7 +445,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
             fg_target_rays = fg_target_rays.float()
 
             fg_pred_xy = pred_xy[fg_mask]
-            loss_xy = F.huber_loss(fg_pred_xy.float(), fg_target_xy, reduction='none', delta=1.0).mean(-1)
+            loss_xy = F.huber_loss(fg_pred_xy.float(), fg_target_xy, reduction='none', delta=0.05).mean(-1)
             loss[0] = loss_xy.sum() / n_fg
 
             # L_L1: Uniform MAE on 32 rays (linear or log-space)
@@ -655,7 +651,7 @@ class RayCastE2ELoss(E2ELoss):
         self._aux_xy_base = lambda_aux_xy
         self.aux_xy_lambda = lambda_aux_xy
         self._max_epochs = max_epochs
-        self.aux_xy_decay_epoch = max(1, int(max_epochs * 0.8))
+        self.aux_xy_decay_epoch = max(1, aux_xy_ramp_epochs)
 
     def update(self):
         """Update o2m/o2o weights (inherited) + anneal smoothness + validate E2E integrity."""
@@ -734,7 +730,7 @@ class RayCastE2ELoss(E2ELoss):
         loss_one2many = self.one2many.loss(one2many_preds, batch)
         loss_one2one = self.one2one.loss(one2one_preds, batch)
         total_loss = loss_one2many[0] * self.o2m + loss_one2one[0] * self.o2o
-        loss_detach = loss_one2many[1]
+        loss_detach = loss_one2one[1]
 
         has_aux = self.aux_xy_lambda > 0 and 'aux_xy_raw' in one2many_preds
 
@@ -772,7 +768,7 @@ class RayCastE2ELoss(E2ELoss):
             if n_fg > 0:
                 fg_target_xy = target_bboxes[fg_mask][:, :2].float()
                 fg_aux_xy = aux_pred_xy[fg_mask].float()
-                aux_loss = F.huber_loss(fg_aux_xy, fg_target_xy, reduction='none', delta=1.0).mean(-1)
+                aux_loss = F.huber_loss(fg_aux_xy, fg_target_xy, reduction='none', delta=0.05).mean(-1)
                 aux_loss_val = aux_loss.sum() / n_fg * self.aux_xy_lambda
                 # Add as a 6th element to avoid broadcasting into the 5-element loss tensor.
                 # Ultralytics calls .sum() on total_loss for backward, so a scalar aux loss
