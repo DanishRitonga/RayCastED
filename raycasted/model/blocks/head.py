@@ -230,6 +230,17 @@ class RayCastDetect(Detect):
 
         return result
 
+    def fuse(self) -> None:
+        """Remove the one2many head for inference optimization.
+
+        Overrides parent Detect.fuse() which sets cv2=cv3=None.
+        Since we share cv3 between one2many and one2one branches,
+        we must preserve cv3 for the one2one inference path.
+        """
+        # Only remove one2many box head — keep cv3 alive for one2one cls
+        self.cv2 = None
+        # cv3 is intentionally NOT set to None — it's shared with one2one
+
     def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode polygon predictions for inference.
 
