@@ -29,6 +29,7 @@ import torch.nn.functional as F
 from ultralytics.utils.loss import E2ELoss, v8DetectionLoss
 from ultralytics.utils.tal import make_anchors
 
+from raycasted.data.etl.ops.iou import polar_iou_torch
 from raycasted.data.etl.ops.loss import angular_smoothness_loss_torch
 from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
 
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 #  GradNorm — Gradient Normalisation for Multi-Task Loss Balancing
 # ──────────────────────────────────────────────────────────────────────
 
-_TASK_NAMES = ('xy', 'cls', 'l1', 'smooth')
+_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth')
 
 
 class GradNormManager:
@@ -222,25 +223,28 @@ def _focal_loss(
     gamma: float = 2.0,
     alpha: float = 1.0,
 ) -> torch.Tensor:
-    """Focal loss for multi-label classification.
+    """Standard focal loss (Lin et al., 2017) for multi-label classification.
 
-    Down-weights easy negatives and amplifies hard positives, which helps
-    in dense cell scenes where background anchors vastly outnumber positive ones.
+    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+    where p_t = p if y=1, (1-p) if y=0; alpha_t = alpha if y=1, (1-alpha) if y=0.
 
-    When gamma=0 and alpha=1.0, this reduces to standard BCE.
+    Down-weights easy negatives (high p_t) and amplifies hard positives (low p_t),
+    critical for dense cell scenes where background anchors vastly outnumber positives.
+
+    When gamma=0 and alpha=0.5, this reduces to standard BCE (with equal weighting).
 
     Args:
         pred_scores: [B, N, C] raw logits from the detection head.
-        target_scores: [B, N, C] soft classification targets from the assigner.
+        target_scores: [B, N, C] binary classification targets (0 or 1).
         gamma: Focusing parameter. Higher values down-weight easy examples more.
-        alpha: Positive sample weight factor. 1.0 means no extra weighting.
+        alpha: Positive sample weight factor. 0.5 means equal fg/bg weighting.
 
     Returns:
         [B, N, C] element-wise focal loss (no reduction).
     """
     pred = pred_scores.sigmoid()
     ce = F.binary_cross_entropy(pred, target_scores, reduction='none')
-    focal_weight = alpha * (1 - pred) ** gamma * target_scores + pred**gamma * (1 - target_scores)
+    focal_weight = alpha * (1 - pred) ** gamma * target_scores + (1 - alpha) * pred**gamma * (1 - target_scores)
     return focal_weight * ce
 
 
@@ -248,11 +252,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
     """Polygon detection loss with 5 terms.
 
     Replaces v8DetectionLoss bbox/DFL terms:
-      L_cls     — BCE on classification scores
-      L_xy      — Huber on decoded centroid
-      L_L1      — Log-space L1 on ray distances
-      L_PolarIoU — -log(PolarIoU)
-      L_smooth  — Angular smoothness regularisation (annealed)
+      L_cls      — Focal/BCE on classification scores
+      L_xy       — Huber on decoded centroid
+      L_L1       — Log-space L1 on ray distances
+      L_PolarIoU — -log(PolarIoU) shape-quality loss
+      L_smooth   — Angular smoothness regularisation (annealed)
 
     Inherits assignment framework from v8DetectionLoss, replacing
     the assigner with RayCastAssigner.
@@ -275,8 +279,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         cost_centroid: float = 1.0,
         cost_ray: float = 1.0,
         assigner_warmup_epochs: int = 0,
-        ignore_halo_radius: float = 0.0,
-        ohem_ratio: float = 0.0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -293,15 +295,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Focal loss configuration (gamma=0 disables focal, uses pure BCE)
         self.focal_gamma = focal_gamma
         self.focal_alpha = focal_alpha
-
-        # Ignore halo: anchors within this radius × GT containment radius
-        # but NOT in fg_mask are ignored (target=-1). Set 0 to disable.
-        # E.g. 2.0 = ignore anchors up to 2× the containment radius.
-        self.ignore_halo_radius = ignore_halo_radius
-
-        # OHEM: keep only the hardest `ohem_ratio × n_fg` negative anchors.
-        # Set 0 to disable. E.g. 3.0 = keep top 3×n_fg hardest negatives.
-        self.ohem_ratio = ohem_ratio
 
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
@@ -320,11 +313,13 @@ class RayCastDetectionLoss(v8DetectionLoss):
         )
 
         # Loss weights — decoded normalised xy space [0,1].
-        # High lambda compensates for stride/imgsz gradient attenuation (~0.03x).
+        # High lambda_xy compensates for stride/imgsz gradient attenuation (~0.03x).
         # Raw ~0.088; lambda=500 gives weighted~44, effective grad_mult~7.8.
+        # lambda_piou: shape IoU supervision (1-2% of task gradient).
         self.lambda_cls = 2.0
         self.lambda_xy = 500.0
         self.lambda_l1 = 25.0
+        self.lambda_piou = 2.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
 
     def preprocess(self, targets, batch_size, scale_tensor=None):
@@ -374,12 +369,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
         return xy_pixel / imgsz[[1, 0]]  # normalise
 
     def get_assigned_targets_and_loss(self, preds, batch):
-        """Compute 4-term polygon loss.
+        """Compute 5-term polygon loss.
 
         Returns:
-            (assignment_info, loss_4vec, loss_detach)
+            (assignment_info, loss_5vec, loss_detach)
         """
-        loss = torch.zeros(4, device=self.device)  # [xy, cls, L1, smooth]
+        loss = torch.zeros(5, device=self.device)  # [xy, cls, L1, piou, smooth]
 
         # --- Prediction parsing ---
         pred_distri = preds['boxes'].permute(0, 2, 1).contiguous()  # [B, N, raycast_dim]
@@ -418,42 +413,19 @@ class RayCastDetectionLoss(v8DetectionLoss):
             mask_gt,
         )
 
-        # --- L_cls: BCE with separate fg/bg normalization ---
+        # --- L_cls: BCE or Focal loss normalised by target_scores_sum ---
         # Binarize targets — hard 0/1. Soft alignment scores are noisy and
         # prevent the classifier from converging. Alignment quality belongs
         # in the centerness branch, not the classification branch.
         cls_targets = target_scores.float().clone()
         cls_targets[cls_targets > 0] = 1.0
 
-        # --- Ignore halo: mask anchors near GT boundaries ---
-        # Anchors within `ignore_halo_radius × containment_radius` of a GT
-        # centroid but NOT in fg_mask are excluded from BOTH fg and bg loss.
-        # This prevents conflicting gradients at object boundaries where
-        # anchors see nucleus features but are forced to predict background.
-        ignore_mask = torch.zeros_like(fg_mask)
-        if self.ignore_halo_radius > 0:
-            for b in range(batch_size):
-                valid = mask_gt[b, :, 0].bool()
-                valid_idx = valid.nonzero(as_tuple=False).squeeze(-1)
-                if valid_idx.numel() == 0:
-                    continue
-                gt_xy = gt_bboxes[b, valid_idx, :2]
-                gt_rays = gt_bboxes[b, valid_idx, 2:]
-                # Use mean non-zero ray as containment radius
-                n_nonzero = (gt_rays > 0).sum(dim=1).clamp(min=1)
-                mean_radii = gt_rays.sum(dim=1) / n_nonzero.float()
-                halo_radii = mean_radii * self.ignore_halo_radius
-                dist = torch.cdist(gt_xy.float(), anchor_points_norm.float().unsqueeze(0).expand(batch_size, -1, -1)[b])
-                in_halo = (dist <= halo_radii[:, None]) & (halo_radii[:, None] > 0)
-                # Any anchor in halo but not in fg_mask → ignore
-                halo_any = in_halo.any(dim=0)  # [N_anchors]
-                ignore_mask[b] = halo_any & ~fg_mask[b]
-
-        # Effective background: exclude ignore zone
-        bg_mask = ~fg_mask & ~ignore_mask
-        n_fg_cls = max(fg_mask.sum(), 1)
-        n_bg = max(bg_mask.sum(), 1)
-
+        # Standard Ultralytics normalization: divide by sum of target scores.
+        # This naturally balances fg/bg because target_scores is 0 for bg,
+        # so the normalization constant ≈ n_fg × nc (with binarized targets).
+        # This is the normalization used in train4 (mAP50=0.56) and standard
+        # Ultralytics — the OHEM + separate fg/bg scheme caused training failure.
+        target_scores_sum = max(target_scores.sum(), 1)
         if self.focal_gamma > 0:
             loss_cls = _focal_loss(
                 pred_scores.float(),
@@ -463,26 +435,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
             )
         else:
             loss_cls = self.bce(pred_scores.float(), cls_targets)
-
-        fg_mask_bc = fg_mask.unsqueeze(-1).expand_as(loss_cls)
-        bg_mask_bc = bg_mask.unsqueeze(-1).expand_as(loss_cls)
-        loss_fg = loss_cls[fg_mask_bc].sum() / n_fg_cls
-
-        # --- OHEM: keep only the hardest negatives ---
-        # Instead of averaging over ALL background anchors, sort bg losses
-        # and only keep the top `ohem_ratio × n_fg` hardest ones.
-        # This enforces a healthy fg:bg ratio (e.g. 1:3) and prevents
-        # easy bg anchors from diluting the loss signal.
-        loss_bg_flat = loss_cls[bg_mask_bc]
-        if self.ohem_ratio > 0 and loss_bg_flat.numel() > 0:
-            n_hard = max(int(n_fg_cls * self.ohem_ratio), 1)
-            n_hard = min(n_hard, loss_bg_flat.numel())
-            _, hard_idx = loss_bg_flat.topk(n_hard)
-            loss_bg = loss_bg_flat[hard_idx].sum() / n_hard
-        else:
-            loss_bg = loss_bg_flat.sum() / n_bg
-
-        loss[1] = loss_fg + loss_bg
+        loss[1] = loss_cls.sum() / target_scores_sum
 
         # --- Polygon regression losses (foreground only, uniform weight) ---
         n_fg = max(fg_mask.sum(), 1)
@@ -506,13 +459,18 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 loss_l1 = (fg_pred_rays - fg_target_rays).abs().mean(-1)
             loss[2] = loss_l1.sum() / n_fg
 
+            # L_PolarIoU: -log(PolarIoU) — matches PolarMask formulation
+            fg_piou = polar_iou_torch(fg_pred_rays, fg_target_rays)
+            loss[3] = (-torch.log(fg_piou + 1e-7)).sum() / n_fg
+
             # L_smooth: Angular smoothness on predicted rays
-            loss[3] = angular_smoothness_loss_torch(fg_pred_rays).sum() / n_fg
+            loss[4] = angular_smoothness_loss_torch(fg_pred_rays).sum() / n_fg
         else:
             # DDP safety — touch all prediction tensors to avoid unused-gradient errors
             loss[0] += (pred_xy * 0).sum()
             loss[2] += (pred_rays * 0).sum()
             loss[3] += (pred_rays * 0).sum()
+            loss[4] += (pred_rays * 0).sum()
 
         # --- Store unweighted per-task losses for GradNorm ---
         if self.gradnorm_manager is not None:
@@ -521,16 +479,18 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # --- Apply loss weights ---
         # If GradNorm is active, use its dynamic weights; otherwise use static lambdas.
         if self.gradnorm_manager is not None and self.gradnorm_manager.enabled:
-            w = self.gradnorm_manager.get_weights()  # [4]
+            w = self.gradnorm_manager.get_weights()  # [5]
             loss[0] *= w[0]
             loss[1] *= w[1]
             loss[2] *= w[2]
             loss[3] *= w[3]
+            loss[4] *= w[4]
         else:
             loss[0] *= self.lambda_xy
             loss[1] *= self.lambda_cls
             loss[2] *= self.lambda_l1
-            loss[3] *= self.lambda_smooth
+            loss[3] *= self.lambda_piou
+            loss[4] *= self.lambda_smooth
 
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
@@ -548,7 +508,7 @@ class RayCastE2ELoss(E2ELoss):
 
     When ``gradnorm=True``, replaces static λ weights with GradNorm
     (Chen et al., 2018) dynamic weights that equalise gradient norms
-    across all 4 tasks, preventing cls_loss from dominating the shared
+    across all 5 tasks, preventing cls_loss from dominating the shared
     backbone.
     """
 
@@ -575,15 +535,13 @@ class RayCastE2ELoss(E2ELoss):
         steps_per_epoch: int = 133,
         lambda_aux_xy: float = 0.0,
         aux_xy_ramp_epochs: int = 100,
-        ignore_halo_radius: float = 0.0,
-        ohem_ratio: float = 0.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
         if gradnorm:
             self.gradnorm_manager = GradNormManager(
                 model=model,
-                num_tasks=4,
+                num_tasks=5,
                 alpha=gradnorm_alpha,
                 warmup_epochs=gradnorm_warmup_epochs,
             )
@@ -605,8 +563,6 @@ class RayCastE2ELoss(E2ELoss):
             cost_centroid=cost_centroid,
             cost_ray=cost_ray,
             assigner_warmup_epochs=assigner_warmup_epochs,
-            ignore_halo_radius=ignore_halo_radius,
-            ohem_ratio=ohem_ratio,
         )
         super().__init__(model, loss_fn=loss_fn)
 
@@ -747,9 +703,13 @@ class RayCastE2ELoss(E2ELoss):
         # Small floor (0.1) keeps ray parameters alive for DDP.
         lambda_l1 = 0.1 if self.assigner_warmup_epochs > 0 and current_epoch < self.assigner_warmup_epochs else 25.0
 
+        # PolarIoU: same warmup logic as L1 — meaningless with random features.
+        lambda_piou = 0.1 if self.assigner_warmup_epochs > 0 and current_epoch < self.assigner_warmup_epochs else 2.0
+
         for branch in (self.one2many, self.one2one):
             branch.lambda_smooth = lambda_smooth
             branch.lambda_l1 = lambda_l1
+            branch.lambda_piou = lambda_piou
 
         # Auxiliary XY: decay after aux_xy_decay_epoch
         if self._aux_xy_base > 0 and current_epoch >= self.aux_xy_decay_epoch:
@@ -814,9 +774,9 @@ class RayCastE2ELoss(E2ELoss):
                 fg_aux_xy = aux_pred_xy[fg_mask].float()
                 aux_loss = F.huber_loss(fg_aux_xy, fg_target_xy, reduction='none', delta=1.0).mean(-1)
                 aux_loss_val = aux_loss.sum() / n_fg * self.aux_xy_lambda
-                # Add as a 5th element to avoid broadcasting into the 4-element loss tensor.
+                # Add as a 6th element to avoid broadcasting into the 5-element loss tensor.
                 # Ultralytics calls .sum() on total_loss for backward, so a scalar aux loss
-                # added to a 4-element tensor would be counted 4x via broadcast.
+                # added to a 5-element tensor would be counted 5x via broadcast.
                 total_loss = torch.cat([total_loss, aux_loss_val.unsqueeze(0)])
 
                 loss_detach = torch.cat([loss_detach, aux_loss_val.detach().unsqueeze(0)])
