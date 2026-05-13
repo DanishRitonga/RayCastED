@@ -488,6 +488,22 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[3] += (pred_rays * 0).sum()
             loss[4] += (pred_rays * 0).sum()
 
+        # --- Diagnostic: log raw (unweighted) losses + fg count every 100 steps ---
+        if hasattr(self, '_diag_step'):
+            self._diag_step += 1
+        else:
+            self._diag_step = 0
+        if self._diag_step % 100 == 0:
+            _raw = loss.detach().clone()
+            n_fg_actual = fg_mask.sum().item() if fg_mask.sum() > 0 else 0
+            import logging
+            logger = logging.getLogger('raycast.loss')
+            logger.info(
+                'DIAG step=%d | fg=%d/%d | raw_loss: xy=%.4f cls=%.4f l1=%.4f piou=%.4f smooth=%.5f',
+                self._diag_step, n_fg_actual, fg_mask.numel(),
+                _raw[0].item(), _raw[1].item(), _raw[2].item(), _raw[3].item(), _raw[4].item(),
+            )
+
         # --- Store unweighted per-task losses for GradNorm ---
         if self.gradnorm_manager is not None:
             self.gradnorm_manager.store_losses(loss.detach())
@@ -716,13 +732,32 @@ class RayCastE2ELoss(E2ELoss):
         t_smooth = min(self.updates / self.smooth_anneal_epochs, 1.0)
         lambda_smooth = self.smooth_start + t_smooth * (self.smooth_end - self.smooth_start)
 
-        # L1 ray loss: near-zero during assignment warmup, ramp to full after
+        # L1 ray loss: near-zero during assignment warmup, then linearly ramp to full.
         # Warmup focuses gradient budget on centroids + classification.
         # Small floor (0.1) keeps ray parameters alive for DDP.
-        lambda_l1 = 0.1 if self.assigner_warmup_epochs > 0 and current_epoch < self.assigner_warmup_epochs else 25.0
+        # FIX: linear ramp over 20 epochs after warmup (was abrupt step → optimizer destabilization).
+        l1_floor = 0.1
+        l1_target = 25.0
+        l1_ramp_epochs = 20  # epochs to ramp from floor to target
+        if self.assigner_warmup_epochs > 0 and current_epoch < self.assigner_warmup_epochs:
+            lambda_l1 = l1_floor
+        elif current_epoch < self.assigner_warmup_epochs + l1_ramp_epochs:
+            t = (current_epoch - self.assigner_warmup_epochs) / l1_ramp_epochs
+            lambda_l1 = l1_floor + t * (l1_target - l1_floor)
+        else:
+            lambda_l1 = l1_target
 
-        # PolarIoU: same warmup logic as L1 — meaningless with random features.
-        lambda_piou = 0.1 if self.assigner_warmup_epochs > 0 and current_epoch < self.assigner_warmup_epochs else 2.0
+        # PolarIoU: same ramp logic as L1 — meaningless with random features.
+        piou_floor = 0.1
+        piou_target = 2.0
+        piou_ramp_epochs = 20
+        if self.assigner_warmup_epochs > 0 and current_epoch < self.assigner_warmup_epochs:
+            lambda_piou = piou_floor
+        elif current_epoch < self.assigner_warmup_epochs + piou_ramp_epochs:
+            t = (current_epoch - self.assigner_warmup_epochs) / piou_ramp_epochs
+            lambda_piou = piou_floor + t * (piou_target - piou_floor)
+        else:
+            lambda_piou = piou_target
 
         for branch in (self.one2many, self.one2one):
             branch.lambda_smooth = lambda_smooth

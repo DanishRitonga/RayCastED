@@ -259,11 +259,21 @@ class RayCastAssigner(TaskAlignedAssigner):
             cost_ray = log_l1
 
             # --- Combined cost ---
-            # During warmup, suppress ray cost (random predictions) and boost centroid
+            # During warmup, suppress ray cost (random predictions) and boost centroid.
+            # Smoothly ramp ray cost up over 15 epochs after warmup ends.
+            cost_transition_epochs = 15
             is_warmup = self._current_epoch < self.warmup_epochs
+            if is_warmup:
+                w_xy = self.cost_centroid * 3.0
+                w_ray = self.cost_ray * 0.1
+            elif self._current_epoch < self.warmup_epochs + cost_transition_epochs:
+                t = (self._current_epoch - self.warmup_epochs) / cost_transition_epochs
+                w_xy = self.cost_centroid * (3.0 - 2.0 * t)  # 3.0 → 1.0
+                w_ray = self.cost_ray * (0.1 + 0.9 * t)     # 0.1 → 1.0
+            else:
+                w_xy = self.cost_centroid
+                w_ray = self.cost_ray
             w_cls = self.cost_class
-            w_xy = self.cost_centroid * (3.0 if is_warmup else 1.0)
-            w_ray = self.cost_ray * (0.1 if is_warmup else 1.0)
             total = w_cls * cost_cls + w_xy * cost_xy + w_ray * cost_ray
             total = total.nan_to_num(nan=1e8, posinf=1e8, neginf=-1e8)
 
@@ -306,6 +316,15 @@ class RayCastAssigner(TaskAlignedAssigner):
         bbox_scores[mask_gt_bool] = pd_scores[ind[0], :, ind[1]][mask_gt_bool]
 
         in_warmup = self.warmup_epochs > 0 and self._current_epoch < self.warmup_epochs
+        # Smooth transition blending factor: 0 during warmup, 1 after transition.
+        # Ramps linearly over 15 epochs after warmup ends.
+        transition_epochs = 15
+        if self.warmup_epochs > 0 and self._current_epoch < self.warmup_epochs:
+            blend = 0.0  # pure centroid
+        elif self.warmup_epochs > 0 and self._current_epoch < self.warmup_epochs + transition_epochs:
+            blend = (self._current_epoch - self.warmup_epochs) / transition_epochs
+        else:
+            blend = 1.0  # pure Polar-IoU
 
         for b in range(self.bs):
             candidate_mask = mask_gt_bool[b].any(dim=0)
@@ -329,15 +348,22 @@ class RayCastAssigner(TaskAlignedAssigner):
                     overlaps.dtype
                 )
             else:
+                # Compute both metrics and blend during transition period
+                pd_xy = pd_bboxes[b, cand_idx, :2].float()
+                gt_xy = gt_bboxes[b, valid_gt_idx, :2].float()
+                dist = torch.cdist(pd_xy, gt_xy, p=2)
+                sigma = 0.15
+                sim = torch.exp(-dist.pow(2) / (2 * sigma**2))
+
                 pd_rays = pd_bboxes[b, cand_idx, 2:]
                 gt_rays = gt_bboxes[b, valid_gt_idx, 2:]
-
                 pd_exp = pd_rays[:, None, :].expand(-1, n_valid_gt, -1)
                 gt_exp = gt_rays[None, :, :].expand(n_cand, -1, -1)
                 iou = polar_iou_pairwise_flat_torch(pd_exp, gt_exp)
 
+                blended = (1.0 - blend) * sim + blend * iou
                 pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
-                overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = iou.T.to(overlaps.dtype) * pair_mask.to(
+                overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = blended.T.to(overlaps.dtype) * pair_mask.to(
                     overlaps.dtype
                 )
 
