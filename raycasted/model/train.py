@@ -267,6 +267,45 @@ def _gradnorm_update_callback(trainer):
         gn.update()
 
 
+def _best_epoch_callback(trainer):
+    """Print best-epoch marker after each validation epoch.
+
+    Compares current fitness to best_fitness and logs whether this epoch
+    is the new best, or reminds what the best epoch was.
+    """
+    import logging
+
+    logger = logging.getLogger('raycasted.train')
+    epoch = trainer.epoch + 1  # 1-based
+    fitness = trainer.fitness
+    best = trainer.best_fitness
+
+    if best is None or fitness is None:
+        return
+
+    if fitness >= best:
+        logger.info(f"  ⭐ Epoch {epoch} — new best (fitness={fitness:.4f})")
+    else:
+        # Find best epoch from CSV (last column with max fitness)
+        try:
+            import csv
+
+            best_ep = epoch  # fallback
+            best_fit = best
+            csv_path = trainer.csv
+            if csv_path.exists():
+                with open(csv_path) as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        val = float(row.get('fitness', 0))
+                        if val >= best_fit:
+                            best_fit = val
+                            best_ep = int(float(row.get('epoch', epoch)))
+            logger.info(f"  Best so far: epoch {best_ep} (fitness={best_fit:.4f})")
+        except Exception:
+            logger.info(f"  Best so far: fitness={best:.4f}")
+
+
 class RayCastTrainer(DetectionTrainer):
     """Training pipeline for RayCastED polygon detection model.
 
@@ -300,6 +339,8 @@ class RayCastTrainer(DetectionTrainer):
 
         # Register GradNorm callback — updates dynamic loss weights after each step
         self.add_callback('on_train_batch_end', _gradnorm_update_callback)
+        # Register best-epoch logger — prints after each validation epoch
+        self.add_callback('on_fit_epoch_end', _best_epoch_callback)
 
     def plot_training_labels(self):
         """Skip standard bbox label plotting — incompatible with raycast polygon data."""
@@ -392,7 +433,7 @@ class RayCastTrainer(DetectionTrainer):
 
     def get_validator(self):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
-        self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'smooth_loss', 'aux_xy_loss')
+        self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'piou_loss', 'smooth_loss', 'aux_xy_loss')
         args_copy = copy.copy(self.args)
         if self.training_config and 'inference_conf' in self.training_config:
             args_copy.conf = self.training_config['inference_conf']
