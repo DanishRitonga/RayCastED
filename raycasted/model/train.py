@@ -182,6 +182,7 @@ class _RayCastCriterionWrapper:
             steps_per_epoch=tcfg.get('steps_per_epoch', 133),
             lambda_aux_xy=tcfg.get('aux_xy_weight', 0.0),
             aux_xy_ramp_epochs=tcfg.get('aux_xy_ramp_epochs', 100),
+            bg_fg_ratio=tcfg.get('bg_fg_ratio', 3),
         )
 
 

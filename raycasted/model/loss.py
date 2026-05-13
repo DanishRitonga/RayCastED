@@ -275,6 +275,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         cost_centroid: float = 1.0,
         cost_ray: float = 1.0,
         assigner_warmup_epochs: int = 0,
+        bg_fg_ratio: int = 3,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -317,6 +318,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.lambda_l1 = 25.0
         self.lambda_piou = 2.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
+        self.bg_fg_ratio = bg_fg_ratio
 
     def preprocess(self, targets, batch_size, scale_tensor=None):
         """Preprocess polygon targets.
@@ -409,19 +411,32 @@ class RayCastDetectionLoss(v8DetectionLoss):
             mask_gt,
         )
 
-        # --- L_cls: BCE or Focal loss normalised by target_scores_sum ---
+        # --- L_cls: BCE or Focal loss with bg subsampling ---
         # Binarize targets — hard 0/1. Soft alignment scores are noisy and
         # prevent the classifier from converging. Alignment quality belongs
         # in the centerness branch, not the classification branch.
         cls_targets = target_scores.float().clone()
         cls_targets[cls_targets > 0] = 1.0
 
-        # Standard Ultralytics normalization: divide by sum of target scores.
-        # This naturally balances fg/bg because target_scores is 0 for bg,
-        # so the normalization constant ≈ n_fg × nc (with binarized targets).
-        # This is the normalization used in train4 (mAP50=0.56) and standard
-        # Ultralytics — the OHEM + separate fg/bg scheme caused training failure.
-        target_scores_sum = max(cls_targets.sum(), 1)
+        # Subsample background anchors to cap bg:fg ratio per batch element.
+        # Without this, P2's 4096 anchors overwhelm the ~1200 fg anchors,
+        # producing cls_loss ~15 that drowns the regression gradient signal.
+        ignore_mask = torch.zeros_like(cls_targets, dtype=torch.bool)
+        if self.bg_fg_ratio > 0:
+            fg_per_batch = fg_mask.sum(dim=1)  # [B]
+            bg_mask = ~fg_mask  # [B, N]
+            for b in range(batch_size):
+                n_fg_b = fg_per_batch[b].item()
+                if n_fg_b == 0:
+                    continue
+                bg_indices = bg_mask[b].nonzero(as_tuple=True)[0]
+                n_bg_keep = min(bg_indices.shape[0], int(n_fg_b * self.bg_fg_ratio))
+                if n_bg_keep < bg_indices.shape[0]:
+                    perm = torch.randperm(bg_indices.shape[0], device=self.device)
+                    drop_idx = perm[n_bg_keep:]
+                    ignore_mask[b, bg_indices[drop_idx]] = True
+                    cls_targets[b, bg_indices[drop_idx]] = 0
+
         if self.focal_gamma > 0:
             loss_cls = _focal_loss(
                 pred_scores.float(),
@@ -431,6 +446,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
             )
         else:
             loss_cls = self.bce(pred_scores.float(), cls_targets)
+
+        if self.bg_fg_ratio > 0:
+            loss_cls = loss_cls.masked_fill(ignore_mask, 0.0)
+
+        target_scores_sum = max(cls_targets.sum(), 1)
         loss[1] = loss_cls.sum() / target_scores_sum
 
         # --- Polygon regression losses (foreground only, uniform weight) ---
@@ -531,6 +551,7 @@ class RayCastE2ELoss(E2ELoss):
         steps_per_epoch: int = 133,
         lambda_aux_xy: float = 0.0,
         aux_xy_ramp_epochs: int = 100,
+        bg_fg_ratio: int = 3,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -559,6 +580,7 @@ class RayCastE2ELoss(E2ELoss):
             cost_centroid=cost_centroid,
             cost_ray=cost_ray,
             assigner_warmup_epochs=assigner_warmup_epochs,
+            bg_fg_ratio=bg_fg_ratio,
         )
         super().__init__(model, loss_fn=loss_fn)
 
