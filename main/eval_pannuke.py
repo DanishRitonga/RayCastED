@@ -125,6 +125,47 @@ def run_inference(model, dataloader, device, conf_threshold=0.20):
     return results
 
 
+def centroid_nms(pred_polys, pred_confs, pred_cls, min_distance_px=6.0):
+    """Remove duplicate predictions whose centroids are closer than min_distance_px.
+
+    Keeps the highest-confidence prediction in each cluster. This matches the
+    deduplication that the training validator performs implicitly through AP
+    matching but which instance-level metrics (F1, PQ) require explicitly.
+
+    Args:
+        pred_polys: [N, raycast_dim] polygon predictions (denormalised).
+        pred_confs: [N] confidence scores.
+        pred_cls: [N] class labels.
+        min_distance_px: Minimum allowed centroid distance (pixels).
+
+    Returns:
+        Filtered (pred_polys, pred_confs, pred_cls).
+    """
+    if len(pred_polys) == 0:
+        return pred_polys, pred_confs, pred_cls
+
+    # Sort by confidence descending — keep highest conf in each cluster
+    order = np.argsort(-pred_confs)
+    pred_polys = pred_polys[order]
+    pred_confs = pred_confs[order]
+    pred_cls = pred_cls[order]
+
+    centroids = pred_polys[:, :2]  # [N, 2]
+    keep = []
+    for i in range(len(centroids)):
+        should_keep = True
+        for j in keep:
+            dist = np.linalg.norm(centroids[i] - centroids[j])
+            if dist < min_distance_px:
+                should_keep = False
+                break
+        if should_keep:
+            keep.append(i)
+
+    keep = np.array(keep)
+    return pred_polys[keep], pred_confs[keep], pred_cls[keep]
+
+
 def _mask_iou_matrix(pred_masks: list[np.ndarray], gt_masks: list[np.ndarray]) -> np.ndarray:
     """Compute pairwise mask IoU between predictions and GT.
 
