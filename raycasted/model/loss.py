@@ -331,7 +331,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # Per-class inverse-frequency weights [C]. When provided, scales positive
         # classification loss per class to rebalance rare categories.
-        self.register_buffer('class_weights', class_weights)
+        # Stored as plain attribute (not register_buffer — parent is not nn.Module).
+        self.class_weights: torch.Tensor | None = class_weights
 
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
@@ -494,6 +495,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # Class weights — scale positive cls loss per class to rebalance rare categories
         cw = self.class_weights  # [C] or None
+        if cw is not None and cw.device != pred_scores.device:
+            self.class_weights = cw.to(pred_scores.device)
+            cw = self.class_weights
 
         if self.focal_gamma > 0:
             loss_cls = _focal_loss(
