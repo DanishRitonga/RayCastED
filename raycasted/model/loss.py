@@ -514,7 +514,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 loss_xy = loss_xy * fg_plb
             loss[0] = loss_xy.sum() / n_fg
 
-            # L_L1: Uniform MAE on 32 rays (linear or log-space)
+            # L_L1: Uniform MAE on n_rays (linear or log-space)
             if self.log_ray_loss:
                 loss_l1 = _log_space_ray_loss(fg_pred_rays, fg_target_rays)
             else:

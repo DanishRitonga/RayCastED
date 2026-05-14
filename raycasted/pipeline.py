@@ -279,6 +279,11 @@ def main():  # noqa: D103
     parser.add_argument('--lr0', type=float, default=None, help='Initial learning rate')
     parser.add_argument('--project', default=None, help='Project directory for saves')
     parser.add_argument('--name', default=None, help='Experiment name')
+    parser.add_argument(
+        '--resume',
+        default=None,
+        help='Path to last.pt checkpoint to resume training from (e.g. output/train/weights/last.pt)',
+    )
 
     args = parser.parse_args()
 
@@ -318,6 +323,10 @@ def main():  # noqa: D103
         training_overrides['project'] = args.project
     if args.name:
         training_overrides['name'] = args.name
+    if args.resume:
+        training_overrides['resume'] = True
+        # When resuming, Ultralytics expects model= to point to the checkpoint
+        training_overrides['model'] = args.resume
 
     pipeline = RayCastPipeline(
         config_path=args.config,
