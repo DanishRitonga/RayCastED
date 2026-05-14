@@ -51,7 +51,7 @@ training:
 
   # E2E dual-assignment (NMS-free)
   tal_topk: 10                 # one2many positives per GT (reduced from 20 to fix positive-rate flooding)
-  assigner_radius_scale: 1.5  # containment radius multiplier
+  assigner_radius_scale: 3.0 # containment radius multiplier
   assigner_alpha: 0.5         # cls score exponent in align = cls^α × piou^β
   assigner_beta: 6.0          # Polar-IoU exponent — high β creates geometric dominance for dense cells
   align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
