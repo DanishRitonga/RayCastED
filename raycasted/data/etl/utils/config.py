@@ -62,6 +62,7 @@ class TrainingSettings(BaseModel):
     # Pixel-Level Balancing
     plb_enabled: bool = False     # area-based fg weighting to boost small nuclei
     bg_cls_decay: float = 1.0     # background classification loss decay (1.0=full, 0.0=off)
+    fg_cls_boost: float = 1.0     # fg cls boost by alignment quality (1.0=disabled)
 
     # Alignment threshold
     align_threshold: float = 0.0
