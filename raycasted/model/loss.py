@@ -279,7 +279,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         bg_fg_ratio: int = 3,
         plb_enabled: bool = False,
         bg_cls_decay: float = 1.0,
-        fg_cls_boost: float = 1.0,
+        fg_cls_boost: float = 0.0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -302,7 +302,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # Classification loss weighting:
         #   bg_cls_decay: downweight bg anchor cls gradient (e.g., 0.5)
-        #   fg_cls_boost: amplify fg by alignment quality (1.0 = disabled)
+        #   fg_cls_boost: amplify fg by alignment quality (0.0 = disabled)
         #     weight = bg_cls_decay for bg, (1.0 + fg_cls_boost * quality) for fg
         self.bg_cls_decay = bg_cls_decay
         self.fg_cls_boost = fg_cls_boost
@@ -626,7 +626,7 @@ class RayCastE2ELoss(E2ELoss):
         bg_fg_ratio: int = 3,
         plb_enabled: bool = False,
         bg_cls_decay: float = 1.0,
-        fg_cls_boost: float = 1.0,
+        fg_cls_boost: float = 0.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None

@@ -72,7 +72,7 @@ training:
   # Pixel-Level Balancing: area-based fg weighting to boost small nuclei
   plb_enabled: true             # Enable PLB (area-based weighting)
   bg_cls_decay: 0.5             # Background classification loss decay (1.0=full, 0.0=disabled)
-  fg_cls_boost: 1.0             # Fg cls boost by alignment quality: weight = 1 + boost * quality (1.0=disabled)
+  fg_cls_boost: 0.0             # Fg cls boost by alignment quality: weight = 1 + boost * quality (0.0=disabled)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false
