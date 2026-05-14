@@ -68,6 +68,17 @@ training:
   log_ray_loss: true           # Log-space L1 on rays — equalizes relative errors across scales
   bg_fg_ratio: 3               # Max background anchors per foreground anchor in cls loss (subsampling)
 
+  # Soft targets — use assigner's quality-weighted alignment scores instead of
+  # hard 0/1 binarisation. Prevents class collapse by giving the classifier a
+  # graded signal: "this is a confident class-2 prediction" vs "this is a marginal
+  # class-1 prediction."
+  soft_targets: true
+
+  # Per-class inverse-frequency weights (sqrt-smoothed).
+  # PanNuke distribution: Neo=40.8%, Conn=26.7%, Inflam=17.0%, Epi=14.0%, Dead=1.5%
+  # Weights = sqrt(max_freq / class_freq), normalised so min = 1.0
+  class_weights: [1.0, 1.56, 1.27, 5.21, 1.72]
+
   # Pixel-Level Balancing: area-based fg weighting to boost small nuclei
   plb_enabled: true             # Enable PLB (area-based weighting)
   bg_cls_decay: 0.5             # Background classification loss decay (1.0=full, 0.0=disabled)

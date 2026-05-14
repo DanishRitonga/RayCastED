@@ -219,6 +219,7 @@ def _focal_loss(
     target_scores: torch.Tensor,
     gamma: float = 2.0,
     alpha: float = 0.25,
+    class_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Standard focal loss (Lin et al., 2017) for multi-label classification.
 
@@ -233,9 +234,13 @@ def _focal_loss(
 
     Args:
         pred_scores: [B, N, C] raw logits from the detection head.
-        target_scores: [B, N, C] binary classification targets (0 or 1).
+        target_scores: [B, N, C] classification targets. When ``soft_targets=True``,
+            these are quality-weighted alignment scores in [0, 1]. Otherwise binary 0/1.
         gamma: Focusing parameter. Higher values down-weight easy examples more.
         alpha: Positive sample weight factor. Standard: 0.25 (fg=0.25, bg=0.75).
+        class_weights: [C] per-class weight applied to positive samples. When provided,
+            each class's positive loss is scaled by its weight — use inverse-frequency
+            weights to rebalance rare classes.
 
     Returns:
         [B, N, C] element-wise focal loss (no reduction).
@@ -246,7 +251,17 @@ def _focal_loss(
     p_t = target_scores * pred_prob + (1 - target_scores) * (1 - pred_prob)
     modulating_factor = (1.0 - p_t) ** gamma
     alpha_factor = target_scores * alpha + (1 - target_scores) * (1 - alpha)
-    return modulating_factor * alpha_factor * ce
+
+    loss = modulating_factor * alpha_factor * ce
+
+    # Per-class weighting for positive samples — rebalances rare classes
+    if class_weights is not None:
+        # class_weights shape [C] → broadcast over [B, N, C]
+        # Scale only where target > 0 (positive class); bg stays as-is
+        pos_mask = (target_scores > 0).float()
+        loss = loss * (1.0 + pos_mask * (class_weights.unsqueeze(0).unsqueeze(0) - 1.0))
+
+    return loss
 
 
 class RayCastDetectionLoss(v8DetectionLoss):
@@ -280,6 +295,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         plb_enabled: bool = False,
         bg_cls_decay: float = 1.0,
         fg_cls_boost: float = 0.0,
+        soft_targets: bool = False,
+        class_weights: torch.Tensor | None = None,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -306,6 +323,15 @@ class RayCastDetectionLoss(v8DetectionLoss):
         #     weight = bg_cls_decay for bg, (1.0 + fg_cls_boost * quality) for fg
         self.bg_cls_decay = bg_cls_decay
         self.fg_cls_boost = fg_cls_boost
+
+        # Soft targets — use assigner's quality-weighted alignment scores directly
+        # instead of hard binarising to 0/1. Gives the classifier a graded signal
+        # that distinguishes strong matches from weak ones.
+        self.soft_targets = soft_targets
+
+        # Per-class inverse-frequency weights [C]. When provided, scales positive
+        # classification loss per class to rebalance rare categories.
+        self.register_buffer('class_weights', class_weights)
 
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
@@ -432,13 +458,20 @@ class RayCastDetectionLoss(v8DetectionLoss):
             plb_weights = plb_weights * fg_mask.float()  # zero for bg
 
         # --- L_cls: BCE or Focal loss with bg subsampling ---
-        # Binarize targets — hard 0/1. Soft alignment scores are noisy and
-        # prevent the classifier from converging. Alignment quality belongs
-        # in the centerness branch, not the classification branch.
         # Save raw quality before binarization for fg_cls_boost.
         fg_quality = target_scores.float().clone()
-        cls_targets = fg_quality.clone()
-        cls_targets[cls_targets > 0] = 1.0
+        if self.soft_targets:
+            # Keep assigner's quality-weighted alignment scores (e.g., 0.87 for a
+            # strong match, 0.31 for a weak one). This gives the classifier a graded
+            # signal — the model learns "this is a confident class-2 prediction" vs
+            # "this is a marginal class-1 prediction." Prevents class collapse by
+            # preserving the quality discriminability that hard 0/1 targets destroy.
+            cls_targets = fg_quality.clone()
+        else:
+            # Hard binarize — legacy behaviour. Alignment quality belongs in the
+            # centerness branch, not the classification branch.
+            cls_targets = fg_quality.clone()
+            cls_targets[cls_targets > 0] = 1.0
 
         # Subsample background anchors to cap bg:fg ratio per batch element.
         # Without this, P2's 4096 anchors overwhelm the ~1200 fg anchors,
@@ -459,15 +492,22 @@ class RayCastDetectionLoss(v8DetectionLoss):
                     ignore_mask[b, bg_indices[drop_idx]] = True
                     cls_targets[b, bg_indices[drop_idx]] = 0
 
+        # Class weights — scale positive cls loss per class to rebalance rare categories
+        cw = self.class_weights  # [C] or None
+
         if self.focal_gamma > 0:
             loss_cls = _focal_loss(
                 pred_scores.float(),
                 cls_targets,
                 gamma=self.focal_gamma,
                 alpha=self.focal_alpha,
+                class_weights=cw,
             )
         else:
             loss_cls = self.bce(pred_scores.float(), cls_targets)
+            if cw is not None:
+                pos_mask = (cls_targets > 0).float()
+                loss_cls = loss_cls * (1.0 + pos_mask * (cw.unsqueeze(0).unsqueeze(0) - 1.0))
 
         if self.bg_fg_ratio > 0:
             loss_cls = loss_cls.masked_fill(ignore_mask, 0.0)
@@ -482,12 +522,17 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 bg_weight = torch.where(cls_targets > 0, 1.0, self.bg_cls_decay)
             loss_cls = loss_cls * bg_weight
 
-        # Zero bg cls loss for o2o branch — only ~300 fg vs ~86k bg anchors means
-        # bg signal overwhelms the sparse o2o assignments. o2o only needs to learn
-        # positive confidence for its matched anchors; explicit negatives hurt more
-        # than they help at this extreme imbalance ratio.
+        # o2o branch: heavily decay bg cls instead of zeroing entirely.
+        # The previous approach (loss * cls_targets) removed ALL negative signal,
+        # which prevented the classifier from learning inter-class discrimination.
+        # The classifier only learned "this IS class Y" but never "this is NOT class X",
+        # causing collapse to the majority class. We still apply aggressive bg decay
+        # (bg_cls_decay²) to prevent bg from overwhelming sparse o2o positives,
+        # but keep a small negative gradient for each non-target class.
         if getattr(self, 'branch_name', '') == 'o2o' and self.bg_cls_decay < 1.0:
-            loss_cls = loss_cls * cls_targets  # zero out bg (cls_targets=0 for bg)
+            o2o_bg_weight = self.bg_cls_decay ** 2  # extra-aggressive for o2o
+            o2o_bg = torch.where(cls_targets > 0, 1.0, o2o_bg_weight)
+            loss_cls = loss_cls * o2o_bg
 
         target_scores_sum = max(cls_targets.sum(), 1)
         loss[1] = loss_cls.sum() / target_scores_sum
@@ -627,6 +672,8 @@ class RayCastE2ELoss(E2ELoss):
         plb_enabled: bool = False,
         bg_cls_decay: float = 1.0,
         fg_cls_boost: float = 0.0,
+        soft_targets: bool = False,
+        class_weights: torch.Tensor | None = None,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -655,6 +702,8 @@ class RayCastE2ELoss(E2ELoss):
             plb_enabled=plb_enabled,
             bg_cls_decay=bg_cls_decay,
             fg_cls_boost=fg_cls_boost,
+            soft_targets=soft_targets,
+            class_weights=class_weights,
         )
         super().__init__(model, loss_fn=loss_fn)
 

@@ -158,6 +158,30 @@ class _RayCastCriterionWrapper:
         self._max_epochs = max_epochs
         self._training_config = training_config
 
+    def _build_class_weights(self, tcfg: dict):
+        """Build per-class inverse-frequency weights from config or training data.
+
+        Uses ``class_weights`` from config. Supports:
+          - None: no weighting (default)
+          - 'auto': compute from training data class distribution (requires
+            trainer to call set_class_weights later)
+          - list[float]: explicit per-class weights
+
+        Returns:
+            torch.Tensor [nc] or None.
+        """
+        import torch as _torch
+
+        cw = tcfg.get('class_weights', None)
+        if cw is None:
+            return None
+        if isinstance(cw, str) and cw == 'auto':
+            # Placeholder — will be replaced by set_class_weights after data setup
+            return None
+        if isinstance(cw, (list, tuple)):
+            return _torch.tensor(cw, dtype=_torch.float32)
+        return None
+
     def __call__(self):
         tcfg = self._training_config or {}
         return RayCastE2ELoss(
@@ -180,6 +204,8 @@ class _RayCastCriterionWrapper:
             plb_enabled=tcfg.get('plb_enabled', False),
             bg_cls_decay=tcfg.get('bg_cls_decay', 1.0),
             fg_cls_boost=tcfg.get('fg_cls_boost', 0.0),
+            soft_targets=tcfg.get('soft_targets', False),
+            class_weights=self._build_class_weights(tcfg),
         )
 
 
