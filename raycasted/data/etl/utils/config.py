@@ -64,6 +64,12 @@ class TrainingSettings(BaseModel):
     bg_cls_decay: float = 1.0     # background classification loss decay (1.0=full, 0.0=off)
     fg_cls_boost: float = 0.0     # fg cls boost by alignment quality (0.0=disabled)
 
+    # Soft targets — keep assigner quality scores instead of hard 0/1 binarisation
+    soft_targets: bool = False
+
+    # Per-class inverse-frequency weights (sqrt-smoothed). None = no weighting.
+    class_weights: list[float] | None = None
+
     # Alignment threshold
     align_threshold: float = 0.0
 
