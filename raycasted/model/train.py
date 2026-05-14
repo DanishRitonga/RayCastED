@@ -167,22 +167,18 @@ class _RayCastCriterionWrapper:
             assigner_radius_scale=tcfg.get('assigner_radius_scale', 1.5),
             assigner_alpha=tcfg.get('assigner_alpha', 0.5),
             assigner_beta=tcfg.get('assigner_beta', 6.0),
-            use_hungarian_o2o=tcfg.get('use_hungarian_o2o', True),
             log_ray_loss=tcfg.get('log_ray_loss', False),
-            cost_class=tcfg.get('cost_class', 1.0),
-            cost_centroid=tcfg.get('cost_centroid', 1.0),
-            cost_ray=tcfg.get('cost_ray', 1.0),
             focal_gamma=tcfg.get('focal_gamma', 0.0),
             focal_alpha=tcfg.get('focal_alpha', 0.25),
             align_threshold=tcfg.get('align_threshold', 0.0),
             gradnorm=tcfg.get('gradnorm', False),
             gradnorm_alpha=tcfg.get('gradnorm_alpha', 0.5),
             gradnorm_warmup_epochs=tcfg.get('gradnorm_warmup_epochs', 5),
-            assigner_warmup_epochs=tcfg.get('assigner_warmup_epochs', 0),
-            steps_per_epoch=tcfg.get('steps_per_epoch', 133),
             lambda_aux_xy=tcfg.get('aux_xy_weight', 0.0),
             aux_xy_ramp_epochs=tcfg.get('aux_xy_ramp_epochs', 100),
             bg_fg_ratio=tcfg.get('bg_fg_ratio', 3),
+            plb_enabled=tcfg.get('plb_enabled', False),
+            bg_cls_decay=tcfg.get('bg_cls_decay', 1.0),
         )
 
 
@@ -315,6 +311,7 @@ def _lr_log_callback(trainer):
     groups is invisible and hard to debug.
     """
     from ultralytics.utils import LOGGER
+
     pg_lrs = [pg['lr'] for pg in trainer.optimizer.param_groups]
     pg_names = [pg.get('name', f'pg{i}') for i, pg in enumerate(trainer.optimizer.param_groups)]
     lr_str = ', '.join(f'{n}={lr:.2e}' for n, lr in zip(pg_names, pg_lrs))

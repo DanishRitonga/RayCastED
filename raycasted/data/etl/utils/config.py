@@ -59,15 +59,12 @@ class TrainingSettings(BaseModel):
     log_ray_loss: bool = False    # log-space L1 on rays for scale-invariant errors
     bg_fg_ratio: int = 3          # max bg anchors per fg anchor in cls loss
 
-    # Unified assignment cost
-    cost_class: float = 1.0
-    cost_centroid: float = 1.0
-    cost_ray: float = 1.0
-    align_threshold: float = 0.0
+    # Pixel-Level Balancing
+    plb_enabled: bool = False     # area-based fg weighting to boost small nuclei
+    bg_cls_decay: float = 1.0     # background classification loss decay (1.0=full, 0.0=off)
 
-    # Assignment warmup
-    assigner_warmup_epochs: int = 0
-    steps_per_epoch: int = 133
+    # Alignment threshold
+    align_threshold: float = 0.0
 
     # Weighted sampling
     weighted_sampling: bool = False
@@ -99,11 +96,10 @@ class TrainingSettings(BaseModel):
     gradnorm_alpha: float = 0.5  # restoring force: 0=uniform, 1=aggressive
     gradnorm_warmup_epochs: int = 5  # use static weights for first N epochs  # kernel size for polygon refinement block
 
-    # E2E dual-assignment (NMS-free)
+    # E2E dual-TAL assignment (NMS-free)
     tal_topk: int = 13  # one2many positives per GT
     assigner_alpha: float = 0.5  # cls^alpha in alignment metric
     assigner_beta: float = 6.0  # iou^beta in alignment metric
-    use_hungarian_o2o: bool = False  # Hungarian matching for one2one branch
 
     # Auxiliary xy head — bypass backbone→head bottleneck
     aux_xy_weight: float = 0.0  # Huber loss weight (0 = disabled, 10.0 = recommended)

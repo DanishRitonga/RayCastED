@@ -31,7 +31,7 @@ from ultralytics.utils.tal import make_anchors
 
 from raycasted.data.etl.ops.iou import polar_iou_torch
 from raycasted.data.etl.ops.loss import angular_smoothness_loss_torch
-from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
+from raycasted.model.tal import RayCastAssigner
 
 logger = logging.getLogger(__name__)
 
@@ -276,11 +276,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
         gradnorm_manager: GradNormManager | None = None,
         focal_gamma: float = 0.0,
         focal_alpha: float = 0.25,
-        cost_class: float = 1.0,
-        cost_centroid: float = 1.0,
-        cost_ray: float = 1.0,
-        assigner_warmup_epochs: int = 0,
         bg_fg_ratio: int = 3,
+        plb_enabled: bool = False,
+        bg_cls_decay: float = 1.0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -298,6 +296,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.focal_gamma = focal_gamma
         self.focal_alpha = focal_alpha
 
+        # Pixel-Level Balancing — area-based fg weighting to boost small nuclei
+        self.plb_enabled = plb_enabled
+
+        # Background cls loss decay — downweight bg anchor classification gradient
+        self.bg_cls_decay = bg_cls_decay
+
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
             topk=tal_topk,
@@ -308,10 +312,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
             topk2=tal_topk2,
             radius_scale=assigner_radius_scale,
             align_threshold=align_threshold,
-            cost_class=cost_class,
-            cost_centroid=cost_centroid,
-            cost_ray=cost_ray,
-            warmup_epochs=assigner_warmup_epochs,
         )
 
         # Loss weights — decoded normalised xy space [0,1].
@@ -416,6 +416,16 @@ class RayCastDetectionLoss(v8DetectionLoss):
             mask_gt,
         )
 
+        # --- Pixel-Level Balancing: area-based fg weight (boost small nuclei) ---
+        plb_weights = None
+        if self.plb_enabled:
+            gt_ray_sum = gt_bboxes[:, :, 2:].sum(dim=-1)  # [B, N_gt_max]
+            gt_ray_sum = gt_ray_sum * mask_gt.squeeze(-1).float()  # zero out padding
+            total_area = gt_ray_sum.sum(dim=-1, keepdim=True).clamp(min=1.0)  # [B, 1]
+            plb_per_gt = 2.0 * (1.0 - gt_ray_sum / total_area)  # [B, N_gt_max]
+            plb_weights = torch.gather(plb_per_gt, 1, target_gt_idx)  # [B, N_anchors]
+            plb_weights = plb_weights * fg_mask.float()  # zero for bg
+
         # --- L_cls: BCE or Focal loss with bg subsampling ---
         # Binarize targets — hard 0/1. Soft alignment scores are noisy and
         # prevent the classifier from converging. Alignment quality belongs
@@ -455,6 +465,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
         if self.bg_fg_ratio > 0:
             loss_cls = loss_cls.masked_fill(ignore_mask, 0.0)
 
+        if self.bg_cls_decay < 1.0:
+            bg_weight = torch.where(cls_targets > 0, 1.0, self.bg_cls_decay)
+            loss_cls = loss_cls * bg_weight
+
         target_scores_sum = max(cls_targets.sum(), 1)
         loss[1] = loss_cls.sum() / target_scores_sum
 
@@ -462,9 +476,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
         _cls_fg_sum = (loss_cls * cls_targets).sum().item() / max(target_scores_sum, 1)
         _cls_bg_sum = (loss_cls * (1 - cls_targets)).sum().item() / max(target_scores_sum, 1)
 
-        # --- Polygon regression losses (foreground only, uniform weight) ---
+        # --- Polygon regression losses (foreground only) ---
         n_fg = max(fg_mask.sum(), 1)
         if n_fg > 0:
+            fg_plb = plb_weights[fg_mask] if plb_weights is not None else None
             fg_pred_rays = pred_rays[fg_mask]
             fg_target_xy = target_bboxes[fg_mask][:, :2]
             fg_target_rays = target_bboxes[fg_mask][:, 2:]
@@ -475,6 +490,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
             fg_pred_xy = pred_xy[fg_mask]
             loss_xy = F.huber_loss(fg_pred_xy.float(), fg_target_xy, reduction='none', delta=0.05).mean(-1)
+            if fg_plb is not None:
+                loss_xy = loss_xy * fg_plb
             loss[0] = loss_xy.sum() / n_fg
 
             # L_L1: Uniform MAE on 32 rays (linear or log-space)
@@ -482,14 +499,22 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 loss_l1 = _log_space_ray_loss(fg_pred_rays, fg_target_rays)
             else:
                 loss_l1 = (fg_pred_rays - fg_target_rays).abs().mean(-1)
+            if fg_plb is not None:
+                loss_l1 = loss_l1 * fg_plb
             loss[2] = loss_l1.sum() / n_fg
 
             # L_PolarIoU: -log(PolarIoU) — matches PolarMask formulation
             fg_piou = polar_iou_torch(fg_pred_rays, fg_target_rays)
-            loss[3] = (-torch.log(fg_piou + 1e-7)).sum() / n_fg
+            piou_loss = -torch.log(fg_piou + 1e-7)
+            if fg_plb is not None:
+                piou_loss = piou_loss * fg_plb
+            loss[3] = piou_loss.sum() / n_fg
 
             # L_smooth: Angular smoothness on predicted rays
-            loss[4] = angular_smoothness_loss_torch(fg_pred_rays).sum() / n_fg
+            smooth_loss = angular_smoothness_loss_torch(fg_pred_rays)
+            if fg_plb is not None:
+                smooth_loss = smooth_loss * fg_plb
+            loss[4] = smooth_loss.sum() / n_fg
         else:
             # DDP safety — touch all prediction tensors to avoid unused-gradient errors
             loss[0] += (pred_xy * 0).sum()
@@ -508,9 +533,17 @@ class RayCastDetectionLoss(v8DetectionLoss):
             _branch = getattr(self, 'branch_name', '???')
             LOGGER.info(
                 '\nDIAG %s step=%d | fg=%d/%d | raw: xy=%.4f cls=%.4f(fg=%.3f bg=%.3f) l1=%.4f piou=%.4f smooth=%.5f',
-                _branch, self._diag_step, n_fg_actual, fg_mask.numel(),
-                _raw[0].item(), _raw[1].item(), _cls_fg_sum, _cls_bg_sum,
-                _raw[2].item(), _raw[3].item(), _raw[4].item(),
+                _branch,
+                self._diag_step,
+                n_fg_actual,
+                fg_mask.numel(),
+                _raw[0].item(),
+                _raw[1].item(),
+                _cls_fg_sum,
+                _cls_bg_sum,
+                _raw[2].item(),
+                _raw[3].item(),
+                _raw[4].item(),
             )
 
         # --- Store unweighted per-task losses for GradNorm ---
@@ -561,22 +594,18 @@ class RayCastE2ELoss(E2ELoss):
         assigner_radius_scale: float = 1.5,
         assigner_alpha: float = 0.5,
         assigner_beta: float = 6.0,
-        use_hungarian_o2o: bool = True,
         log_ray_loss: bool = False,
-        cost_class: float = 1.0,
-        cost_centroid: float = 1.0,
-        cost_ray: float = 1.0,
         focal_gamma: float = 0.0,
         focal_alpha: float = 0.25,
         align_threshold: float = 0.0,
         gradnorm: bool = False,
         gradnorm_alpha: float = 0.5,
         gradnorm_warmup_epochs: int = 5,
-        assigner_warmup_epochs: int = 0,
-        steps_per_epoch: int = 133,
         lambda_aux_xy: float = 0.0,
         aux_xy_ramp_epochs: int = 100,
         bg_fg_ratio: int = 3,
+        plb_enabled: bool = False,
+        bg_cls_decay: float = 1.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -601,11 +630,9 @@ class RayCastE2ELoss(E2ELoss):
             focal_gamma=focal_gamma,
             focal_alpha=focal_alpha,
             align_threshold=align_threshold,
-            cost_class=cost_class,
-            cost_centroid=cost_centroid,
-            cost_ray=cost_ray,
-            assigner_warmup_epochs=assigner_warmup_epochs,
             bg_fg_ratio=bg_fg_ratio,
+            plb_enabled=plb_enabled,
+            bg_cls_decay=bg_cls_decay,
         )
         super().__init__(model, loss_fn=loss_fn)
 
@@ -623,72 +650,34 @@ class RayCastE2ELoss(E2ELoss):
                 branch.hyp = get_cfg()
             branch.hyp.epochs = max_epochs
 
-        # CRITICAL: Override parent's hardcoded tal_topk values with our custom values
-        # Parent E2ELoss hardcodes tal_topk=10 for one2many and tal_topk=7 for one2one.
+        # Override parent's hardcoded tal_topk values with our custom values.
+        # Stock Ultralytics: o2m topk=10/topk2=10, o2o topk=7/topk2=1.
+        # We use the same assigner class (RayCastAssigner) for both branches,
+        # differing only in topk/topk2 — exactly like YOLO26 dual-TAL.
         #
-        # For one2many: topk=tal_topk, topk2=tal_topk (no secondary filtering)
-        # For one2one: topk=tal_topk//2, topk2=1 (select k/2 candidates, filter to 1)
+        # o2m: topk=tal_topk, topk2=tal_topk → dense multi-anchor supervision
+        # o2o: topk=pool, topk2=1 → single best anchor per GT (NMS-free)
         #
-        # Ultralytics' NMS-free mechanism works in two stages:
+        # Ultralytics' NMS-free mechanism (select_highest_overlaps):
         #   1. select_topk_candidates picks `topk` anchors per GT
-        #   2. select_highest_overlaps checks `topk2 != topk` → keeps only `topk2` best
-        # Setting one2one.topk=1 directly SKIPS the candidate pool — the assigner has
-        # no choice, so it can't pick the best anchor. Using topk=7,topk2=1 (like stock
-        # Ultralytics) gives the assigner 7 candidates and picks the single best overlap.
+        #   2. if topk2 != topk → keeps only `topk2` best per GT
         self.one2many.assigner.topk = tal_topk
         self.one2many.assigner.topk2 = tal_topk  # no secondary filtering
 
-        if use_hungarian_o2o:
-            # Replace the one2one assigner with Hungarian matching for globally
-            # optimal 1:1 assignment — critical for dense touching-cell scenes
-            # where greedy TAL causes assignment collisions.
-            self.one2one.assigner = HungarianRayCastAssigner(
-                topk=1,
-                num_classes=self.one2one.assigner.num_classes,
-                alpha=assigner_alpha,
-                beta=assigner_beta,
-                cost_class=cost_class,
-                cost_centroid=cost_centroid,
-                cost_ray=cost_ray,
-                stride=self.one2one.assigner.stride if hasattr(self.one2one.assigner, 'stride') else [8, 16, 32],
-                topk2=1,
-                radius_scale=assigner_radius_scale,
-                align_threshold=align_threshold,
-                warmup_epochs=assigner_warmup_epochs,
-            )
-        else:
-            one2one_pool = max(tal_topk // 2, 7)
-            self.one2one.assigner = RayCastAssigner(
-                topk=one2one_pool,
-                num_classes=self.one2one.assigner.num_classes,
-                alpha=assigner_alpha,
-                beta=assigner_beta,
-                stride=self.one2one.assigner.stride if hasattr(self.one2one.assigner, 'stride') else [8, 16, 32],
-                topk2=1,
-                radius_scale=assigner_radius_scale,
-                align_threshold=align_threshold,
-                warmup_epochs=assigner_warmup_epochs,
-            )
+        one2one_pool = max(tal_topk // 2, 7)
+        self.one2one.assigner.topk = one2one_pool
+        self.one2one.assigner.topk2 = 1  # single best anchor per GT
 
         # Validate E2E architecture integrity
-        if use_hungarian_o2o:
-            assert isinstance(self.one2one.assigner, HungarianRayCastAssigner), (
-                'E2E violation: one2one assigner must be HungarianRayCastAssigner'
-            )
-        else:
-            assert self.one2one.assigner.topk2 == 1, (
-                f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
-            )
+        assert self.one2one.assigner.topk2 == 1, (
+            f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
+        )
         assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
             f'E2E violation: one2many.topk2 ({self.one2many.assigner.topk2}) != topk ({self.one2many.assigner.topk})'
         )
 
-        # Assignment warmup: centroid-distance matching for early training.
-        # Random backbone features produce garbage ray predictions, making
-        # Polar-IoU meaningless. Centroid distance gives stable assignments
-        # even with random features, bootstrapping feature learning.
-        self.assigner_warmup_epochs = assigner_warmup_epochs
-        self.steps_per_epoch = steps_per_epoch
+        # Steps per epoch (for epoch estimation in update())
+        self.steps_per_epoch = 133
 
         # Smooth loss: reverse anneal — starts at 0, ramps up to peak, then holds.
         # Early training: model focuses on detection (xy, cls, L1).
@@ -710,30 +699,16 @@ class RayCastE2ELoss(E2ELoss):
 
         # Validate E2E integrity on first update (catches config drift)
         if self.updates == 1:
-            is_hungarian = isinstance(self.one2one.assigner, HungarianRayCastAssigner)
-            if is_hungarian:
-                a = self.one2one.assigner
-                o2m = self.one2many.assigner
-                print(
-                    f'✓ E2E NMS-free: o2m.topk={o2m.topk}, '
-                    f'o2o=Hungarian (cls={a.cost_class}, xy={a.cost_centroid}, ray={a.cost_ray}), '
-                    f'unified_cost=o2m(cls={o2m.cost_class}, xy={o2m.cost_centroid}, ray={o2m.cost_ray})'
-                )
-            else:
-                assert self.one2one.assigner.topk2 == 1, (
-                    f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
-                )
-                print(
-                    f'✓ E2E NMS-free: o2m.topk={self.one2many.assigner.topk}, '
-                    f'o2o.topk={self.one2one.assigner.topk}, o2o.topk2=1'
-                )
+            print(
+                f'✓ E2E NMS-free (dual-TAL): o2m.topk={self.one2many.assigner.topk}, '
+                f'o2o.topk={self.one2one.assigner.topk}, o2o.topk2=1'
+            )
+            assert self.one2one.assigner.topk2 == 1, (
+                f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
+            )
             assert self.one2many.assigner.topk == self.one2many.assigner.topk2, (
                 f'E2E violation: one2many topk={self.one2many.assigner.topk} != topk2={self.one2many.assigner.topk2}'
             )
-
-            warmup = getattr(self.one2many.assigner, 'warmup_epochs', 0)
-            if warmup > 0:
-                print(f'  Assignment warmup: centroid-distance for epochs 0-{warmup}, then Polar-IoU (sigma=0.15)')
 
             if self._aux_xy_base > 0:
                 print(f'  Auxiliary XY head: weight={self._aux_xy_base}, decay_epoch={self.aux_xy_decay_epoch}')
@@ -745,32 +720,9 @@ class RayCastE2ELoss(E2ELoss):
         t_smooth = min(self.updates / self.smooth_anneal_epochs, 1.0)
         lambda_smooth = self.smooth_start + t_smooth * (self.smooth_end - self.smooth_start)
 
-        # L1 ray loss: near-zero during assignment warmup, then linearly ramp to full.
-        # Warmup focuses gradient budget on centroids + classification.
-        # Small floor (0.1) keeps ray parameters alive for DDP.
-        # FIX: linear ramp over 20 epochs after warmup (was abrupt step → optimizer destabilization).
-        l1_floor = 0.1
-        l1_target = 25.0
-        l1_ramp_epochs = 20  # epochs to ramp from floor to target
-        if self.assigner_warmup_epochs > 0 and current_epoch < self.assigner_warmup_epochs:
-            lambda_l1 = l1_floor
-        elif current_epoch < self.assigner_warmup_epochs + l1_ramp_epochs:
-            t = (current_epoch - self.assigner_warmup_epochs) / l1_ramp_epochs
-            lambda_l1 = l1_floor + t * (l1_target - l1_floor)
-        else:
-            lambda_l1 = l1_target
-
-        # PolarIoU: same ramp logic as L1 — meaningless with random features.
-        piou_floor = 0.1
-        piou_target = 2.0
-        piou_ramp_epochs = 20
-        if self.assigner_warmup_epochs > 0 and current_epoch < self.assigner_warmup_epochs:
-            lambda_piou = piou_floor
-        elif current_epoch < self.assigner_warmup_epochs + piou_ramp_epochs:
-            t = (current_epoch - self.assigner_warmup_epochs) / piou_ramp_epochs
-            lambda_piou = piou_floor + t * (piou_target - piou_floor)
-        else:
-            lambda_piou = piou_target
+        # Static lambdas — no warmup ramp
+        lambda_l1 = 25.0
+        lambda_piou = 2.0
 
         for branch in (self.one2many, self.one2one):
             branch.lambda_smooth = lambda_smooth
@@ -785,11 +737,6 @@ class RayCastE2ELoss(E2ELoss):
             self.aux_xy_lambda = self._aux_xy_base * max(1.0 - decay_progress, 0.0)
         elif self._aux_xy_base > 0:
             self.aux_xy_lambda = self._aux_xy_base
-
-        # Propagate epoch to assigners for warmup scheduling
-        for assigner in (self.one2many.assigner, self.one2one.assigner):
-            if hasattr(assigner, 'set_epoch'):
-                assigner.set_epoch(current_epoch)
 
     def __call__(self, preds, batch):
         """Compute E2E losses + auxiliary xy loss on neck features."""

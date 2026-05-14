@@ -49,22 +49,12 @@ training:
   # Learning rate
   cos_lr: true               # cosine LR schedule. Was false
 
-  # E2E dual-assignment (NMS-free)
-  tal_topk: 10                 # one2many positives per GT (reduced from 20 to fix positive-rate flooding)
-  assigner_radius_scale: 3.0 # containment radius multiplier
+  # E2E dual-TAL assignment (NMS-free, like YOLO26)
+  tal_topk: 15                 # one2many positives per GT — dynamic topk masks garbage candidates
+  assigner_radius_scale: 1.0  # containment radius multiplier (1.0 = 75th-pctile GT radius)
   assigner_alpha: 0.5         # cls score exponent in align = cls^α × piou^β
   assigner_beta: 6.0          # Polar-IoU exponent — high β creates geometric dominance for dense cells
   align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
-  use_hungarian_o2o: true     # Hungarian matching for one2one branch (globally optimal)
-
-  # Unified assignment cost (both one2many and one2one branches)
-  cost_class: 1.0             # focal classification cost weight
-  cost_centroid: 1.0          # L2 centroid distance cost weight
-  cost_ray: 1.0               # log-space L1 ray cost weight
-
-  # Assignment warmup: use centroid-distance matching for early epochs
-  assigner_warmup_epochs: 50  # epochs of centroid-distance before switching to Polar-IoU
-  steps_per_epoch: 133        # batches per epoch (for warmup scheduling)
 
   # Auxiliary XY head: bypasses 4-layer head stack to give backbone direct xy gradient
   # Addresses H7 (backbone feature poverty) — backbone can't learn spatial features
@@ -78,6 +68,10 @@ training:
                                # Background samples get (1-alpha)=0.75 weight (they dominate numerically)
   log_ray_loss: true           # Log-space L1 on rays — equalizes relative errors across scales
   bg_fg_ratio: 3               # Max background anchors per foreground anchor in cls loss (subsampling)
+
+  # Pixel-Level Balancing: area-based fg weighting to boost small nuclei
+  plb_enabled: true             # Enable PLB (area-based weighting)
+  bg_cls_decay: 0.5             # Background classification loss decay (1.0=full, 0.0=disabled)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false
