@@ -458,9 +458,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
         target_scores_sum = max(cls_targets.sum(), 1)
         loss[1] = loss_cls.sum() / target_scores_sum
 
-        # Track fg/bg cls contributions for diagnostics
-        _cls_fg_sum = (loss_cls * cls_targets).sum().item()
-        _cls_bg_sum = (loss_cls * (1 - cls_targets)).sum().item()
+        # Track fg/bg cls contributions for diagnostics (normalized same as loss[1])
+        _cls_fg_sum = (loss_cls * cls_targets).sum().item() / max(target_scores_sum, 1)
+        _cls_bg_sum = (loss_cls * (1 - cls_targets)).sum().item() / max(target_scores_sum, 1)
 
         # --- Polygon regression losses (foreground only, uniform weight) ---
         n_fg = max(fg_mask.sum(), 1)
@@ -505,9 +505,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
         if self._diag_step % 100 == 0:
             _raw = loss.detach().clone()
             n_fg_actual = fg_mask.sum().item() if fg_mask.sum() > 0 else 0
+            _branch = getattr(self, 'branch_name', '???')
             LOGGER.info(
-                'DIAG step=%d | fg=%d/%d | raw: xy=%.4f cls=%.4f(fg=%.3f bg=%.3f) l1=%.4f piou=%.4f smooth=%.5f',
-                self._diag_step, n_fg_actual, fg_mask.numel(),
+                '\nDIAG %s step=%d | fg=%d/%d | raw: xy=%.4f cls=%.4f(fg=%.3f bg=%.3f) l1=%.4f piou=%.4f smooth=%.5f',
+                _branch, self._diag_step, n_fg_actual, fg_mask.numel(),
                 _raw[0].item(), _raw[1].item(), _cls_fg_sum, _cls_bg_sum,
                 _raw[2].item(), _raw[3].item(), _raw[4].item(),
             )
@@ -607,6 +608,10 @@ class RayCastE2ELoss(E2ELoss):
             bg_fg_ratio=bg_fg_ratio,
         )
         super().__init__(model, loss_fn=loss_fn)
+
+        # Tag branches so DIAG logging can label output
+        self.one2many.branch_name = 'o2m'
+        self.one2one.branch_name = 'o2o'
 
         # Fix: parent E2ELoss reads one2one.hyp.epochs for the decay schedule,
         # but RayCastDetectionLoss (mock-based init) doesn't set hyp correctly.

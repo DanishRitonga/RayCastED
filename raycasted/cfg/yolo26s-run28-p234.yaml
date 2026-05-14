@@ -15,7 +15,7 @@
 #   - PAN downsample: P2→P3→P4 (concat FPN P3, backbone P4)
 #   - Detection at P2/4 (layer 14), P3/8 (layer 17), P4/16 (layer 20)
 
-nc: 80
+nc: 5
 end2end: True
 reg_max: 1
 scales:
