@@ -179,6 +179,7 @@ class _RayCastCriterionWrapper:
             bg_fg_ratio=tcfg.get('bg_fg_ratio', 3),
             plb_enabled=tcfg.get('plb_enabled', False),
             bg_cls_decay=tcfg.get('bg_cls_decay', 1.0),
+            fg_cls_boost=tcfg.get('fg_cls_boost', 1.0),
         )
 
 

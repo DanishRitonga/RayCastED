@@ -279,6 +279,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         bg_fg_ratio: int = 3,
         plb_enabled: bool = False,
         bg_cls_decay: float = 1.0,
+        fg_cls_boost: float = 1.0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -299,8 +300,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Pixel-Level Balancing — area-based fg weighting to boost small nuclei
         self.plb_enabled = plb_enabled
 
-        # Background cls loss decay — downweight bg anchor classification gradient
+        # Classification loss weighting:
+        #   bg_cls_decay: downweight bg anchor cls gradient (e.g., 0.5)
+        #   fg_cls_boost: amplify fg by alignment quality (1.0 = disabled)
+        #     weight = bg_cls_decay for bg, (1.0 + fg_cls_boost * quality) for fg
         self.bg_cls_decay = bg_cls_decay
+        self.fg_cls_boost = fg_cls_boost
 
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
@@ -430,7 +435,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Binarize targets — hard 0/1. Soft alignment scores are noisy and
         # prevent the classifier from converging. Alignment quality belongs
         # in the centerness branch, not the classification branch.
-        cls_targets = target_scores.float().clone()
+        # Save raw quality before binarization for fg_cls_boost.
+        fg_quality = target_scores.float().clone()
+        cls_targets = fg_quality.clone()
         cls_targets[cls_targets > 0] = 1.0
 
         # Subsample background anchors to cap bg:fg ratio per batch element.
@@ -465,8 +472,14 @@ class RayCastDetectionLoss(v8DetectionLoss):
         if self.bg_fg_ratio > 0:
             loss_cls = loss_cls.masked_fill(ignore_mask, 0.0)
 
-        if self.bg_cls_decay < 1.0:
-            bg_weight = torch.where(cls_targets > 0, 1.0, self.bg_cls_decay)
+        if self.bg_cls_decay < 1.0 or self.fg_cls_boost > 0:
+            if self.fg_cls_boost > 0:
+                # Quality-aware fg boosting: weight = 1 + fg_cls_boost * quality
+                # Perfect match (quality=1) gets 1+fg_cls_boost, marginal gets ~1.0
+                fg_weight = 1.0 + self.fg_cls_boost * fg_quality
+                bg_weight = torch.where(cls_targets > 0, fg_weight, self.bg_cls_decay)
+            else:
+                bg_weight = torch.where(cls_targets > 0, 1.0, self.bg_cls_decay)
             loss_cls = loss_cls * bg_weight
 
         target_scores_sum = max(cls_targets.sum(), 1)
@@ -606,6 +619,7 @@ class RayCastE2ELoss(E2ELoss):
         bg_fg_ratio: int = 3,
         plb_enabled: bool = False,
         bg_cls_decay: float = 1.0,
+        fg_cls_boost: float = 1.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -633,6 +647,7 @@ class RayCastE2ELoss(E2ELoss):
             bg_fg_ratio=bg_fg_ratio,
             plb_enabled=plb_enabled,
             bg_cls_decay=bg_cls_decay,
+            fg_cls_boost=fg_cls_boost,
         )
         super().__init__(model, loss_fn=loss_fn)
 
