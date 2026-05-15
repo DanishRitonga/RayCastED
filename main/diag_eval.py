@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from raycasted.model.register import register_raycast_head
 
-WEIGHTS = "output/etl_parity/train2/weights/best.pt"
+WEIGHTS = "runs/detect/train5/weights/best.pt"
 
 register_raycast_head()
 ckpt = torch.load(WEIGHTS, map_location="cpu", weights_only=False)
