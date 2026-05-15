@@ -30,7 +30,7 @@ from ultralytics.utils.loss import E2ELoss, v8DetectionLoss
 from ultralytics.utils.tal import make_anchors
 
 from raycasted.data.etl.ops.iou import polar_iou_torch
-from raycasted.data.etl.ops.loss import angular_smoothness_loss_torch
+from raycasted.data.etl.ops.loss import curvature_smoothness_loss_torch
 from raycasted.model.tal import RayCastAssigner
 
 logger = logging.getLogger(__name__)
@@ -349,11 +349,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Loss weights — decoded normalised xy space [0,1].
         # High lambda_xy compensates for stride/imgsz gradient attenuation (~0.03x).
         # Raw ~0.088; lambda=500 gives weighted~44, effective grad_mult~7.8.
-        # lambda_piou: shape IoU supervision (1-2% of task gradient).
+        # Rebalanced L1/piou (total=27 preserved): more weight to shape-quality loss
+        # so PolarIoU drives polygon shape rather than per-ray pixel distance alone.
         self.lambda_cls = 2.0
         self.lambda_xy = 500.0
-        self.lambda_l1 = 25.0
-        self.lambda_piou = 2.0
+        self.lambda_l1 = 14.0
+        self.lambda_piou = 13.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
         self.bg_fg_ratio = bg_fg_ratio
 
@@ -579,8 +580,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 piou_loss = piou_loss * fg_plb
             loss[3] = piou_loss.sum() / n_fg
 
-            # L_smooth: Angular smoothness on predicted rays
-            smooth_loss = angular_smoothness_loss_torch(fg_pred_rays)
+            # L_smooth: Curvature (2nd-order) regularisation on predicted rays
+            smooth_loss = curvature_smoothness_loss_torch(fg_pred_rays)
             if fg_plb is not None:
                 smooth_loss = smooth_loss * fg_plb
             loss[4] = smooth_loss.sum() / n_fg
@@ -754,11 +755,12 @@ class RayCastE2ELoss(E2ELoss):
         # Steps per epoch (for epoch estimation in update())
         self.steps_per_epoch = 133
 
-        # Smooth loss: reverse anneal — starts at 0, ramps up to peak, then holds.
-        # Early training: model focuses on detection (xy, cls, L1).
-        # After ramp: smoothness pressure helps refine polygon boundaries.
-        self.smooth_start = 0.0  # initial value (no smoothness pressure)
-        self.smooth_end = 1.0  # peak value (meaningful shape prior)
+        # Smooth loss (curvature): reverse anneal — starts at 0, ramps up to peak, then holds.
+        # 2nd-order difference penalises sharp kinks while allowing smooth irregular shapes.
+        # Early training: model focuses on detection (xy, cls, L1, piou).
+        # After ramp: curvature regularisation eliminates zigzag edge artefacts.
+        self.smooth_start = 0.0  # initial value (no curvature pressure)
+        self.smooth_end = 3.0  # meaningful curvature weight (complementary to L1/piou)
         self.smooth_anneal_fraction = 0.4  # ramp over first 40% of training
         self.smooth_anneal_epochs = max(1, int(max_epochs * self.smooth_anneal_fraction))
 
@@ -795,9 +797,9 @@ class RayCastE2ELoss(E2ELoss):
         t_smooth = min(self.updates / self.smooth_anneal_epochs, 1.0)
         lambda_smooth = self.smooth_start + t_smooth * (self.smooth_end - self.smooth_start)
 
-        # Static lambdas — no warmup ramp
-        lambda_l1 = 25.0
-        lambda_piou = 2.0
+        # Static lambdas — no warmup ramp (total=27 preserved)
+        lambda_l1 = 14.0
+        lambda_piou = 13.0
 
         for branch in (self.one2many, self.one2one):
             branch.lambda_smooth = lambda_smooth

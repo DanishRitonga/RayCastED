@@ -42,6 +42,7 @@ from .iou import (
 from .loss import (
     angular_smoothness_loss,
     angular_smoothness_loss_torch,
+    curvature_smoothness_loss_torch,
 )
 from .utils import (
     count_zero_rays,
@@ -64,6 +65,7 @@ __all__ = [
     # Loss
     'angular_smoothness_loss',
     'angular_smoothness_loss_torch',
+    'curvature_smoothness_loss_torch',
     # Augment
     'flip_horizontal',
     'flip_vertical',
