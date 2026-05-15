@@ -113,7 +113,7 @@ training:
                                # Conclusion: bottleneck is in neck, not head
 
   # Pretrained backbone (COCO weights, layers 0-10 only)
-  pretrained_backbone: null  # DISABLED for scratch training experiment
+  pretrained_backbone: null  # DISABLED for scratch training experiment 
 
 datasets:
   PanNuke:
