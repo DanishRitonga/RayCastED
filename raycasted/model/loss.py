@@ -527,18 +527,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 bg_weight = torch.where(cls_targets > 0, 1.0, self.bg_cls_decay)
             loss_cls = loss_cls * bg_weight
 
-        # o2o branch: heavily decay bg cls instead of zeroing entirely.
-        # The previous approach (loss * cls_targets) removed ALL negative signal,
-        # which prevented the classifier from learning inter-class discrimination.
-        # The classifier only learned "this IS class Y" but never "this is NOT class X",
-        # causing collapse to the majority class. We still apply aggressive bg decay
-        # (bg_cls_decay²) to prevent bg from overwhelming sparse o2o positives,
-        # but keep a small negative gradient for each non-target class.
-        if getattr(self, 'branch_name', '') == 'o2o' and self.bg_cls_decay < 1.0:
-            o2o_bg_weight = self.bg_cls_decay ** 2  # extra-aggressive for o2o
-            o2o_bg = torch.where(cls_targets > 0, 1.0, o2o_bg_weight)
-            loss_cls = loss_cls * o2o_bg
-
         target_scores_sum = max(cls_targets.sum(), 1)
         loss[1] = loss_cls.sum() / target_scores_sum
 

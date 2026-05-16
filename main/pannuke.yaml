@@ -63,7 +63,7 @@ training:
 
   # Classification loss — focal loss for one2one (extreme fg/bg imbalance)
   focal_gamma: 2.0            # Focal loss gamma (DETR-style for Hungarian matching)
-  focal_alpha: 0.5           # Focal loss alpha — 0.25 = standard (positive samples get 0.25 weight)
+  focal_alpha: 0.25          # Focal loss alpha — standard (fg=0.25, bg=0.75). 0.5 caused mode collapse.
                                # Background samples get (1-alpha)=0.75 weight (they dominate numerically)
   log_ray_loss: true           # Log-space L1 on rays — equalizes relative errors across scales
   bg_fg_ratio: 3               # Max background anchors per foreground anchor in cls loss (subsampling)
@@ -74,10 +74,11 @@ training:
   # targets. mAP50(P) dropped 4 points. Keep disabled.
   soft_targets: false
 
-  # Per-class inverse-frequency weights (sqrt-smoothed).
+  # class_weights disabled — caused mode collapse. fg-only amplification with
+  # weak bg gradient pushed model to always predict the least-penalized class.
+  # Re-add with conservative values (cap at 2.0) once bg suppression is stable.
   # PanNuke distribution: Neo=40.8%, Conn=26.7%, Inflam=17.0%, Epi=14.0%, Dead=1.5%
-  # Weights = sqrt(max_freq / class_freq), normalised so min = 1.0
-  class_weights: [1.0, 1.56, 1.27, 5.21, 1.72]
+  class_weights: null
 
   # Pixel-Level Balancing: area-based fg weighting to boost small nuclei
   plb_enabled: true             # Enable PLB (area-based weighting)
