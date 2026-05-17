@@ -51,17 +51,18 @@ def _polygons_to_masks_fast(detections: np.ndarray, img_h: int, img_w: int) -> l
     Uses cv2.fillPoly which is C++ and ~10-50x faster than PIL per-polygon draw.
     """
     masks = []
+    cos = _const.RAY_COS
+    sin = _const.RAY_SIN
     for det in detections:
         cx, cy = det[0], det[1]
         rays = det[2:]
-        # Compute vertices directly (same math as raycast_to_polygon)
-        vx = cx + rays * _const.RAY_COS
-        vy = cy + rays * _const.RAY_SIN
-        pts = np.stack([vx, vy], axis=-1).astype(np.float32).reshape(-1, 1, 2)
-        # Clip to image bounds
-        pts[:, :, 0] = np.clip(pts[:, :, 0], 0, img_w - 1)
-        pts[:, :, 1] = np.clip(pts[:, :, 1], 0, img_h - 1)
-        pts = pts.astype(np.int32)
+        if not np.isfinite(rays).all() or not np.isfinite(cx) or not np.isfinite(cy):
+            masks.append(np.zeros((img_h, img_w), dtype=np.uint8))
+            continue
+        vx = cx + rays * cos
+        vy = cy + rays * sin
+        pts = np.stack([vx, vy], axis=-1)
+        pts = np.clip(pts, -32768, 32767).astype(np.int32).reshape(-1, 1, 2)
         mask = np.zeros((img_h, img_w), dtype=np.uint8)
         cv2.fillPoly(mask, [pts], 1)
         masks.append(mask)
@@ -144,21 +145,22 @@ def run_inference(model, dataloader, device, conf_threshold=0.20):
 
                 # --- Predictions ---
                 det = decoded[si].cpu().numpy()  # [max_det, raycast_dim+2]
-                # Output format from RayCastDetect.postprocess():
-                #   [cx, cy, d_1..d_n, max_conf, class_idx]  =  raycast_dim + 2
-                # Filter by confidence
-                if det.ndim == 2 and det.shape[1] == raycast_dim + 2:
-                    conf_mask = det[:, raycast_dim] > conf_threshold
-                    det = det[conf_mask]
+                # postprocess output: [polygon(raycast_dim), max_score, cls_idx]
+                n_cols = det.shape[1] if det.ndim == 2 else 0
 
-                if det.shape[0] > 0:
-                    pred_poly = det[:, :raycast_dim]  # [N_pred, raycast_dim]
+                if det.ndim == 2 and n_cols >= raycast_dim + 2:
+                    pred_confs = det[:, raycast_dim]
                     pred_cls = det[:, raycast_dim + 1].astype(int)
-                    pred_confs = det[:, raycast_dim]  # max class confidence
+                    conf_mask = pred_confs > conf_threshold
+                    det = det[conf_mask]
+                    pred_confs = pred_confs[conf_mask]
+                    pred_cls = pred_cls[conf_mask]
                 else:
-                    pred_poly = np.zeros((0, raycast_dim), dtype=np.float32)
-                    pred_cls = np.array([], dtype=int)
+                    det = det[:0] if det.ndim == 2 else np.zeros((0, raycast_dim + 2), dtype=np.float32)
                     pred_confs = np.array([], dtype=np.float32)
+                    pred_cls = np.array([], dtype=int)
+
+                pred_poly = det[:, :raycast_dim] if det.shape[0] > 0 else np.zeros((0, raycast_dim), dtype=np.float32)
 
                 results.append(
                     {
@@ -333,14 +335,12 @@ def compute_ap_2018_dsb(results, iou_thresholds=None):
         for r in results:
             gt_mask = r['gt_cls'] == cls_id
             pred_mask = r['pred_cls'] == cls_id
-            gt_polys = r['gt_polys'][gt_mask]
-            pred_polys = r['pred_polys'][pred_mask]
             # Use pre-computed masks for this class
             all_pred_masks = r.get('pred_masks', [])
             all_gt_masks = r.get('gt_masks', [])
             pred_cls_masks = [all_pred_masks[i] for i, m in enumerate(pred_mask) if m and i < len(all_pred_masks)]
             gt_cls_masks = [all_gt_masks[i] for i, m in enumerate(gt_mask) if m and i < len(all_gt_masks)]
-            pred_confs = r.get('pred_confs', np.ones(len(pred_polys)))
+            pred_confs = r.get('pred_confs', np.ones(len(pred_cls_masks)))
 
             n_pred = len(pred_cls_masks)
             n_gt = len(gt_cls_masks)
@@ -533,7 +533,6 @@ def compute_multiclass_pq(results, num_classes=5):
     class_mpq = {c: [] for c in range(num_classes)}
 
     for r in results:
-        imgsz = r['imgsz']
         pred_cls = r['pred_cls']
         gt_cls = r['gt_cls']
 
@@ -607,18 +606,30 @@ def benchmark_inference(model, dataloader, device, n_warmup=10):
 
 
 def main():
-    """Run PanNuke fold3 evaluation."""
-    parser = argparse.ArgumentParser(description='RayCastED PanNuke Evaluation')
-    parser.add_argument('--weights', required=True, help='Path to trained .pt checkpoint')
-    parser.add_argument('--data-dir', default=None, help='Path to test tiles directory (.npz files)')
-    parser.add_argument('--config', default=None, help='ETL config YAML (for auto-transform)')
-    parser.add_argument('--output', default=None, help='Output dir (required with --config)')
-    parser.add_argument('--batch', type=int, default=16, help='Batch size')
-    parser.add_argument('--device', default='0', help='Device (cpu, 0, 0,1)')
-    parser.add_argument('--conf', type=float, default=0.20, help='Confidence threshold')
-    parser.add_argument('--workers', type=int, default=8, help='DataLoader workers')
-    parser.add_argument('--debug', action='store_true', help='Print diagnostic info for first 10 images')
+    import sys
+
+    parser = argparse.ArgumentParser(description='PanNuke Fold3 Evaluation')
+    parser.add_argument('--weights', type=str, required=True)
+    parser.add_argument('--data-dir', type=str, default='')
+    parser.add_argument('--config', type=str, default='')
+    parser.add_argument('--output', type=str, default='')
+    parser.add_argument('--batch', type=int, default=16)
+    parser.add_argument('--device', type=str, default='0')
+    parser.add_argument('--conf', type=float, default=0.20)
+    parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
+
+    try:
+        _main(args)
+    except Exception:
+        import traceback
+
+        traceback.print_exc()
+        sys.exit(1)
+
+
+def _main(args):
 
     # Resolve data directory
     data_dir = args.data_dir
@@ -645,11 +656,11 @@ def main():
         data_dir = str(test_dir)
 
     if data_dir is None:
-        parser.error('Either --data-dir or both --config and --output must be provided')
+        raise ValueError('Either --data-dir or both --config and --output must be provided')
 
     data_dir = Path(data_dir)
     if not data_dir.exists():
-        parser.error(f'Data directory not found: {data_dir}')
+        raise FileNotFoundError(f'Data directory not found: {data_dir}')
 
     npz_files = list(data_dir.glob('*.npz'))
     print(f'Test tiles: {len(npz_files)} files in {data_dir}')
@@ -685,57 +696,75 @@ def main():
     print('Running inference...')
     results = run_inference(model, dataloader, device, conf_threshold=args.conf)
     print(f'  Processed {len(results)} images')
+    n_pred_total = sum(len(r['pred_polys']) for r in results)
+    n_gt_total = sum(len(r['gt_polys']) for r in results)
+    print(f'  Total predictions: {n_pred_total}, Total GT: {n_gt_total}')
+    if n_pred_total > 0:
+        sample = next(r for r in results if len(r['pred_polys']) > 0)
+        print(f'  Sample pred cls: {sample["pred_cls"][:20]}')
+        print(f'  Sample pred conf: {sample["pred_confs"][:20]}')
+        p = sample['pred_polys'][0]
+        print(f'  Sample pred[0]: cx={p[0]:.1f} cy={p[1]:.1f} rays=[{p[2:].min():.1f}, {p[2:].max():.1f}]')
 
     # --- Pre-compute masks for all images (cv2, fast) ---
-    print('Rasterizing masks (cv2)...')
+    import resource
+    import sys
+
+    print('Rasterizing masks (cv2)...', flush=True)
+    total_pred_masks = 0
+    total_gt_masks = 0
     for i, r in enumerate(results):
         imgsz = r['imgsz']
+        n_gt = r['gt_polys'].shape[0]
+        n_pred = r['pred_polys'].shape[0]
 
-        # Guard against NaN/Inf in predictions (can crash cv2)
-        pred_polys = r['pred_polys']
-        if pred_polys.shape[0] > 0:
-            finite_mask = np.isfinite(pred_polys).all(axis=1)
-            pred_polys = pred_polys[finite_mask]
-            r['pred_polys'] = pred_polys
-            # Also filter cls/confs to match
-            if len(r.get('pred_confs', [])) == len(r.get('pred_cls', [])):
-                r['pred_confs'] = r['pred_confs'][finite_mask] if len(r['pred_confs']) == len(finite_mask) else r['pred_confs']
-                r['pred_cls'] = r['pred_cls'][finite_mask] if len(r['pred_cls']) == len(finite_mask) else r['pred_cls']
+        try:
+            gt_masks = _polygons_to_masks_fast(r['gt_polys'], imgsz, imgsz) if n_gt > 0 else []
+            pred_masks = _polygons_to_masks_fast(r['pred_polys'], imgsz, imgsz) if n_pred > 0 else []
+            if pred_masks:
+                pred_masks = resolve_mask_overlaps(pred_masks)
+        except Exception as e:
+            print(f'ERROR rasterizing image {i}: {e}', file=sys.stderr, flush=True)
+            gt_masks = []
+            pred_masks = []
 
-        gt_masks = _polygons_to_masks_fast(r['gt_polys'], imgsz, imgsz) if r['gt_polys'].shape[0] > 0 else []
-        pred_masks = _polygons_to_masks_fast(pred_polys, imgsz, imgsz) if pred_polys.shape[0] > 0 else []
-        if pred_masks:
-            pred_masks = resolve_mask_overlaps(pred_masks)
+        total_gt_masks += len(gt_masks)
+        total_pred_masks += len(pred_masks)
 
-        if args.debug and i < 10 and len(gt_masks) > 0 and len(pred_masks) > 0:
-            gt_areas = [m.sum() for m in gt_masks[:3]]
-            pred_areas = [m.sum() for m in pred_masks[:3]]
-            n_gt = r['gt_polys'].shape[0]
-            n_pred = pred_polys.shape[0]
-            print(f'  Image {i+1}: GT={n_gt}, pred={n_pred}')
-            gt0 = r['gt_polys'][0]
-            print(f'    GT[0] cx,cy={gt0[:2]}, rays=[{gt0[2:].min():.1f}, {gt0[2:].max():.1f}]')
-            print(f'    GT mask areas (first 3): {gt_areas}')
-            p0 = pred_polys[0]
-            print(f'    Pred[0] cx,cy={p0[:2]}, rays=[{p0[2:].min():.1f}, {p0[2:].max():.1f}]')
-            print(f'    Pred mask areas (first 3): {pred_areas}')
+        if (i + 1) % 500 == 0:
+            mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            print(
+                f'  Rasterized {i + 1}/{len(results)} images... '
+                f'(pred_masks={total_pred_masks}, gt_masks={total_gt_masks}, RSS={mem_mb:.0f}MB)',
+                flush=True,
+            )
 
         r['gt_masks'] = gt_masks
         r['pred_masks'] = pred_masks
 
-        if (i + 1) % 500 == 0:
-            print(f'  Rasterized {i+1}/{len(results)} images...')
+    mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    print(
+        f'  Rasterization complete. pred={total_pred_masks}, gt={total_gt_masks}, RSS={mem_mb:.0f}MB',
+        flush=True,
+    )
 
     # --- Pixel-level metrics (AJI, PQ variants) ---
-    print('Computing pixel-level metrics (AJI, bPQ, bMPQ, mPQ, mMPQ)...')
-    aji_scores = [compute_aji(r['pred_masks'], r['gt_masks']) for r in results]
+    print('Computing pixel-level metrics (AJI, bPQ, bMPQ, mPQ, mMPQ)...', flush=True)
+    try:
+        aji_scores = [compute_aji(r['pred_masks'], r['gt_masks']) for r in results]
+    except Exception as e:
+        print(f'ERROR during AJI computation: {e}')
+        import traceback
+
+        traceback.print_exc()
+        return
 
     mean_aji = np.mean(aji_scores)
     mean_bpq, mean_bmpq = compute_binary_pq(results)
     mean_mpq, mean_mmpq = compute_multiclass_pq(results, num_classes=nc)
 
     # --- AP metrics (LSP-DETR style: Hungarian matching) ---
-    print('Computing AP metrics (Hungarian matching)...')
+    print('Computing AP metrics (Hungarian matching)...', flush=True)
     ap_results = compute_ap_2018_dsb(results)
 
     ap50 = ap_results.get(0.5, {}).get('AP', 0.0)
@@ -744,7 +773,7 @@ def main():
     ap50_95 = np.mean([ap_results[t]['AP'] for t in sorted(ap_results.keys())])
 
     # --- Centroid F1 (LSP-DETR style: Hungarian matching, r=12) ---
-    print('Computing centroid F1 (Hungarian matching)...')
+    print('Computing centroid F1 (Hungarian matching)...', flush=True)
     centroid_results = compute_centroid_f1(results, distance_thresholds=[12])
     f12 = centroid_results[12]
 
@@ -759,7 +788,7 @@ def main():
         gflops = 0.0
 
     # --- Inference time ---
-    print('Benchmarking inference time...')
+    print('Benchmarking inference time...', flush=True)
     inf_dl = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=_simple_collate)
     avg_ms = benchmark_inference(model, inf_dl, device)
 
