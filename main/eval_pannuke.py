@@ -57,7 +57,11 @@ def _polygons_to_masks_fast(detections: np.ndarray, img_h: int, img_w: int) -> l
         # Compute vertices directly (same math as raycast_to_polygon)
         vx = cx + rays * _const.RAY_COS
         vy = cy + rays * _const.RAY_SIN
-        pts = np.stack([vx, vy], axis=-1).astype(np.int32).reshape(-1, 1, 2)
+        pts = np.stack([vx, vy], axis=-1).astype(np.float32).reshape(-1, 1, 2)
+        # Clip to image bounds
+        pts[:, :, 0] = np.clip(pts[:, :, 0], 0, img_w - 1)
+        pts[:, :, 1] = np.clip(pts[:, :, 1], 0, img_h - 1)
+        pts = pts.astype(np.int32)
         mask = np.zeros((img_h, img_w), dtype=np.uint8)
         cv2.fillPoly(mask, [pts], 1)
         masks.append(mask)
@@ -139,43 +143,22 @@ def run_inference(model, dataloader, device, conf_threshold=0.20):
                     gt_poly[:, 2:] *= crop_size
 
                 # --- Predictions ---
-                det = decoded[si].cpu().numpy()  # [max_det, raycast_dim+nc+1]
-                # End2end format: [polygon(raycast_dim), nc_class_scores, cls_idx]
-                n_cols = det.shape[1] if det.ndim == 2 else 0
-                has_scores = det.ndim == 2 and n_cols > raycast_dim + 1
-
-                if has_scores:
-                    # Extract per-class scores and class index from end2end output
-                    cls_scores = det[:, raycast_dim:n_cols - 1]  # [N, nc] sigmoid scores
-                    pred_confs = cls_scores.max(axis=1)           # max class score
-                    pred_cls = cls_scores.argmax(axis=1).astype(int)  # class index
-
-                    # Filter by confidence
-                    conf_mask = pred_confs > conf_threshold
-                    det = det[conf_mask]
-                    pred_confs = pred_confs[conf_mask]
-                    pred_cls = pred_cls[conf_mask]
-                elif det.ndim == 2 and n_cols == raycast_dim + 2:
-                    # Fallback: old YOLO format [..., conf, cls_idx]
+                det = decoded[si].cpu().numpy()  # [max_det, raycast_dim+2]
+                # Output format from RayCastDetect.postprocess():
+                #   [cx, cy, d_1..d_n, max_conf, class_idx]  =  raycast_dim + 2
+                # Filter by confidence
+                if det.ndim == 2 and det.shape[1] == raycast_dim + 2:
                     conf_mask = det[:, raycast_dim] > conf_threshold
                     det = det[conf_mask]
-                    pred_confs = det[:, raycast_dim]
-                    pred_cls = det[:, raycast_dim + 1].astype(int)
-                else:
-                    det = det[:0]  # empty
-                    pred_confs = np.array([], dtype=np.float32)
-                    pred_cls = np.array([], dtype=int)
 
                 if det.shape[0] > 0:
                     pred_poly = det[:, :raycast_dim]  # [N_pred, raycast_dim]
-                    if not has_scores and not (det.ndim == 2 and n_cols == raycast_dim + 2):
-                        pred_confs = np.ones(det.shape[0], dtype=np.float32)
-                        pred_cls = np.zeros(det.shape[0], dtype=int)
+                    pred_cls = det[:, raycast_dim + 1].astype(int)
+                    pred_confs = det[:, raycast_dim]  # max class confidence
                 else:
                     pred_poly = np.zeros((0, raycast_dim), dtype=np.float32)
-                    if not has_scores and not (det.ndim == 2 and n_cols == raycast_dim + 2):
-                        pred_cls = np.array([], dtype=int)
-                        pred_confs = np.array([], dtype=np.float32)
+                    pred_cls = np.array([], dtype=int)
+                    pred_confs = np.array([], dtype=np.float32)
 
                 results.append(
                     {
@@ -707,8 +690,20 @@ def main():
     print('Rasterizing masks (cv2)...')
     for i, r in enumerate(results):
         imgsz = r['imgsz']
+
+        # Guard against NaN/Inf in predictions (can crash cv2)
+        pred_polys = r['pred_polys']
+        if pred_polys.shape[0] > 0:
+            finite_mask = np.isfinite(pred_polys).all(axis=1)
+            pred_polys = pred_polys[finite_mask]
+            r['pred_polys'] = pred_polys
+            # Also filter cls/confs to match
+            if len(r.get('pred_confs', [])) == len(r.get('pred_cls', [])):
+                r['pred_confs'] = r['pred_confs'][finite_mask] if len(r['pred_confs']) == len(finite_mask) else r['pred_confs']
+                r['pred_cls'] = r['pred_cls'][finite_mask] if len(r['pred_cls']) == len(finite_mask) else r['pred_cls']
+
         gt_masks = _polygons_to_masks_fast(r['gt_polys'], imgsz, imgsz) if r['gt_polys'].shape[0] > 0 else []
-        pred_masks = _polygons_to_masks_fast(r['pred_polys'], imgsz, imgsz) if r['pred_polys'].shape[0] > 0 else []
+        pred_masks = _polygons_to_masks_fast(pred_polys, imgsz, imgsz) if pred_polys.shape[0] > 0 else []
         if pred_masks:
             pred_masks = resolve_mask_overlaps(pred_masks)
 
@@ -716,17 +711,20 @@ def main():
             gt_areas = [m.sum() for m in gt_masks[:3]]
             pred_areas = [m.sum() for m in pred_masks[:3]]
             n_gt = r['gt_polys'].shape[0]
-            n_pred = r['pred_polys'].shape[0]
+            n_pred = pred_polys.shape[0]
             print(f'  Image {i+1}: GT={n_gt}, pred={n_pred}')
             gt0 = r['gt_polys'][0]
             print(f'    GT[0] cx,cy={gt0[:2]}, rays=[{gt0[2:].min():.1f}, {gt0[2:].max():.1f}]')
             print(f'    GT mask areas (first 3): {gt_areas}')
-            p0 = r['pred_polys'][0]
+            p0 = pred_polys[0]
             print(f'    Pred[0] cx,cy={p0[:2]}, rays=[{p0[2:].min():.1f}, {p0[2:].max():.1f}]')
             print(f'    Pred mask areas (first 3): {pred_areas}')
 
         r['gt_masks'] = gt_masks
         r['pred_masks'] = pred_masks
+
+        if (i + 1) % 500 == 0:
+            print(f'  Rasterized {i+1}/{len(results)} images...')
 
     # --- Pixel-level metrics (AJI, PQ variants) ---
     print('Computing pixel-level metrics (AJI, bPQ, bMPQ, mPQ, mMPQ)...')
