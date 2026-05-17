@@ -29,6 +29,7 @@ import argparse
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
@@ -36,12 +37,54 @@ from torch.utils.data import DataLoader
 from ultralytics.utils.torch_utils import model_info
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
+from raycasted.data.etl.utils import constants as _const
 from raycasted.model.metrics import (
     compute_aji,
-    polygons_to_masks,
     resolve_mask_overlaps,
 )
 from raycasted.model.register import register_raycast_head
+
+
+def _polygons_to_masks_fast(detections: np.ndarray, img_h: int, img_w: int) -> list[np.ndarray]:
+    """Rasterize raycast polygons to binary masks using OpenCV (fast).
+
+    Uses cv2.fillPoly which is C++ and ~10-50x faster than PIL per-polygon draw.
+    """
+    masks = []
+    for det in detections:
+        cx, cy = det[0], det[1]
+        rays = det[2:]
+        # Compute vertices directly (same math as raycast_to_polygon)
+        vx = cx + rays * _const.RAY_COS
+        vy = cy + rays * _const.RAY_SIN
+        pts = np.stack([vx, vy], axis=-1).astype(np.int32).reshape(-1, 1, 2)
+        mask = np.zeros((img_h, img_w), dtype=np.uint8)
+        cv2.fillPoly(mask, [pts], 1)
+        masks.append(mask)
+    return masks
+
+
+def _mask_iou_gpu(pred_stack: torch.Tensor, gt_stack: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Compute pairwise mask IoU on GPU.
+
+    Args:
+        pred_stack: [N_pred, H*W] float tensor.
+        gt_stack: [N_gt, H*W] float tensor.
+        device: torch device.
+
+    Returns:
+        [N_pred, N_gt] IoU matrix.
+    """
+    pred_stack = pred_stack.to(device)
+    gt_stack = gt_stack.to(device)
+    intersection = pred_stack @ gt_stack.T  # [N_pred, N_gt]
+    pred_area = pred_stack.sum(dim=1, keepdim=True)  # [N_pred, 1]
+    gt_area = gt_stack.sum(dim=1, keepdim=True)  # [N_gt, 1]
+    union = pred_area + gt_area.T - intersection
+    iou = torch.zeros_like(intersection)
+    valid = union > 0
+    iou[valid] = intersection[valid] / union[valid]
+    return iou
 
 
 def load_model(weights_path: str, device: torch.device):
@@ -96,20 +139,43 @@ def run_inference(model, dataloader, device, conf_threshold=0.20):
                     gt_poly[:, 2:] *= crop_size
 
                 # --- Predictions ---
-                det = decoded[si].cpu().numpy()  # [max_det, raycast_dim+2]
-                # Filter by confidence
-                if det.ndim == 2 and det.shape[1] == raycast_dim + 2:
+                det = decoded[si].cpu().numpy()  # [max_det, raycast_dim+nc+1]
+                # End2end format: [polygon(raycast_dim), nc_class_scores, cls_idx]
+                n_cols = det.shape[1] if det.ndim == 2 else 0
+                has_scores = det.ndim == 2 and n_cols > raycast_dim + 1
+
+                if has_scores:
+                    # Extract per-class scores and class index from end2end output
+                    cls_scores = det[:, raycast_dim:n_cols - 1]  # [N, nc] sigmoid scores
+                    pred_confs = cls_scores.max(axis=1)           # max class score
+                    pred_cls = cls_scores.argmax(axis=1).astype(int)  # class index
+
+                    # Filter by confidence
+                    conf_mask = pred_confs > conf_threshold
+                    det = det[conf_mask]
+                    pred_confs = pred_confs[conf_mask]
+                    pred_cls = pred_cls[conf_mask]
+                elif det.ndim == 2 and n_cols == raycast_dim + 2:
+                    # Fallback: old YOLO format [..., conf, cls_idx]
                     conf_mask = det[:, raycast_dim] > conf_threshold
                     det = det[conf_mask]
+                    pred_confs = det[:, raycast_dim]
+                    pred_cls = det[:, raycast_dim + 1].astype(int)
+                else:
+                    det = det[:0]  # empty
+                    pred_confs = np.array([], dtype=np.float32)
+                    pred_cls = np.array([], dtype=int)
 
                 if det.shape[0] > 0:
                     pred_poly = det[:, :raycast_dim]  # [N_pred, raycast_dim]
-                    pred_cls = det[:, raycast_dim + 1].astype(int)
-                    pred_confs = det[:, raycast_dim]  # confidence score
+                    if not has_scores and not (det.ndim == 2 and n_cols == raycast_dim + 2):
+                        pred_confs = np.ones(det.shape[0], dtype=np.float32)
+                        pred_cls = np.zeros(det.shape[0], dtype=int)
                 else:
                     pred_poly = np.zeros((0, raycast_dim), dtype=np.float32)
-                    pred_cls = np.array([], dtype=int)
-                    pred_confs = np.array([], dtype=np.float32)
+                    if not has_scores and not (det.ndim == 2 and n_cols == raycast_dim + 2):
+                        pred_cls = np.array([], dtype=int)
+                        pred_confs = np.array([], dtype=np.float32)
 
                 results.append(
                     {
@@ -286,10 +352,15 @@ def compute_ap_2018_dsb(results, iou_thresholds=None):
             pred_mask = r['pred_cls'] == cls_id
             gt_polys = r['gt_polys'][gt_mask]
             pred_polys = r['pred_polys'][pred_mask]
+            # Use pre-computed masks for this class
+            all_pred_masks = r.get('pred_masks', [])
+            all_gt_masks = r.get('gt_masks', [])
+            pred_cls_masks = [all_pred_masks[i] for i, m in enumerate(pred_mask) if m and i < len(all_pred_masks)]
+            gt_cls_masks = [all_gt_masks[i] for i, m in enumerate(gt_mask) if m and i < len(all_gt_masks)]
             pred_confs = r.get('pred_confs', np.ones(len(pred_polys)))
 
-            n_pred = len(pred_polys)
-            n_gt = len(gt_polys)
+            n_pred = len(pred_cls_masks)
+            n_gt = len(gt_cls_masks)
 
             for t in iou_thresholds:
                 per_class_stats[cls_id][t]['n_gt'] += n_gt
@@ -299,11 +370,8 @@ def compute_ap_2018_dsb(results, iou_thresholds=None):
                 continue
 
             # Compute pairwise mask IoU
-            imgsz = r['imgsz']
             if n_gt > 0:
-                gt_masks = polygons_to_masks(gt_polys, imgsz, imgsz)
-                pred_masks = polygons_to_masks(pred_polys, imgsz, imgsz)
-                iou_matrix = _mask_iou_matrix(pred_masks, gt_masks)
+                iou_matrix = _mask_iou_matrix(pred_cls_masks, gt_cls_masks)
 
                 # Hungarian matching (maximize total IoU)
                 row_ind, col_ind = linear_sum_assignment(-iou_matrix)
@@ -435,18 +503,15 @@ def _compute_pq_masked(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
 def compute_binary_pq(results):
     """Compute binary PQ and masked binary PQ (bPQ / bMPQ).
 
-    Merges all instances into a single foreground mask per image,
-    then computes PQ between the binary masks.
+    Uses pre-computed masks from results dicts (fast cv2 rasterization).
     """
     bpq_scores = []
     bmpq_scores = []
 
     for r in results:
         imgsz = r['imgsz']
-        gt_masks = polygons_to_masks(r['gt_polys'], imgsz, imgsz) if r['gt_polys'].shape[0] > 0 else []
-        pred_masks = polygons_to_masks(r['pred_polys'], imgsz, imgsz) if r['pred_polys'].shape[0] > 0 else []
-        if pred_masks:
-            pred_masks = resolve_mask_overlaps(pred_masks)
+        gt_masks = r.get('gt_masks', [])
+        pred_masks = r.get('pred_masks', [])
 
         # Merge to binary foreground masks
         if len(pred_masks) > 0:
@@ -474,11 +539,11 @@ def compute_binary_pq(results):
     return np.mean(bpq_scores), np.mean(bmpq_scores)
 
 
-def compute_multiclass_pq(results, num_classes=6):
+def compute_multiclass_pq(results, num_classes=5):
     """Compute multiclass PQ and masked multiclass PQ (mPQ / mMPQ).
 
-    Per-class PQ is averaged over classes that have at least one GT instance
-    across the dataset.
+    Uses pre-computed masks from results dicts (fast cv2 rasterization).
+    Per-class PQ is averaged over classes that have at least one GT instance.
     """
     # Accumulate per-class stats
     class_pq = {c: [] for c in range(num_classes)}
@@ -486,16 +551,12 @@ def compute_multiclass_pq(results, num_classes=6):
 
     for r in results:
         imgsz = r['imgsz']
-        pred_polys = r['pred_polys']
-        gt_polys = r['gt_polys']
         pred_cls = r['pred_cls']
         gt_cls = r['gt_cls']
 
-        # Rasterize all masks
-        all_pred_masks = polygons_to_masks(pred_polys, imgsz, imgsz) if pred_polys.shape[0] > 0 else []
-        all_gt_masks = polygons_to_masks(gt_polys, imgsz, imgsz) if gt_polys.shape[0] > 0 else []
-        if all_pred_masks:
-            all_pred_masks = resolve_mask_overlaps(all_pred_masks)
+        # Use pre-computed masks
+        all_pred_masks = r.get('pred_masks', [])
+        all_gt_masks = r.get('gt_masks', [])
 
         # Build per-class binary masks
         for cls_id in range(num_classes):
@@ -642,45 +703,38 @@ def main():
     results = run_inference(model, dataloader, device, conf_threshold=args.conf)
     print(f'  Processed {len(results)} images')
 
-    # --- Pixel-level metrics (AJI, PQ variants) ---
-    print('Computing pixel-level metrics (AJI, bPQ, bMPQ, mPQ, mMPQ)...')
-    aji_scores = []
-    debug_printed = []
-
-    for r in results:
+    # --- Pre-compute masks for all images (cv2, fast) ---
+    print('Rasterizing masks (cv2)...')
+    for i, r in enumerate(results):
         imgsz = r['imgsz']
-        # GT masks
-        gt_masks = polygons_to_masks(r['gt_polys'], imgsz, imgsz) if r['gt_polys'].shape[0] > 0 else []
-        # Predicted masks
-        pred_masks = polygons_to_masks(r['pred_polys'], imgsz, imgsz) if r['pred_polys'].shape[0] > 0 else []
-        # Resolve overlaps (largest-first priority, matching LSP-DETR)
+        gt_masks = _polygons_to_masks_fast(r['gt_polys'], imgsz, imgsz) if r['gt_polys'].shape[0] > 0 else []
+        pred_masks = _polygons_to_masks_fast(r['pred_polys'], imgsz, imgsz) if r['pred_polys'].shape[0] > 0 else []
         if pred_masks:
             pred_masks = resolve_mask_overlaps(pred_masks)
 
-        if args.debug and len(debug_printed) < 10 and len(gt_masks) > 0 and len(pred_masks) > 0:
-            debug_printed.append(True)
+        if args.debug and i < 10 and len(gt_masks) > 0 and len(pred_masks) > 0:
             gt_areas = [m.sum() for m in gt_masks[:3]]
             pred_areas = [m.sum() for m in pred_masks[:3]]
             n_gt = r['gt_polys'].shape[0]
             n_pred = r['pred_polys'].shape[0]
-            print(f'  Image {len(debug_printed)}: GT={n_gt}, pred={n_pred}')
+            print(f'  Image {i+1}: GT={n_gt}, pred={n_pred}')
             gt0 = r['gt_polys'][0]
-            gt_ray_min = gt0[2:].min()
-            gt_ray_max = gt0[2:].max()
-            print(f'    GT[0] cx,cy={gt0[:2]}, rays=[{gt_ray_min:.1f}, {gt_ray_max:.1f}]')
+            print(f'    GT[0] cx,cy={gt0[:2]}, rays=[{gt0[2:].min():.1f}, {gt0[2:].max():.1f}]')
             print(f'    GT mask areas (first 3): {gt_areas}')
-            if len(pred_masks) > 0:
-                p0 = r['pred_polys'][0]
-                p_ray_min = p0[2:].min()
-                p_ray_max = p0[2:].max()
-                print(f'    Pred[0] cx,cy={p0[:2]}, rays=[{p_ray_min:.1f}, {p_ray_max:.1f}]')
-                print(f'    Pred mask areas (first 3): {pred_areas}')
+            p0 = r['pred_polys'][0]
+            print(f'    Pred[0] cx,cy={p0[:2]}, rays=[{p0[2:].min():.1f}, {p0[2:].max():.1f}]')
+            print(f'    Pred mask areas (first 3): {pred_areas}')
 
-        aji_scores.append(compute_aji(pred_masks, gt_masks))
+        r['gt_masks'] = gt_masks
+        r['pred_masks'] = pred_masks
+
+    # --- Pixel-level metrics (AJI, PQ variants) ---
+    print('Computing pixel-level metrics (AJI, bPQ, bMPQ, mPQ, mMPQ)...')
+    aji_scores = [compute_aji(r['pred_masks'], r['gt_masks']) for r in results]
 
     mean_aji = np.mean(aji_scores)
     mean_bpq, mean_bmpq = compute_binary_pq(results)
-    mean_mpq, mean_mmpq = compute_multiclass_pq(results)
+    mean_mpq, mean_mmpq = compute_multiclass_pq(results, num_classes=nc)
 
     # --- AP metrics (LSP-DETR style: Hungarian matching) ---
     print('Computing AP metrics (Hungarian matching)...')

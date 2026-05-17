@@ -1,198 +1,128 @@
-# AGENTS.md
+# RayCastED — Agent Notes
 
-This file helps OpenCode agents work efficiently in the RayCastED repository.
+Compact instruction file for future sessions. Read `CLAUDE.md` for full commands and architecture; this file covers what's easy to miss.
 
-## Essential Commands
+## Quick Reference
 
 ```bash
-# Install dependencies
-uv sync
-
-# Lint and format (must run together)
-uv run ruff check .
-uv run ruff format .
-
-# Run tests (no test runner — direct Python execution)
-uv run python tests/phase_0_5/test_round_trip.py
-uv run python tests/phase_6/test_loss.py
-
-# Full pipeline (ETL + training)
-uv run python -m raycasted.pipeline --config main/dataset.yaml --output output/ --epochs 100
-
-# Individual pipeline stages
-uv run python -m raycasted.pipeline --config main/dataset.yaml --output output/ --stage ingest --dataset PUMA
-uv run python -m raycasted.pipeline --config main/dataset.yaml --output output/ --stage transform
-uv run python -m raycasted.pipeline --config main/dataset.yaml --output output/ --stage train --epochs 50
+uv sync                                          # install
+uv run ruff check . && uv run ruff format .       # lint + format (always before commit)
+uv run python -m pytest tests/phase_6/ -x -q     # main test suite (27 tests)
+uv run python -m pytest tests/phase_6/test_loss.py::test_constructor -xvs  # single test
+bash clean_cache.sh                               # clean __pycache__ after tests
 ```
 
-## Training Workflow
+**Never launch training.** Edit `main/pannuke.yaml` and tell the user to run it.
 
-**The user trains on a separate GPU device.** Do NOT launch training commands (e.g. `--stage train`) from this agent session. Instead:
+## What This Project Is
 
-1. Update `main/pannuke.yaml` (or the relevant config) with the new model YAML path.
-2. Inform the user the config is ready — they will run training themselves, typically:
-   ```bash
-   uv run python -m raycasted.pipeline --config main/pannuke.yaml --output output/<RunName> --epochs 500 --device 0 --stage train
-   ```
-3. The pipeline uses ultralytics' built-in resume from `last.pt` — if training is interrupted, re-running the same command resumes from the last checkpoint.
+RayCastED is a YOLOv26 variant that replaces bounding-box detection with **raycast polygon detection** for cell nuclei in histopathology WSIs. Each detection outputs a centroid + 64 radial rays (not axis-aligned boxes). No pretrained weights — trained from scratch on H&E tissue images.
 
-## Code Style
+## Architecture That's Not Obvious From Filenames
 
-**Ruff config** (`pyproject.toml`): line length 120, single quotes, Google-style docstrings, isort with `raycasted` as first-party.
+- `raycasted/model/` is a **subclass package** — all Ultralytics modifications extend base classes in-place, never editing `ultralytics/` source
+- `raycasted/model/train.py` contains `_RayCastCriterionWrapper` which threads YAML config → loss/assigner construction. Any new loss param must pass through: YAML → `train.py` wrapper → `RayCastE2ELoss.__init__` → `RayCastDetectionLoss.__init__` → assigner constructors
+- `raycasted/model/builder.py` has `raycasted_parse_model()` — custom YAML parser for `ResoConv`, `C3k2_LK`, `ResoConvHybrid` blocks not in standard Ultralytics
+- `raycasted/data/etl/utils/constants.py` has **mutable module-level globals** (`N_RAYS`, `RAY_ANGLES`, etc.) changed via `configure_rays(n)`. Pipeline calls it at startup; tests must call it too
+- The P2-P3-P4 pyramid (stride 4/8/16) is defined in `raycasted/cfg/yolo26s-run28-p234.yaml`, not the standard P3-P4-P5
 
-Always run `uv run ruff check . && uv run ruff format .` before committing.
+## Training History — What We've Tried and Why
 
-## Architecture Overview
+This project went through extensive trial-and-error. Understanding what was tried prevents repeating mistakes:
 
-**Goal:** Convert YOLOv8 (bounding-box detector) into a raycast polygon detector for cell detection in histopathology images.
+### Removed: Assignment Warmup / Curriculum Learning
+The codebase previously had a 50-epoch "warmup" where the assigner used Gaussian centroid-distance similarity instead of Polar-IoU, combined with lambda annealing that crushed L1/piou losses to 0.1 during warmup. This was **removed** because:
+- Tight warmup sigma puts assigned anchors in the L2 regime of Huber loss → tiny gradients → xy loss stuck at ~8.4 for 10+ epochs
+- Crushing lambda_l1 to 0.1 prevented ray learning for 50 epochs — predictions were still random when the ramp started
+- The curriculum was fighting itself: the assignment already handles curriculum by ranking on centroids; the loss weights didn't need to also suppress rays
 
-**Data flow:**
+### Removed: Hungarian Matching for o2o Branch
+Originally used `HungarianRayCastAssigner` (scipy `linear_sum_assignment`) for the one2one branch. Replaced with **standard dual-TAL** (same `RayCastAssigner` for both branches, different topk) because:
+- At epoch 0, predicted rays are random noise → Hungarian cost matrix is noise-dominated → confident-but-wrong 1:1 matches
+- No soft quality scores to downweight bad matches (unlike TAL which has alignment metrics)
+- Stock YOLO26 dual-TAL is simpler and more robust: o2m topk=15/topk2=15, o2o topk=7/topk2=1
+
+### Current Architecture: Standard Dual-TAL + PLB + bg_cls_decay
+- Both branches use `RayCastAssigner` with Polar-IoU from epoch 0
+- PLB (Pixel-Level Balancing): area-based fg weighting `2*(1 - area/total_area)` boosts small nuclei
+- bg_cls_decay: downweights bg anchor cls loss
+- Static lambdas (no annealing): lambda_l1=25.0, lambda_piou=2.0
+
+### Classification Mode Collapse — The Gradient Budget Problem
+The model achieved Recall=0.881 (excellent localization) but Precision=0.074 (catastrophic classification). Root cause is a gradient budget imbalance:
+
+With focal_alpha=0.25, bg_fg_ratio=3, bg_cls_decay=0.5:
+- Per-anchor: fg=0.031, bg=0.094 → 3:1 bg:fg
+- Count ratio: 3:1 bg:fg
+- Total gradient: **4.5:1 bg:fg** — 82% of cls gradient budget goes to "be background"
+
+This leaves only 18% for inter-class discrimination across 5 classes with wildly different frequencies (Neo=40.8%, Dead=1.5%). Dead class gets ~0.3% of total gradient.
+
+**What didn't work:**
+- focal_alpha=0.5 → removed bg dominance but also removed focal's easy-negative suppression → different mode collapse
+- class_weights → amplified rare-class fg, but with bg still dominant at 4.5:1, the amplified signal was still too weak → model overfit to predicting the least-penalized class everywhere
+- soft_targets → quality scores prevented convergence in E2E dual-assigner setup
+
+**What should work (not yet applied):**
+- focal_alpha=0.75 (flip fg/bg weights) → per-anchor 3:1 fg:bg, with bg_fg_ratio=3 → total 1:1 balance
+- Then class_weights with cap at 2.0 becomes safe because fg signal is strong enough
+
+## Loss System
+
+5-term tensor: `[xy, cls, L1, piou, smooth]` plus optional `aux_xy`. When adding new loss terms, append as new tensor elements — never add scalars (they broadcast incorrectly).
+
+- **Loss config threading**: `pannuke.yaml` → `_RayCastCriterionWrapper.__call__` → `RayCastE2ELoss.__init__` → `RayCastDetectionLoss.__init__` → assigners
+- **PLB** (Pixel-Level Balancing): area-based fg weighting `2*(1 - area/total_area)` boosts small nuclei. Controlled by `plb_enabled` in YAML
+- **bg_cls_decay**: downweights bg anchor cls loss. Applied once in shared path — do NOT reapply in o2o branch
+- **E2E dual-assignment**: Both branches use `RayCastAssigner` (dual-TAL). o2m: topk=15, topk2=15. o2o: topk=7, topk2=1 (NMS-free). `o2m` weight decays 0.8→0.1 over training
+- **Static lambdas**: lambda_l1=25.0, lambda_piou=2.0 (no ramp, no warmup). Smooth annealing still exists (0→1 over 40% training)
+
+## P2 Background Anchor Flood
+
+With P2-P3-P4 pyramid, P2 contributes ~4,096 out of 5,376 anchors (76%). Many P2 anchors are near nucleus boundaries and produce noisy cls gradients. The `bg_fg_ratio=3` subsampling helps but doesn't fully solve it. Per-level normalization or spatial bg masking are documented approaches but not yet implemented.
+
+## Critical Gotchas
+
+- **Validator double-normalization**: `RayCastTileDataset` returns float32 [0,1] images. `RayCastValidator.preprocess` must skip /255 — double-normalizing collapses mAP to 0
+- **XY decode**: Both training and inference must use `(sigmoid * 2.0 - 0.5 + anchor) * stride` — mismatch causes NaN losses
+- **AMP**: Cast to `.float()` before `torch.cdist` and IoU computations — float16 underflows
+- **InfiniteDataLoader**: Must use Ultralytics' version, not plain `DataLoader` — Ultralytics calls `train_loader.reset()`
+- **multiprocessing**: Use `get_context('spawn')` — default `fork` deadlocks with OpenMP
+- **Bias init**: `RayCastDetect.bias_init()` uses `crop_size` (not stride) for normalised-space predictions. Formula: `log(exp(target_px / crop_size) - 1)` in normalised space
+- **nc propagation**: `nc` must be passed at model construction time (`get_model()`), not patched after — the cv3 conv layers are built with wrong channel count otherwise. An assertion guard exists: `head.nc == self.model.nc`
+- **n_rays is mutable**: `constants.py` module-level state. Always call `configure_rays(n)` at startup
+- **Fallback strides**: Loss and assigner had hardcoded `[8,16,32]` fallback — wrong for P2-P3-P4 architecture (should be `[4,8,16]`). Check if still present when debugging stride-related issues
+- **loss_detach**: Must use o2o branch (not o2m) for progress bar display — otherwise logs wrong branch's metrics
+- **Huber delta**: Currently 0.05 for xy loss. If xy loss gets stuck with small raw values, the delta may be putting errors in L2 regime with tiny gradients. Consider increasing to 0.1 or using pure L1
+- **target_scores_sum**: Uses binarized cls targets (hard 0/1), not soft alignment scores. Soft scores inflated the denominator ~15%, weakening cls loss
+
+## Diagnostic Infrastructure
+
+The loss has `DIAG` logging that prints per-branch raw loss values at regular step intervals:
 ```
-YAML config (main/dataset.yaml)
-    ↓  ETLConfig + IngestionOrchestrator
-.npz files [image + raycast annotations, pixel space]
-    ↓  TransformOrchestrator (SpatialChunker + NormalizerAndPadder)
-.npz tiles [content_h, content_w preserved]
-    ↓  RayCastTileDataset
-[B, 3, H, W] + [M, 36] labels (normalised)
-    ↓  RayCastTrainer
-Trained weights
-    ↓  RayCastPredictor
-[N, 32, 2] polygon vertices (pixel space)
+DIAG o2m step=100 | fg=3293/86016 | raw: xy=0.0004 cls=2.79 l1=0.49 piou=0.95 smooth=0.007
+DIAG o2o step=100 | fg=377/86016 | raw: xy=0.016 cls=3.91 l1=0.51 piou=0.94 smooth=0.007
 ```
+- `fg=X/Y` shows foreground anchors / total — if fg is very low, the assigner isn't matching
+- `raw` values are pre-lambda — multiply by lambda to get actual contribution
+- Reported `xy_loss` = raw_xy × lambda_xy (500) — so raw_xy=0.017 → reported 8.5
 
-## Critical Implementation Details
+## Key Files
 
-### Annotation Format
-All stages use a single array format — no conversion between ETL and model:
-```
-[class_id, cx, cy, d_1, ..., d_32]   shape: (N, 35), float32, pixel space
-```
-Collated batch format adds leading `batch_idx`: shape `(sum_M, 36)`.
+| File | Purpose |
+|------|---------|
+| `raycasted/model/loss.py` | 5-term polygon loss + PLB + bg decay |
+| `raycasted/model/tal.py` | RayCastAssigner (Polar-IoU, dual-TAL) |
+| `raycasted/model/train.py` | RayCastTrainer + config wiring |
+| `raycasted/model/blocks/head.py` | RayCastDetect head (replaces bbox with raycast) |
+| `raycasted/model/builder.py` | Custom YAML model parser |
+| `raycasted/pipeline.py` | CLI orchestrator (ingest → transform → train) |
+| `raycasted/data/etl/utils/constants.py` | Mutable ray geometry constants |
+| `main/pannuke.yaml` | Training config (all hyperparams live here) |
+| `docs/project.md` | Authoritative spec (v4.17, 2200+ lines) |
 
-Normalisation (divide by `crop_size`, default 640) happens **only** in `RayCastTileDataset._normalise()`. Denormalisation at inference must use `crop_size` from `model.training_args['crop_size']` — never hardcoded.
+## Spec & Docs
 
-### Module Boundaries
-
-**`raycasted/data/etl/ops/`** — Single source of truth for ALL geometry logic. Every caller imports from here; nothing is reimplemented elsewhere. PyTorch variants use lazy imports (`import torch` inside function body) for ETL safety.
-
-**`raycasted/data/etl/utils/constants.py`** — Angular convention, permutation indices, format indices. Import from here; never recompute inline. Key constants: `RAY_ANGLES`, `CLASS_IDX=0`, `CX_IDX=1`, `CY_IDX=2`, `RAY_START_IDX=3`, `RAY_END_IDX=35`.
-
-**`raycasted/model/`** — Prediction head and training package. Subclasses `ultralytics.nn.modules.head.Detect` rather than modifying ultralytics in-place. Uses `InfiniteDataLoader` (not plain `DataLoader`) for trainer compatibility.
-
-### Structural Note
-
-The implementation nests modules under `etl/`:
-- `raycasted/data/etl/ops/` (geometry)
-- `raycasted/data/etl/utils/` (config, constants)
-- `raycasted/data/etl/loader/` (dataset)
-
-All import paths must use these actual locations.
-
-## Known Gotchas
-
-### Parallel Processing
-- **DEADLOCK**: `ProcessPoolExecutor` with default `fork` start method deadlocks with OpenMP-backed libraries (`cv2`, `polars`). Fix: use `multiprocessing.get_context('spawn')` for all process pools.
-- **PanNuke parallelism**: Only 3 registry rows (folds), so orchestrator-level parallelism uses ≤3 cores. `ParquetIngestor` handles internal ROI-level parallelism.
-
-### GPU Training
-- **AMP dtype mismatches**: `torch.cdist` and IoU computations fail with mixed float16/float32. Cast to `.float()` before these operations.
-- **Ignore class filtering**: `RayCastTileDataset` must filter `class_id=255` (Ignore) annotations to prevent index-out-of-bounds in assigner.
-- **Validator double normalization**: `RayCastTileDataset` returns float32 [0,1] images, but `DetectionValidator.preprocess()` divides by 255. Override to skip /255 to prevent mAP collapse.
-
-### Ultralytics Integration
-- **DataLoader**: Must use `ultralytics.data.build.InfiniteDataLoader` — Ultralytics calls `train_loader.reset()` after training.
-- **Plotting crashes**: Ultralytics' `plot_images()` and `plot_predictions()` expect 4-dim bboxes but get 34-dim polygon data. Override as no-ops in trainer/validator.
-- **Bias initialization**: `RayCastDetect.bias_init()` must use `crop_size` not `stride` for normalised-space predictions.
-
-### E2E Dual-Assignment Architecture (NMS-Free)
-- **CRITICAL**: RayCastED uses `E2ELoss` for NMS-free detection.
-- **Architecture**: `one2many` branch (dense supervision) + `one2one` branch (NMS-free enforcement).
-- **Assignment**: Both branches use `RayCastAssigner` with Polar-IoU for matching.
-- **NMS-free requirement**: `one2one.assigner.topk=1` (exactly 1 positive anchor per GT for NMS-free inference).
-- **Config parameter**: Use `tal_topk` (NOT `assigner_topk`) - this correctly propagates to both branches.
-- **Default values**: `tal_topk=13`, `assigner_radius_scale=1.5`, `focal_loss=false` (proven baseline).
-- **Validation**: Check console output for `✓ E2E NMS-free: o2m.topk=13, o2o.topk=1` during training.
-- **Weight decay**: Parent `E2ELoss` decays `o2m` weight from 0.8→0.1 over training. `RayCastE2ELoss` must set `hyp.epochs` on both branches to match actual `max_epochs`, otherwise the schedule collapses (e.g. `hyp.epochs=100` with `max_epochs=200` starves one2many for the entire second half of training).
-- **topk2 (secondary filtering)**: Ultralytics' NMS-free mechanism uses a two-stage assignment: `select_topk_candidates` picks `topk` anchors, then `select_highest_overlaps` checks `topk2 != topk` and keeps only `topk2` best. RayCastED must set `one2one.topk2=1` (NOT `one2one.topk=1`). Using `topk=1` directly skips the candidate pool, giving the assigner no choice. Use `topk=max(tal_topk//2, 7)` to provide a candidate pool. For `one2many`, set `topk2=topk` to disable secondary filtering.
-- **IoU-aware scoring**: The centerness branch is trained to predict **Polar-IoU** (not centered-ness). At inference, `score = cls * sigmoid(centerness)` becomes quality-aware confidence, matching LSP-DETR's `score = cls * IoU` strategy. This is critical for mAP@0.5 — without it, poorly-shaped polygons get high confidence and corrupt the PR curve ordering.
-- **Confidence threshold**: With IoU-aware scoring, scores are naturally lower (multiplied by IoU ≈ 0.3-0.7 vs centerness ≈ 0.8-0.95). Use `conf=0.20` (not the default 0.25) for optimal mAP@0.5. This was validated on PanNuke Fold3: conf=0.20 gives mAP@0.5=0.391, F1=0.641 vs conf=0.25 gives mAP@0.5=0.387, F1=0.636.
-
-### Geometry Operations
-- **XY decode mismatch**: Training and inference must use same decode formula: `(sigmoid * 2.0 - 0.5 + anchor) * stride`.
-- **Val losses NaN**: Force `overlaps` tensor to float32 in assigner — `eps=1e-9` underflows to 0 in float16.
-- **Centroid collapse**: `Huber(delta=0.01)` on normalised coordinates produces tiny gradients. Use `lambda_xy=50.0, delta=1.0` for stronger centroid loss.
-- **NMS-free loss weights**: For `one2one.topk=1`, use LSP-DETR-inspired weighting:
-  - `lambda_l1=5.0` (very strong direct ray supervision)
-  - `lambda_piou=0.5` (minimal IoU, mainly for ranking)
-  - This compensates for sparse assignment while maintaining NMS-free property.
-
-### LSP-DETR Baseline (PanNuke Fold3)
-Reference values from LSP-DETR author evaluation (source: `docs/ablation.md`):
-| Metric | LSP-DETR |
-|--------|----------|
-| AJI | 0.677 |
-| AP@0.5 | 0.691 |
-| AP@0.5:0.95 | 0.441 |
-| AP@0.7 | 0.563 |
-| AP@0.9 | 0.100 |
-| Precision | 0.862 |
-| Recall | 0.791 |
-| F1 (centroid) | 0.825 |
-| bDQ | 0.803 |
-| bSQ | 0.807 |
-| bPQ | 0.657 |
-| bMDQ | 0.811 |
-| bMSQ | 0.811 |
-| bMPQ | 0.666 |
-| mDQ | 0.581 |
-| mSQ | 0.672 |
-| mPQ | 0.476 |
-| mMDQ | 0.481 |
-| mMSQ | 0.676 |
-| mMPQ | 0.481 |
-⚠️ LSP-DETR F1 is centroid-based (Euclidean distance threshold). RayCastED ablation F1 is mask-based (DQ from PQ). Not directly comparable.
-
-## Testing Strategy
-
-Tests are plain `assert`-based scripts organized by phase:
-
-- **Phase 0.5**: `tests/phase_0_5/test_round_trip.py` — geometry round-trip tests (CPU-only)
-- **Phase 5-6**: `tests/phase_6/test_loss_gpu.py` — GPU loss/assigner tests
-- **Phase 10**: `tests/phase_10/test_train_gpu.py` — GPU training integration
-- **Phase 11**: `tests/phase_11/test_pipeline_gpu.py` — end-to-end pipeline
-
-GPU-bounded tests require CUDA — all others are CPU-only or require only real data access.
-
-## Configuration
-
-**Single source of truth**: `docs/project.md` — read it before modifying any module.
-
-**ETL config**: `main/dataset.yaml` contains all dataset-specific settings. `annotation_type` is a global-only setting — one pipeline run uses one annotation type for all datasets.
-
-**Size unification**: Two validated Pydantic fields:
-- `max_size`: ETL tile size (e.g., 1024)
-- `crop_size`: Model input size (e.g., 640)
-
-Pipeline defaults `imgsz` from config's `crop_size`.
-
-## Deferred Features
-
-- `MatInstIngestor._extract_raycast_annotations()` is a stub (`NotImplementedError`)
-- H&E overlay validation
-- Zero-ray fraction < 1% validation
-- Ingestor diagnostic counters not yet wired
-- MLflow logging of annealing values requires custom callback
-
-### XY Plateau (Scratch Training)
-- **Root cause**: Backbone feature poverty — the head cannot learn centroid regression from random backbone features (proven by simulation in `docs/xy_plateau_analysis.md`). Chicken-and-egg: head needs spatial features, backbone needs xy gradient to learn them.
-- **No pretrained weights**: This is a new architecture with a custom RayCast head. YOLO COCO pretrained weights have negligible impact because the domain shift from natural images to histopathology negates most benefits. `pretrained_backbone: null` is the default.
-- **What works**: Classification converges first (easier task, only needs object presence), then backbone features become spatially informative, then xy regression breaks through the plateau.
-- **Assigner warmup** (`assigner_warmup_epochs=50`): First N epochs use Gaussian centroid-distance instead of Polar-IoU for assignment. Prevents garbage matches from meaningless early ray predictions.
-- **Lambda_l1 warmup suppression**: During warmup `lambda_l1=0.1` (floor), jumps to `25.0` after warmup.
-- **Rejected hypotheses**: Muon orthogonalization does NOT suppress xy (lambda_xy=500 makes xy gradient dominate 99.9% of head weight matrix). Sigmoid saturation and decode range are not the bottleneck.
-- **Current config**: `lambda_xy=500.0`, `optimizer=MuSGD`, `lr0=0.01`, `cos_lr=true`, `tal_topk=20`, `assigner_warmup_epochs=50`.
-
-## Deployment
-
-Target: NVIDIA Jetson (Orin/Xavier) via ONNX → TensorRT FP16 inference.
+- `docs/project.md` is the authoritative specification — read it before modifying any module
+- `CLAUDE.md` has the full command reference and architecture overview
+- `docs/status.md` tracks bugs fixed, known issues, and training results

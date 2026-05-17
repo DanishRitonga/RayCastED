@@ -61,7 +61,7 @@ Collated batch adds leading `batch_idx`: `(sum_M, 2+R+2)`. Normalisation (divide
 - `raycasted/data/etl/ops/` — single source of truth for ALL geometry (PyTorch variants use lazy imports)
 - `raycasted/data/etl/utils/constants.py` — angular convention, format indices (`RAY_START_IDX`, etc.)
 - `raycasted/model/blocks/head.py` — `RayCastDetect` head (subclasses `Detect`, replaces bbox with raycast)
-- `raycasted/model/loss.py` — `RayCastE2ELoss` (4-term polygon loss: xy/cls/l1/smooth + aux_xy)
+- `raycasted/model/loss.py` — `RayCastE2ELoss` (5-term polygon loss: xy/cls/L1/piou/smooth + aux_xy)
 - `raycasted/model/tal.py` — `RayCastAssigner` (Polar-IoU matching) + `HungarianRayCastAssigner` (one2one)
 - `raycasted/model/train.py` — `RayCastTrainer` (subclasses `DetectionTrainer`)
 - `raycasted/model/builder.py` — `raycasted_parse_model()` (custom YAML parser for ResoConv, C3k2_LK blocks)
@@ -95,9 +95,11 @@ Ruff config: line-length 120, single quotes, Google-style docstrings, isort with
 - **InfiniteDataLoader**: Must use Ultralytics' `InfiniteDataLoader` (not plain `DataLoader`) — Ultralytics calls `train_loader.reset()`.
 - **XY decode**: Training and inference must use `(sigmoid * 2.0 - 0.5 + anchor) * stride`.
 - **Bias init**: `RayCastDetect.bias_init()` must use `crop_size` (not stride) for normalised-space predictions.
-- **Loss is a 4-element tensor**: `RayCastDetectionLoss.loss()` returns `(loss * batch_size, loss_detach)` where `loss` is `[xy, cls, l1, smooth]`. Ultralytics calls `.sum()` on the result for backward. When adding new loss terms, append as new elements (don't add scalars — they broadcast).
+- **Loss is a 5-element tensor**: `RayCastDetectionLoss.loss()` returns `(loss * batch_size, loss_detach)` where `loss` is `[xy, cls, L1, piou, smooth]`. Ultralytics calls `.sum()` on the result for backward. When adding new loss terms, append as new elements (don't add scalars — they broadcast).
 - **n_rays is mutable**: `constants.py` has `configure_rays(n)` that mutates module-level `N_RAYS`. Pipeline calls it at startup; tests must call it too.
 - **No pretrained weights**: This is a new architecture. COCO pretrained backbone is counterproductive due to domain gap (natural images → H&E histopathology).
+- **Classification collapse**: The o2o branch must NOT apply bg_cls_decay twice. The shared path at line 528 already applies it — adding an o2o-specific extra decay (bg_cls_decay²) suppresses bg gradient to ~6%, causing the model to always predict one class. The o2o branch dominates training by epoch 500 (weight 0.9), so its bg signal matters enormously.
+- **focal_alpha=0.25 is standard**: fg weight=0.25, bg weight=0.75. Do NOT set to 0.5 (equal weight) — the bg amplification is critical for preventing mode collapse. `class_weights` amplify fg only and should be used conservatively (cap at 2.0) or disabled entirely when classification is unstable.
 
 ## Spec
 
