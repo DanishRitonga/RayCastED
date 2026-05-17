@@ -1,128 +1,105 @@
-# RayCastED — Agent Notes
+# AGENTS.md - RayCastED Instructions
 
-Compact instruction file for future sessions. Read `CLAUDE.md` for full commands and architecture; this file covers what's easy to miss.
-
-## Quick Reference
+## Core Commands
 
 ```bash
-uv sync                                          # install
-uv run ruff check . && uv run ruff format .       # lint + format (always before commit)
-uv run python -m pytest tests/phase_6/ -x -q     # main test suite (27 tests)
-uv run python -m pytest tests/phase_6/test_loss.py::test_constructor -xvs  # single test
-bash clean_cache.sh                               # clean __pycache__ after tests
+# Environment setup
+uv sync
+
+# Code quality
+uv run ruff check .
+uv run ruff format .
+
+# Testing (all tests)
+uv run python -m pytest tests/phase_6/ -x -q
+
+# Cleaning (cache reset)
+bash clean_cache.sh
 ```
 
-**Never launch training.** Edit `main/pannuke.yaml` and tell the user to run it.
+## Architecture & Data Flow
 
-## What This Project Is
+**Main directories:**
+- `raycasted/model/` — model definitions, train.py, loss.py, tal.py
+- `main/pannuke.yaml` — training config
+- `tests/phase_6/` — 27 pytest tests
 
-RayCastED is a YOLOv26 variant that replaces bounding-box detection with **raycast polygon detection** for cell nuclei in histopathology WSIs. Each detection outputs a centroid + 64 radial rays (not axis-aligned boxes). No pretrained weights — trained from scratch on H&E tissue images.
+**Key files by role:**
+- `raycasted/model/head.py` — classification + ray head, bias_init, parse_output
+- `raycasted/model/loss.py` — loss computation, assignment integration
+- `raycasted/model/tal.py` — assignment logic (Hungarian + greedy one2one)
+- `raycasted/data/etl/utils/constants.py` — N_RAYS, ANGLE state (module-level)
 
-## Architecture That's Not Obvious From Filenames
+**Execution flow:**
+```
+train.py → get_model() (constructs model with nc=self.data['nc'])
+  ↓
+RayCastDetectionLoss (loss.py) → RayCastAssigner (tal.py) → Hungarian or one2one assignment
+  ↓
+Forward pass → parse_output (head.py) → decode for inference
+```
 
-- `raycasted/model/` is a **subclass package** — all Ultralytics modifications extend base classes in-place, never editing `ultralytics/` source
-- `raycasted/model/train.py` contains `_RayCastCriterionWrapper` which threads YAML config → loss/assigner construction. Any new loss param must pass through: YAML → `train.py` wrapper → `RayCastE2ELoss.__init__` → `RayCastDetectionLoss.__init__` → assigner constructors
-- `raycasted/model/builder.py` has `raycasted_parse_model()` — custom YAML parser for `ResoConv`, `C3k2_LK`, `ResoConvHybrid` blocks not in standard Ultralytics
-- `raycasted/data/etl/utils/constants.py` has **mutable module-level globals** (`N_RAYS`, `RAY_ANGLES`, etc.) changed via `configure_rays(n)`. Pipeline calls it at startup; tests must call it too
-- The P2-P3-P4 pyramid (stride 4/8/16) is defined in `raycasted/cfg/yolo26s-run28-p234.yaml`, not the standard P3-P4-P5
+## Training Config Threading Pattern
 
-## Training History — What We've Tried and Why
-
-This project went through extensive trial-and-error. Understanding what was tried prevents repeating mistakes:
-
-### Removed: Assignment Warmup / Curriculum Learning
-The codebase previously had a 50-epoch "warmup" where the assigner used Gaussian centroid-distance similarity instead of Polar-IoU, combined with lambda annealing that crushed L1/piou losses to 0.1 during warmup. This was **removed** because:
-- Tight warmup sigma puts assigned anchors in the L2 regime of Huber loss → tiny gradients → xy loss stuck at ~8.4 for 10+ epochs
-- Crushing lambda_l1 to 0.1 prevented ray learning for 50 epochs — predictions were still random when the ramp started
-- The curriculum was fighting itself: the assignment already handles curriculum by ranking on centroids; the loss weights didn't need to also suppress rays
-
-### Removed: Hungarian Matching for o2o Branch
-Originally used `HungarianRayCastAssigner` (scipy `linear_sum_assignment`) for the one2one branch. Replaced with **standard dual-TAL** (same `RayCastAssigner` for both branches, different topk) because:
-- At epoch 0, predicted rays are random noise → Hungarian cost matrix is noise-dominated → confident-but-wrong 1:1 matches
-- No soft quality scores to downweight bad matches (unlike TAL which has alignment metrics)
-- Stock YOLO26 dual-TAL is simpler and more robust: o2m topk=15/topk2=15, o2o topk=7/topk2=1
-
-### Current Architecture: Standard Dual-TAL + PLB + bg_cls_decay
-- Both branches use `RayCastAssigner` with Polar-IoU from epoch 0
-- PLB (Pixel-Level Balancing): area-based fg weighting `2*(1 - area/total_area)` boosts small nuclei
-- bg_cls_decay: downweights bg anchor cls loss
-- Static lambdas (no annealing): lambda_l1=25.0, lambda_piou=2.0
-
-### Classification Mode Collapse — The Gradient Budget Problem
-The model achieved Recall=0.881 (excellent localization) but Precision=0.074 (catastrophic classification). Root cause is a gradient budget imbalance:
-
-With focal_alpha=0.25, bg_fg_ratio=3, bg_cls_decay=0.5:
-- Per-anchor: fg=0.031, bg=0.094 → 3:1 bg:fg
-- Count ratio: 3:1 bg:fg
-- Total gradient: **4.5:1 bg:fg** — 82% of cls gradient budget goes to "be background"
-
-This leaves only 18% for inter-class discrimination across 5 classes with wildly different frequencies (Neo=40.8%, Dead=1.5%). Dead class gets ~0.3% of total gradient.
-
-**What didn't work:**
-- focal_alpha=0.5 → removed bg dominance but also removed focal's easy-negative suppression → different mode collapse
-- class_weights → amplified rare-class fg, but with bg still dominant at 4.5:1, the amplified signal was still too weak → model overfit to predicting the least-penalized class everywhere
-- soft_targets → quality scores prevented convergence in E2E dual-assigner setup
-
-**What should work (not yet applied):**
-- focal_alpha=0.75 (flip fg/bg weights) → per-anchor 3:1 fg:bg, with bg_fg_ratio=3 → total 1:1 balance
-- Then class_weights with cap at 2.0 becomes safe because fg signal is strong enough
-
-## Loss System
-
-5-term tensor: `[xy, cls, L1, piou, smooth]` plus optional `aux_xy`. When adding new loss terms, append as new tensor elements — never add scalars (they broadcast incorrectly).
-
-- **Loss config threading**: `pannuke.yaml` → `_RayCastCriterionWrapper.__call__` → `RayCastE2ELoss.__init__` → `RayCastDetectionLoss.__init__` → assigners
-- **PLB** (Pixel-Level Balancing): area-based fg weighting `2*(1 - area/total_area)` boosts small nuclei. Controlled by `plb_enabled` in YAML
-- **bg_cls_decay**: downweights bg anchor cls loss. Applied once in shared path — do NOT reapply in o2o branch
-- **E2E dual-assignment**: Both branches use `RayCastAssigner` (dual-TAL). o2m: topk=15, topk2=15. o2o: topk=7, topk2=1 (NMS-free). `o2m` weight decays 0.8→0.1 over training
-- **Static lambdas**: lambda_l1=25.0, lambda_piou=2.0 (no ramp, no warmup). Smooth annealing still exists (0→1 over 40% training)
-
-## P2 Background Anchor Flood
-
-With P2-P3-P4 pyramid, P2 contributes ~4,096 out of 5,376 anchors (76%). Many P2 anchors are near nucleus boundaries and produce noisy cls gradients. The `bg_fg_ratio=3` subsampling helps but doesn't fully solve it. Per-level normalization or spatial bg masking are documented approaches but not yet implemented.
+When adding a new config parameter:
+1. Add to `_RayCastCriterionWrapper.__call__` config parsing (train.py:~180)
+2. Pass to `RayCastE2ELoss.__init__` (loss.py:~575)
+3. Pass to `RayCastDetectionLoss.__init__` (loss.py:~280)
+4. Pass to assigner constructors in loss.py (~661, ~676)
+5. Add to main/pannuke.yaml
+6. Run: `ruff check && ruff format && pytest tests/phase_6/ -x -q`
 
 ## Critical Gotchas
 
-- **Validator double-normalization**: `RayCastTileDataset` returns float32 [0,1] images. `RayCastValidator.preprocess` must skip /255 — double-normalizing collapses mAP to 0
-- **XY decode**: Both training and inference must use `(sigmoid * 2.0 - 0.5 + anchor) * stride` — mismatch causes NaN losses
-- **AMP**: Cast to `.float()` before `torch.cdist` and IoU computations — float16 underflows
-- **InfiniteDataLoader**: Must use Ultralytics' version, not plain `DataLoader` — Ultralytics calls `train_loader.reset()`
-- **multiprocessing**: Use `get_context('spawn')` — default `fork` deadlocks with OpenMP
-- **Bias init**: `RayCastDetect.bias_init()` uses `crop_size` (not stride) for normalised-space predictions. Formula: `log(exp(target_px / crop_size) - 1)` in normalised space
-- **nc propagation**: `nc` must be passed at model construction time (`get_model()`), not patched after — the cv3 conv layers are built with wrong channel count otherwise. An assertion guard exists: `head.nc == self.model.nc`
-- **n_rays is mutable**: `constants.py` module-level state. Always call `configure_rays(n)` at startup
-- **Fallback strides**: Loss and assigner had hardcoded `[8,16,32]` fallback — wrong for P2-P3-P4 architecture (should be `[4,8,16]`). Check if still present when debugging stride-related issues
-- **loss_detach**: Must use o2o branch (not o2m) for progress bar display — otherwise logs wrong branch's metrics
-- **Huber delta**: Currently 0.05 for xy loss. If xy loss gets stuck with small raw values, the delta may be putting errors in L2 regime with tiny gradients. Consider increasing to 0.1 or using pure L1
-- **target_scores_sum**: Uses binarized cls targets (hard 0/1), not soft alignment scores. Soft scores inflated the denominator ~15%, weakening cls loss
+### Classification Collapse
 
-## Diagnostic Infrastructure
+1. **bg_cls_decay double-application**: `raycasted/model/train.py:361` applies bg_cls_decay twice — once in the loop, once in the partial function. This over-regularizes background classes, causing them to be treated as easy negatives.
 
-The loss has `DIAG` logging that prints per-branch raw loss values at regular step intervals:
-```
-DIAG o2m step=100 | fg=3293/86016 | raw: xy=0.0004 cls=2.79 l1=0.49 piou=0.95 smooth=0.007
-DIAG o2o step=100 | fg=377/86016 | raw: xy=0.016 cls=3.91 l1=0.51 piou=0.94 smooth=0.007
-```
-- `fg=X/Y` shows foreground anchors / total — if fg is very low, the assigner isn't matching
-- `raw` values are pre-lambda — multiply by lambda to get actual contribution
-- Reported `xy_loss` = raw_xy × lambda_xy (500) — so raw_xy=0.017 → reported 8.5
+2. **focal_alpha=0.5 causes mode collapse**: When alpha=0.5, background gets 3x more weight than foreground. Combined with the nc=80 issue (75 ghost channels), this overwhelms the 5 real classes.
 
-## Key Files
+3. **class_weights failure**: `class_weights` in loss.py is ignored during warmup (epochs 0-50) because the assigner uses centroid-distance similarity, which doesn't use cls scores.
 
-| File | Purpose |
-|------|---------|
-| `raycasted/model/loss.py` | 5-term polygon loss + PLB + bg decay |
-| `raycasted/model/tal.py` | RayCastAssigner (Polar-IoU, dual-TAL) |
-| `raycasted/model/train.py` | RayCastTrainer + config wiring |
-| `raycasted/model/blocks/head.py` | RayCastDetect head (replaces bbox with raycast) |
-| `raycasted/model/builder.py` | Custom YAML model parser |
-| `raycasted/pipeline.py` | CLI orchestrator (ingest → transform → train) |
-| `raycasted/data/etl/utils/constants.py` | Mutable ray geometry constants |
-| `main/pannuke.yaml` | Training config (all hyperparams live here) |
-| `docs/project.md` | Authoritative spec (v4.17, 2200+ lines) |
+### Assignment & Warmup
 
-## Spec & Docs
+4. **warmup sigma must be configurable**: Sigma is hardcoded at 0.15 in `tal.py:get_box_metrics`. This permissive Gaussian matching allows anchors 30-40px away from GT centroids to get high alignment scores, creating shallow gradient wells. Always thread sigma through loss.py → tal.py and update pannuke.yaml.
 
-- `docs/project.md` is the authoritative specification — read it before modifying any module
-- `CLAUDE.md` has the full command reference and architecture overview
-- `docs/status.md` tracks bugs fixed, known issues, and training results
+5. **assigner_radius_scale must match model geometry**: Default fallback [8,16,32] in loss.py is wrong for P2-P3-P4 architecture. Use model's stride values instead.
+
+6. **dynamic topk masks garbage**: `select_topk_candidates` in tal.py masks out zero-metric entries (lines 398-401). You can increase tal_topk to get more candidates through the containment filter.
+
+### Model Construction
+
+7. **nc must be set at construction time**: Pass `nc=self.data['nc']` in `get_model()` (train.py:364). The assertion guard (line 584) ensures head.nc == self.model.nc, but if you set nc after construction, cv3 conv layers stay at 80 channels.
+
+8. **bias_init default (640) wrong**: `head.bias_init()` uses a hardcoded default. After the first `set_model_attributes` call, it's harmless but wrong during initial construction.
+
+### Ultralytics Integration
+
+9. **InfiniteDataLoader must be wrapped**: `DataLoader` objects are infinite when `shuffle=True`. Never iterate a DataLoader directly — wrap in `torch.utils.data.InfiniteDataLoader` if you need to access iterables.
+
+10. **AMP uses float16**: Forward pass is float16, backward pass is float32. The model must be fully FP16 compatible. `torch.cuda.amp` handles dtype casting automatically.
+
+11. **Validator double-normalizes**: The validator computes metrics on train_set, but `metrics` method normalizes by len(train_set). For inference on val_set, call `validator(model, dataloader=...)` directly.
+
+12. **XY decode mismatch**: Loss decode uses sigmoid + offset. Inference decode must use the same formula, or predictions will be wrong.
+
+## Testing
+
+**Test entry points:**
+- `tests/phase_6/` — 27 tests via pytest
+- Single test file: `uv run python -m pytest tests/phase_6/test_tal.py -x -v`
+
+**Test file naming:**
+- Phase 1: TAL assignment tests (tal.py)
+- Phase 2: Head tests (head.py)
+- Phase 3: Loss tests (loss.py)
+- Phase 4: Trainer tests (train.py)
+- Phase 5: Dataset tests (raycast_dataset.py)
+- Phase 6: E2E integration tests
+
+## Style & Conventions
+
+- Follow ruff formatting and linting (`uv run ruff check . && ruff format .`)
+- Use `uv run python` for all scripts
+- Prefer executable source of truth over prose (configs, scripts > docs)
+- When docs conflict with config/scripts, trust the executable source
