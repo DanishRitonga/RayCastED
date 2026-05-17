@@ -185,16 +185,13 @@ class RayCastDetect(Detect):
         else:
             self.aux_xy = None
 
-        # Recreate one2one box head with polygon cv2; share cls head (cv3).
-        # Sharing cv3 lets one2many's dense cls training (topk=6, ~1200
-        # positives) directly benefit the one2one branch at inference.
-        # The box head stays separate because regression targets differ
-        # (one2many learns from dense TAL positives, one2one from Hungarian).
+        # Separate o2o heads — both box (cv2) and cls (cv3) are deepcopied.
+        # Shared cv3 caused 11.5x overprediction: o2m's dense positives (topk=15)
+        # taught the shared cls head to fire high scores for many anchors per GT,
+        # defeating o2o's topk2=1 duplicate suppression.
         if self._end2end_arg:
             self.one2one_cv2 = copy.deepcopy(self.cv2)
-            # Remove the deepcopy of cv3 — both branches share the same cls head
-            if hasattr(self, 'one2one_cv3'):
-                del self.one2one_cv3
+            # one2one_cv3 is created by parent Detect.__init__ as deepcopy of cv3
 
     @property
     def one2many(self):
@@ -203,8 +200,8 @@ class RayCastDetect(Detect):
 
     @property
     def one2one(self):
-        """Return one2one head components — cls head shared with one2many."""
-        return dict(box_head=self.one2one_cv2, cls_head=self.cv3)
+        """Return one2one head components — separate cls head for NMS-free inference."""
+        return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
 
     def forward_head(
         self,
@@ -233,13 +230,11 @@ class RayCastDetect(Detect):
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization.
 
-        Overrides parent Detect.fuse() which sets cv2=cv3=None.
-        Since we share cv3 between one2many and one2one branches,
-        we must preserve cv3 for the one2one inference path.
+        Removes cv2 and cv3 (one2many heads), keeping only one2one_cv2 and
+        one2one_cv3 for NMS-free inference.
         """
-        # Only remove one2many box head — keep cv3 alive for one2one cls
         self.cv2 = None
-        # cv3 is intentionally NOT set to None — it's shared with one2one
+        self.cv3 = None
 
     def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode polygon predictions for inference.
