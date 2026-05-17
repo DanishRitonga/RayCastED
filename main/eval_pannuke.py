@@ -77,36 +77,7 @@ def load_model(weights_path: str, device: torch.device):
     return model
 
 
-def centroid_nms(pred_polys, pred_confs, pred_cls, min_distance_px=6.0):
-    """Remove duplicate predictions whose centroids are closer than min_distance_px.
-
-    Keeps the highest-confidence prediction in each cluster.
-    """
-    if len(pred_polys) == 0:
-        return pred_polys, pred_confs, pred_cls
-
-    order = np.argsort(-pred_confs)
-    pred_polys = pred_polys[order]
-    pred_confs = pred_confs[order]
-    pred_cls = pred_cls[order]
-
-    centroids = pred_polys[:, :2]
-    keep = []
-    for i in range(len(centroids)):
-        should_keep = True
-        for j in keep:
-            dist = np.linalg.norm(centroids[i] - centroids[j])
-            if dist < min_distance_px:
-                should_keep = False
-                break
-        if should_keep:
-            keep.append(i)
-
-    keep = np.array(keep)
-    return pred_polys[keep], pred_confs[keep], pred_cls[keep]
-
-
-def run_inference(model, dataloader, device, conf_threshold=0.20, nms_dist=6.0):
+def run_inference(model, dataloader, device, conf_threshold=0.20):
     """Run inference over all tiles, collecting predictions and GT.
 
     Returns:
@@ -155,10 +126,6 @@ def run_inference(model, dataloader, device, conf_threshold=0.20, nms_dist=6.0):
                     pred_cls = np.array([], dtype=int)
 
                 pred_poly = det[:, :raycast_dim] if det.shape[0] > 0 else np.zeros((0, raycast_dim), dtype=np.float32)
-
-                # Centroid NMS to remove duplicate detections
-                if len(pred_poly) > 0 and nms_dist > 0:
-                    pred_poly, pred_confs, pred_cls = centroid_nms(pred_poly, pred_confs, pred_cls, nms_dist)
 
                 results.append(
                     {
@@ -500,7 +467,6 @@ def main():
     parser.add_argument('--device', type=str, default='0')
     parser.add_argument('--conf', type=float, default=0.20)
     parser.add_argument('--workers', type=int, default=4)
-    parser.add_argument('--nms-dist', type=float, default=6.0)
     args = parser.parse_args()
 
     try:
@@ -573,7 +539,7 @@ def _main(args):
 
     # --- Run inference ---
     print('Running inference...', flush=True)
-    results = run_inference(model, dataloader, device, conf_threshold=args.conf, nms_dist=args.nms_dist)
+    results = run_inference(model, dataloader, device, conf_threshold=args.conf)
     n_pred_total = sum(len(r['pred_polys']) for r in results)
     n_gt_total = sum(len(r['gt_polys']) for r in results)
     print(f'  Processed {len(results)} images: {n_pred_total} predictions, {n_gt_total} GT', flush=True)
@@ -628,8 +594,7 @@ def _main(args):
 
     print(f'\nImages evaluated: {len(results)}')
     print(f'Confidence threshold: {args.conf}')
-    print(f'NMS distance: {args.nms_dist}')
-    print(f'Total predictions (after NMS): {n_pred_total}')
+    print(f'Total predictions: {n_pred_total}')
     print(f'Total GT instances: {n_gt_total}')
 
 
