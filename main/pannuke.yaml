@@ -55,6 +55,8 @@ training:
   assigner_alpha: 0.5         # cls score exponent in align = cls^α × piou^β
   assigner_beta: 6.0          # Polar-IoU exponent — high β creates geometric dominance for dense cells
   align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
+  o2o_topk2_start: 3           # o2o branch initial positives per GT (annealed to 1)
+  o2o_topk2_anneal_epoch: 120  # epoch to start annealing topk2 from o2o_topk2_start→1
 
   # Auxiliary XY head: bypasses 4-layer head stack to give backbone direct xy gradient
   # because the head attenuates xy gradients through 4 Conv layers.
@@ -82,7 +84,7 @@ training:
 
   # Pixel-Level Balancing: area-based fg weighting to boost small nuclei
   plb_enabled: true             # Enable PLB (area-based weighting)
-  bg_cls_decay: 0.5             # Background classification loss decay (1.0=full, 0.0=disabled)
+  bg_cls_decay: 0.5             # Bg cls gradient multiplier. 1.0=full bg gradient, 0.0=no bg gradient
   fg_cls_boost: 0.0             # Fg cls boost by alignment quality: weight = 1 + boost * quality (0.0=disabled)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)

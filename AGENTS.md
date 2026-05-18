@@ -83,6 +83,10 @@ When adding a new config parameter:
 
 12. **XY decode mismatch**: Loss decode uses sigmoid + offset. Inference decode must use the same formula, or predictions will be wrong.
 
+13. **Hardcoded `steps_per_epoch=133`** (`loss.py:744`): Used for smooth loss annealing and aux_xy decay schedules. If actual steps/epoch differs (different dataset/batch size), schedules activate at wrong times. TODO: compute dynamically from dataset size and batch size.
+
+14. **Shared cv3 overprediction fix** (resolved): The o2o branch now has a separate `one2one_cv3` cls head (not shared with o2m). The shared head caused 11.5x overprediction because o2m's dense positives (topk=15) taught the shared cls head to fire high scores for many anchors per GT. `fuse()` now sets `cv2=cv3=None`, keeping only o2o heads for inference.
+
 ## Testing
 
 **Test entry points:**

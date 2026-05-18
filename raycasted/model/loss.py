@@ -667,6 +667,8 @@ class RayCastE2ELoss(E2ELoss):
         fg_cls_boost: float = 0.0,
         soft_targets: bool = False,
         class_weights: torch.Tensor | None = None,
+        o2o_topk2_start: int = 1,
+        o2o_topk2_anneal_epoch: int = 0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -730,11 +732,21 @@ class RayCastE2ELoss(E2ELoss):
 
         one2one_pool = max(tal_topk // 2, 7)
         self.one2one.assigner.topk = one2one_pool
-        self.one2one.assigner.topk2 = 1  # single best anchor per GT
+        self.one2one.assigner.topk2 = o2o_topk2_start  # annealed to 1 in update()
+
+        # o2o topk2 annealing: start with few positives per GT for stable gradients,
+        # then tighten to topk2=1 for strict NMS-free inference. Inspired by
+        # One-to-Few (Li et al., CVPR 2023) — small objects benefit from multiple
+        # positives early in training.
+        self._o2o_topk2_start = o2o_topk2_start
+        self._o2o_topk2_anneal_epoch = o2o_topk2_anneal_epoch
 
         # Validate E2E architecture integrity
-        assert self.one2one.assigner.topk2 == 1, (
-            f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
+        assert self.one2one.assigner.topk2 >= 1, (
+            f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be >= 1'
+        )
+        assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
+            f'E2E violation: one2many topk={self.one2many.assigner.topk} != topk2={self.one2many.assigner.topk2}'
         )
         assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
             f'E2E violation: one2many.topk2 ({self.one2many.assigner.topk2}) != topk ({self.one2many.assigner.topk})'
@@ -759,18 +771,23 @@ class RayCastE2ELoss(E2ELoss):
         self.aux_xy_decay_epoch = max(1, aux_xy_ramp_epochs)
 
     def update(self):
-        """Update o2m/o2o weights (inherited) + anneal smoothness + validate E2E integrity."""
+        """Update o2m/o2o weights (inherited) + anneal smoothness + topk2 + validate E2E integrity."""
         super().update()
+
+        current_epoch = self.updates / max(self.steps_per_epoch, 1)
 
         # Validate E2E integrity on first update (catches config drift)
         if self.updates == 1:
+            topk2_cur = self.one2one.assigner.topk2
             print(
                 f'✓ E2E NMS-free (dual-TAL): o2m.topk={self.one2many.assigner.topk}, '
-                f'o2o.topk={self.one2one.assigner.topk}, o2o.topk2=1'
+                f'o2o.topk={self.one2one.assigner.topk}, o2o.topk2={topk2_cur}'
             )
-            assert self.one2one.assigner.topk2 == 1, (
-                f'E2E violation: one2one.topk2={self.one2one.assigner.topk2}, must be 1 for NMS-free'
-            )
+            if self._o2o_topk2_start > 1:
+                print(
+                    f'  o2o topk2 anneal: {self._o2o_topk2_start}→1 starting at epoch {self._o2o_topk2_anneal_epoch}'
+                )
+
             assert self.one2many.assigner.topk == self.one2many.assigner.topk2, (
                 f'E2E violation: one2many topk={self.one2many.assigner.topk} != topk2={self.one2many.assigner.topk2}'
             )
@@ -793,6 +810,19 @@ class RayCastE2ELoss(E2ELoss):
             branch.lambda_smooth = lambda_smooth
             branch.lambda_l1 = lambda_l1
             branch.lambda_piou = lambda_piou
+
+        # o2o topk2 annealing: few positives → strict 1:1 for NMS-free inference
+        # Linear decay from o2o_topk2_start to 1 over the annealing window.
+        # Before anneal_epoch: keep topk2_start (multi-positive for stable gradients)
+        # After anneal_epoch: linear decay to 1 (tighten to strict o2o)
+        if self._o2o_topk2_start > 1 and self._o2o_topk2_anneal_epoch > 0:
+            if current_epoch < self._o2o_topk2_anneal_epoch:
+                new_topk2 = self._o2o_topk2_start
+            else:
+                remaining = max(self._max_epochs - self._o2o_topk2_anneal_epoch, 1)
+                progress = min((current_epoch - self._o2o_topk2_anneal_epoch) / remaining, 1.0)
+                new_topk2 = max(int(round(self._o2o_topk2_start - progress * (self._o2o_topk2_start - 1))), 1)
+            self.one2one.assigner.topk2 = new_topk2
 
         # Auxiliary XY: decay after aux_xy_decay_epoch
         if self._aux_xy_base > 0 and current_epoch >= self.aux_xy_decay_epoch:

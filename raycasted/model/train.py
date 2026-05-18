@@ -206,6 +206,8 @@ class _RayCastCriterionWrapper:
             fg_cls_boost=tcfg.get('fg_cls_boost', 0.0),
             soft_targets=tcfg.get('soft_targets', False),
             class_weights=self._build_class_weights(tcfg),
+            o2o_topk2_start=tcfg.get('o2o_topk2_start', 1),
+            o2o_topk2_anneal_epoch=tcfg.get('o2o_topk2_anneal_epoch', 0),
         )
 
 
