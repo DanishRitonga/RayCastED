@@ -73,6 +73,10 @@ class TrainingSettings(BaseModel):
     # Alignment threshold
     align_threshold: float = 0.0
 
+    # o2o topk2 annealing (one-to-few → strict 1:1)
+    o2o_topk2_start: int = 1
+    o2o_topk2_anneal_epoch: int = 0
+
     # Weighted sampling
     weighted_sampling: bool = False
     sampler_gamma: float = 0.85
