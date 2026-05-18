@@ -31,7 +31,7 @@ from ultralytics.utils.tal import make_anchors
 
 from raycasted.data.etl.ops.iou import polar_iou_torch
 from raycasted.data.etl.ops.loss import curvature_smoothness_loss_torch
-from raycasted.model.tal import RayCastAssigner
+from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
 
 logger = logging.getLogger(__name__)
 
@@ -669,6 +669,12 @@ class RayCastE2ELoss(E2ELoss):
         class_weights: torch.Tensor | None = None,
         o2o_topk2_start: int = 1,
         o2o_topk2_anneal_epoch: int = 0,
+        hungarian_phase2_start: int = 0,
+        hungarian_phase3_start: int = 0,
+        hungarian_max_weight: float = 0.9,
+        hungarian_cost_class: float = 1.0,
+        hungarian_cost_centroid: float = 1.0,
+        hungarian_cost_ray: float = 1.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -755,6 +761,31 @@ class RayCastE2ELoss(E2ELoss):
         # Steps per epoch (for epoch estimation in update())
         self.steps_per_epoch = 133
 
+        # Hungarian 3-phase schedule
+        self._hungarian_phase2_start = hungarian_phase2_start
+        self._hungarian_phase3_start = hungarian_phase3_start
+        self._hungarian_max_weight = hungarian_max_weight
+        self._hungarian_weight = 0.0  # current blending weight (0 = pure TAL, 1 = pure Hungarian)
+        self._max_epochs = max_epochs
+
+        # Create Hungarian assigner for o2o branch (initially inactive)
+        self.hungarian_assigner = None
+        if hungarian_phase2_start > 0:
+            one2one_pool = max(tal_topk // 2, 7)
+            self.hungarian_assigner = HungarianRayCastAssigner(
+                topk=one2one_pool,
+                num_classes=self.one2one.nc,
+                alpha=assigner_alpha,
+                beta=assigner_beta,
+                stride=self.one2one.stride.tolist(),
+                topk2=1,
+                radius_scale=assigner_radius_scale,
+                align_threshold=align_threshold,
+                cost_class=hungarian_cost_class,
+                cost_centroid=hungarian_cost_centroid,
+                cost_ray=hungarian_cost_ray,
+            )
+
         # Smooth loss (curvature): reverse anneal — starts at 0, ramps up to peak, then holds.
         # 2nd-order difference penalises sharp kinks while allowing smooth irregular shapes.
         # Early training: model focuses on detection (xy, cls, L1, piou).
@@ -771,7 +802,7 @@ class RayCastE2ELoss(E2ELoss):
         self.aux_xy_decay_epoch = max(1, aux_xy_ramp_epochs)
 
     def update(self):
-        """Update o2m/o2o weights (inherited) + anneal smoothness + topk2 + validate E2E integrity."""
+        """Update o2m/o2o weights + anneal smoothness + topk2 + Hungarian blend + validate E2E."""
         super().update()
 
         current_epoch = self.updates / max(self.steps_per_epoch, 1)
@@ -784,9 +815,7 @@ class RayCastE2ELoss(E2ELoss):
                 f'o2o.topk={self.one2one.assigner.topk}, o2o.topk2={topk2_cur}'
             )
             if self._o2o_topk2_start > 1:
-                print(
-                    f'  o2o topk2 anneal: {self._o2o_topk2_start}→1 starting at epoch {self._o2o_topk2_anneal_epoch}'
-                )
+                print(f'  o2o topk2 anneal: {self._o2o_topk2_start}→1 starting at epoch {self._o2o_topk2_anneal_epoch}')
 
             assert self.one2many.assigner.topk == self.one2many.assigner.topk2, (
                 f'E2E violation: one2many topk={self.one2many.assigner.topk} != topk2={self.one2many.assigner.topk2}'
@@ -794,6 +823,12 @@ class RayCastE2ELoss(E2ELoss):
 
             if self._aux_xy_base > 0:
                 print(f'  Auxiliary XY head: weight={self._aux_xy_base}, decay_epoch={self.aux_xy_decay_epoch}')
+
+            if self.hungarian_assigner is not None:
+                print(
+                    f'  3-phase Hungarian: phase2@epoch {self._hungarian_phase2_start}, '
+                    f'phase3@epoch {self._hungarian_phase3_start}, max_weight={self._hungarian_max_weight}'
+                )
 
         # Loss weight annealing
         current_epoch = self.updates / max(self.steps_per_epoch, 1)
@@ -812,9 +847,6 @@ class RayCastE2ELoss(E2ELoss):
             branch.lambda_piou = lambda_piou
 
         # o2o topk2 annealing: few positives → strict 1:1 for NMS-free inference
-        # Linear decay from o2o_topk2_start to 1 over the annealing window.
-        # Before anneal_epoch: keep topk2_start (multi-positive for stable gradients)
-        # After anneal_epoch: linear decay to 1 (tighten to strict o2o)
         if self._o2o_topk2_start > 1 and self._o2o_topk2_anneal_epoch > 0:
             if current_epoch < self._o2o_topk2_anneal_epoch:
                 new_topk2 = self._o2o_topk2_start
@@ -823,6 +855,21 @@ class RayCastE2ELoss(E2ELoss):
                 progress = min((current_epoch - self._o2o_topk2_anneal_epoch) / remaining, 1.0)
                 new_topk2 = max(int(round(self._o2o_topk2_start - progress * (self._o2o_topk2_start - 1))), 1)
             self.one2one.assigner.topk2 = new_topk2
+
+        # Hungarian blending: smooth ramp across 3 phases
+        # Phase 1 (0→p2): hungarian_weight = 0 (pure TAL)
+        # Phase 2 (p2→p3): hungarian_weight ramps 0→max_weight
+        # Phase 3 (p3+): hungarian_weight = max_weight
+        if self.hungarian_assigner is not None:
+            p2 = self._hungarian_phase2_start
+            p3 = self._hungarian_phase3_start
+            if current_epoch < p2:
+                self._hungarian_weight = 0.0
+            elif current_epoch < p3:
+                progress = (current_epoch - p2) / max(p3 - p2, 1)
+                self._hungarian_weight = progress * self._hungarian_max_weight
+            else:
+                self._hungarian_weight = self._hungarian_max_weight
 
         # Auxiliary XY: decay after aux_xy_decay_epoch
         if self._aux_xy_base > 0 and current_epoch >= self.aux_xy_decay_epoch:
@@ -833,16 +880,37 @@ class RayCastE2ELoss(E2ELoss):
         elif self._aux_xy_base > 0:
             self.aux_xy_lambda = self._aux_xy_base
 
+    def _compute_hungarian_o2o_loss(self, one2one_preds, batch):
+        """Compute o2o loss using Hungarian assigner (temporary assigner swap)."""
+        tal_assigner = self.one2one.assigner
+        self.one2one.assigner = self.hungarian_assigner
+        try:
+            loss = self.one2one.loss(one2one_preds, batch)
+        finally:
+            self.one2one.assigner = tal_assigner
+        return loss
+
     def __call__(self, preds, batch):
-        """Compute E2E losses + auxiliary xy loss on neck features."""
+        """Compute E2E losses with optional Hungarian blending + auxiliary xy loss."""
         parsed = self.one2many.parse_output(preds)
         one2many_preds = parsed['one2many']
         one2one_preds = parsed['one2one']
 
         loss_one2many = self.one2many.loss(one2many_preds, batch)
-        loss_one2one = self.one2one.loss(one2one_preds, batch)
-        total_loss = loss_one2many[0] * self.o2m + loss_one2one[0] * self.o2o
-        loss_detach = loss_one2one[1]
+        loss_one2one_tal = self.one2many.loss(one2one_preds, batch)
+
+        # Hungarian blended o2o loss
+        hw = self._hungarian_weight
+        if self.hungarian_assigner is not None and hw > 0:
+            loss_one2one_hun = self._compute_hungarian_o2o_loss(one2one_preds, batch)
+            tal_w = 1.0 - hw
+            loss_one2one = loss_one2one_tal[0] * tal_w + loss_one2one_hun[0] * hw
+            loss_detach = loss_one2one_tal[1] * tal_w + loss_one2one_hun[1] * hw
+        else:
+            loss_one2one = loss_one2one_tal[0]
+            loss_detach = loss_one2one_tal[1]
+
+        total_loss = loss_one2many[0] * self.o2m + loss_one2one * self.o2o
 
         has_aux = self.aux_xy_lambda > 0 and 'aux_xy_raw' in one2many_preds
 

@@ -208,6 +208,12 @@ class _RayCastCriterionWrapper:
             class_weights=self._build_class_weights(tcfg),
             o2o_topk2_start=tcfg.get('o2o_topk2_start', 1),
             o2o_topk2_anneal_epoch=tcfg.get('o2o_topk2_anneal_epoch', 0),
+            hungarian_phase2_start=tcfg.get('hungarian_phase2_start', 0),
+            hungarian_phase3_start=tcfg.get('hungarian_phase3_start', 0),
+            hungarian_max_weight=tcfg.get('hungarian_max_weight', 0.9),
+            hungarian_cost_class=tcfg.get('hungarian_cost_class', 1.0),
+            hungarian_cost_centroid=tcfg.get('hungarian_cost_centroid', 1.0),
+            hungarian_cost_ray=tcfg.get('hungarian_cost_ray', 1.0),
         )
 
 

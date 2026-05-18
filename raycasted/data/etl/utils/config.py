@@ -54,15 +54,15 @@ class TrainingSettings(BaseModel):
     # Classification loss — Focal or BCE
     # Previous "focal tested, harmful" result was caused by alpha=1.0 which
     # zeroed all background gradients. Standard alpha=0.25 works correctly.
-    focal_gamma: float = 0.0      # 0 = BCE, >0 = Focal loss (recommended: 2.0)
-    focal_alpha: float = 0.25     # positive weight (standard: 0.25)
-    log_ray_loss: bool = False    # log-space L1 on rays for scale-invariant errors
-    bg_fg_ratio: int = 3          # max bg anchors per fg anchor in cls loss
+    focal_gamma: float = 0.0  # 0 = BCE, >0 = Focal loss (recommended: 2.0)
+    focal_alpha: float = 0.25  # positive weight (standard: 0.25)
+    log_ray_loss: bool = False  # log-space L1 on rays for scale-invariant errors
+    bg_fg_ratio: int = 3  # max bg anchors per fg anchor in cls loss
 
     # Pixel-Level Balancing
-    plb_enabled: bool = False     # area-based fg weighting to boost small nuclei
-    bg_cls_decay: float = 1.0     # background classification loss decay (1.0=full, 0.0=off)
-    fg_cls_boost: float = 0.0     # fg cls boost by alignment quality (0.0=disabled)
+    plb_enabled: bool = False  # area-based fg weighting to boost small nuclei
+    bg_cls_decay: float = 1.0  # background classification loss decay (1.0=full, 0.0=off)
+    fg_cls_boost: float = 0.0  # fg cls boost by alignment quality (0.0=disabled)
 
     # Soft targets — keep assigner quality scores instead of hard 0/1 binarisation
     soft_targets: bool = False
@@ -76,6 +76,17 @@ class TrainingSettings(BaseModel):
     # o2o topk2 annealing (one-to-few → strict 1:1)
     o2o_topk2_start: int = 1
     o2o_topk2_anneal_epoch: int = 0
+
+    # 3-phase training: TAL-only → TAL+Hungarian blend → Hungarian-dominant
+    # Phase 1 (0 → phase2_start): standard dual-TAL, o2m > o2o
+    # Phase 2 (phase2_start → phase3_start): Hungarian o2o ramps 0→hungarian_max_weight
+    # Phase 3 (phase3_start → end): Hungarian o2o dominates, TAL o2o fades to minimum
+    hungarian_phase2_start: int = 100
+    hungarian_phase3_start: int = 250
+    hungarian_max_weight: float = 0.9
+    hungarian_cost_class: float = 1.0
+    hungarian_cost_centroid: float = 1.0
+    hungarian_cost_ray: float = 1.0
 
     # Weighted sampling
     weighted_sampling: bool = False

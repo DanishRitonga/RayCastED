@@ -58,6 +58,17 @@ training:
   o2o_topk2_start: 3           # o2o branch initial positives per GT (annealed to 1)
   o2o_topk2_anneal_epoch: 120  # epoch to start annealing topk2 from o2o_topk2_start→1
 
+  # 3-phase training: TAL-only → TAL+Hungarian blend → Hungarian-dominant
+  # Phase 1 (0→100): standard dual-TAL, o2m > o2o
+  # Phase 2 (100→250): Hungarian o2o ramps 0→0.9, TAL o2o fades
+  # Phase 3 (250+): Hungarian o2o at 0.9, TAL o2o at 0.1
+  hungarian_phase2_start: 100
+  hungarian_phase3_start: 250
+  hungarian_max_weight: 0.9
+  hungarian_cost_class: 1.0
+  hungarian_cost_centroid: 1.0
+  hungarian_cost_ray: 1.0
+
   # Auxiliary XY head: bypasses 4-layer head stack to give backbone direct xy gradient
   # because the head attenuates xy gradients through 4 Conv layers.
   aux_xy_weight: 10.0           # Huber loss weight for aux xy predictions
