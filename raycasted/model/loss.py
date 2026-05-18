@@ -675,6 +675,7 @@ class RayCastE2ELoss(E2ELoss):
         hungarian_cost_class: float = 1.0,
         hungarian_cost_centroid: float = 1.0,
         hungarian_cost_ray: float = 1.0,
+        steps_per_epoch: int = 0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -712,15 +713,19 @@ class RayCastE2ELoss(E2ELoss):
         self.one2many.branch_name = 'o2m'
         self.one2one.branch_name = 'o2o'
 
-        # Fix: parent E2ELoss reads one2one.hyp.epochs for the decay schedule,
-        # but RayCastDetectionLoss (mock-based init) doesn't set hyp correctly.
-        # Force both branches to use the actual max_epochs.
+        # Fix: parent E2ELoss.decay() uses self.updates (step counter) as
+        # numerator and one2one.hyp.epochs as denominator.  To make the
+        # schedule span the full max_epochs (not just 200 steps), we set
+        # hyp.epochs to the total step count.  This is updated dynamically
+        # via set_steps_per_epoch() once the dataset size is known.
+        self._steps_per_epoch = steps_per_epoch if steps_per_epoch > 0 else 1
+        total_steps = max_epochs * self._steps_per_epoch
         for branch in (self.one2many, self.one2one):
             if not hasattr(branch, 'hyp') or branch.hyp is None:
                 from ultralytics.cfg import get_cfg
 
                 branch.hyp = get_cfg()
-            branch.hyp.epochs = max_epochs
+            branch.hyp.epochs = total_steps
 
         # Override parent's hardcoded tal_topk values with our custom values.
         # Stock Ultralytics: o2m topk=10/topk2=10, o2o topk=7/topk2=1.
@@ -758,8 +763,9 @@ class RayCastE2ELoss(E2ELoss):
             f'E2E violation: one2many.topk2 ({self.one2many.assigner.topk2}) != topk ({self.one2many.assigner.topk})'
         )
 
-        # Steps per epoch (for epoch estimation in update())
-        self.steps_per_epoch = 133
+        # Steps per epoch (for epoch estimation in update() and o2m/o2o decay)
+        # Can be set dynamically via set_steps_per_epoch() once dataset is known.
+        self.steps_per_epoch = self._steps_per_epoch
 
         # Hungarian 3-phase schedule
         self._hungarian_phase2_start = hungarian_phase2_start
@@ -800,6 +806,21 @@ class RayCastE2ELoss(E2ELoss):
         self.aux_xy_lambda = lambda_aux_xy
         self._max_epochs = max_epochs
         self.aux_xy_decay_epoch = max(1, aux_xy_ramp_epochs)
+
+    def set_steps_per_epoch(self, steps_per_epoch: int) -> None:
+        """Update steps_per_epoch after dataset size becomes known.
+
+        Called from RayCastTrainer.get_dataloader() once the training dataset
+        has been built.  Recomputes the total step count used by the parent's
+        o2m/o2o decay schedule so it spans the full max_epochs.
+        """
+        if steps_per_epoch <= 0:
+            return
+        self._steps_per_epoch = steps_per_epoch
+        self.steps_per_epoch = steps_per_epoch
+        total_steps = self._max_epochs * steps_per_epoch
+        for branch in (self.one2many, self.one2one):
+            branch.hyp.epochs = total_steps
 
     def update(self):
         """Update o2m/o2o weights + anneal smoothness + topk2 + Hungarian blend + validate E2E."""
@@ -883,11 +904,14 @@ class RayCastE2ELoss(E2ELoss):
     def _compute_hungarian_o2o_loss(self, one2one_preds, batch):
         """Compute o2o loss using Hungarian assigner (temporary assigner swap)."""
         tal_assigner = self.one2one.assigner
+        tal_branch_name = getattr(self.one2one, 'branch_name', 'o2o')
         self.one2one.assigner = self.hungarian_assigner
+        self.one2one.branch_name = 'o2o_hun'
         try:
             loss = self.one2one.loss(one2one_preds, batch)
         finally:
             self.one2one.assigner = tal_assigner
+            self.one2one.branch_name = tal_branch_name
         return loss
 
     def __call__(self, preds, batch):
@@ -897,7 +921,7 @@ class RayCastE2ELoss(E2ELoss):
         one2one_preds = parsed['one2one']
 
         loss_one2many = self.one2many.loss(one2many_preds, batch)
-        loss_one2one_tal = self.one2many.loss(one2one_preds, batch)
+        loss_one2one_tal = self.one2one.loss(one2one_preds, batch)
 
         # Hungarian blended o2o loss
         hw = self._hungarian_weight

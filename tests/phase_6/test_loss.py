@@ -94,7 +94,7 @@ def test_constructor():
     )
     assert loss_fn.lambda_cls == 2.0
     assert loss_fn.lambda_xy == 500.0
-    assert loss_fn.lambda_l1 == 25.0
+    assert loss_fn.lambda_l1 == 14.0
     assert loss_fn.lambda_smooth == 0.0
     print('PASS: constructor — assigner swapped, params correct')
 
@@ -317,41 +317,40 @@ def test_e2e_constructor():
         f'one2one should be RayCastDetectionLoss, got {type(e2e.one2one).__name__}'
     )
     assert isinstance(e2e.one2many.assigner, RayCastAssigner)
-    assert isinstance(e2e.one2one.assigner, HungarianRayCastAssigner), (
-        f'one2one should use HungarianRayCastAssigner, got {type(e2e.one2one.assigner).__name__}'
+    assert isinstance(e2e.one2one.assigner, RayCastAssigner), (
+        f'one2one should use RayCastAssigner, got {type(e2e.one2one.assigner).__name__}'
     )
+    assert e2e.hungarian_assigner is None
 
-    # CRITICAL: Check E2E topk/topk2
     assert e2e.one2many.assigner.topk == 13, f'one2many.topk should be 13, got {e2e.one2many.assigner.topk}'
     assert e2e.one2many.assigner.topk2 == 13, f'one2many.topk2 should be 13, got {e2e.one2many.assigner.topk2}'
+    assert e2e.one2one.assigner.topk == 7
+    assert e2e.one2one.assigner.topk2 == 1
 
     assert e2e.one2many.lambda_smooth == 0.0
     assert e2e.one2one.lambda_smooth == 0.0
     assert e2e.smooth_start == 0.0
-    assert e2e.smooth_end == 1.0
+    assert e2e.smooth_end == 3.0
     assert e2e.smooth_anneal_epochs == 80  # 200 * 0.4 = 80
-    print('PASS: E2E constructor — o2m uses RayCastAssigner, o2o uses HungarianRayCastAssigner')
+    print('PASS: E2E constructor — dual TAL (o2m.topk=13, o2o.topk=7, o2o.topk2=1)')
 
 
 def test_smoothness_annealing():
-    """Smoothness lambda ramps from 0.0 to 1.0 over 80 updates (40% of 200)."""
+    """Smoothness lambda ramps from 0.0 to 3.0 over 80 updates (40% of 200)."""
     model = _make_mock_model()
     e2e = RayCastE2ELoss(model)
 
-    # Initial value
     assert e2e.one2many.lambda_smooth == 0.0, 'Initial λ should be 0.0'
 
-    # After 80 updates (full annealing period)
     for _ in range(80):
         e2e.update()
-    assert e2e.one2many.lambda_smooth == 1.0, f'After 80 updates λ should be 1.0, got {e2e.one2many.lambda_smooth}'
-    assert e2e.one2one.lambda_smooth == 1.0
+    assert e2e.one2many.lambda_smooth == 3.0, f'After 80 updates λ should be 3.0, got {e2e.one2many.lambda_smooth}'
+    assert e2e.one2one.lambda_smooth == 3.0
 
-    # Stays at 1.0 after more updates
     for _ in range(10):
         e2e.update()
-    assert e2e.one2many.lambda_smooth == 1.0, 'λ should clamp at 1.0'
-    print('PASS: smoothness annealing — 0.0 → 1.0 over 80 updates, clamped at 1.0')
+    assert e2e.one2many.lambda_smooth == 3.0, 'λ should clamp at 3.0'
+    print('PASS: smoothness annealing — 0.0 → 3.0 over 80 updates, clamped at 3.0')
 
 
 def test_smoothness_monotonic_increase():

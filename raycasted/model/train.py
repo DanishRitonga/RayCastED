@@ -20,6 +20,7 @@ Usage:
 """
 
 import copy
+import math
 from copy import deepcopy
 
 import numpy as np
@@ -153,10 +154,11 @@ class _RayCastCriterionWrapper:
     Called as: model.init_criterion() — the wrapper is callable.
     """
 
-    def __init__(self, model, max_epochs: int = 200, training_config: dict | None = None):
+    def __init__(self, model, max_epochs: int = 200, training_config: dict | None = None, steps_per_epoch: int = 0):
         self._model = model
         self._max_epochs = max_epochs
         self._training_config = training_config
+        self._steps_per_epoch = steps_per_epoch
 
     def _build_class_weights(self, tcfg: dict):
         """Build per-class inverse-frequency weights from config or training data.
@@ -214,6 +216,7 @@ class _RayCastCriterionWrapper:
             hungarian_cost_class=tcfg.get('hungarian_cost_class', 1.0),
             hungarian_cost_centroid=tcfg.get('hungarian_cost_centroid', 1.0),
             hungarian_cost_ray=tcfg.get('hungarian_cost_ray', 1.0),
+            steps_per_epoch=self._steps_per_epoch,
         )
 
 
@@ -582,7 +585,17 @@ class RayCastTrainer(DetectionTrainer):
         else:
             shuffle = mode == 'train'
 
-        return InfiniteDataLoader(
+        # Propagate steps_per_epoch to the loss criterion so that the o2m/o2o
+        # decay schedule and epoch-dependent annealing use the correct rate.
+        # Only set on the train dataloader call (first call with mode='train').
+        if mode == 'train' and hasattr(self, 'model'):
+            criterion = getattr(self.model, 'criterion', None)
+            if criterion is None and hasattr(self.model, 'init_criterion'):
+                ic = self.model.init_criterion
+                if isinstance(ic, _RayCastCriterionWrapper):
+                    ic._steps_per_epoch = max(1, len(dataset) // max(batch_size, 1))
+
+        dl = InfiniteDataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
@@ -592,6 +605,22 @@ class RayCastTrainer(DetectionTrainer):
             drop_last=self.args.compile and mode == 'train',
             multiprocessing_context='forkserver' if self.args.workers > 0 else None,
         )
+
+        # After the dataloader is built, set steps_per_epoch on the live
+        # criterion (created by resume_training or _setup_train).  The
+        # criterion may not exist yet on the first get_dataloader(train) call
+        # (it's created later in resume_training), so we also update the
+        # wrapper above for the deferred case.
+        if mode == 'train' and hasattr(self, 'model'):
+            unwrapped = self.model
+            if hasattr(unwrapped, 'module'):
+                unwrapped = unwrapped.module
+            criterion = getattr(unwrapped, 'criterion', None)
+            if criterion is not None and hasattr(criterion, 'set_steps_per_epoch'):
+                spe = max(1, math.ceil(len(dataset) / max(batch_size, 1)))
+                criterion.set_steps_per_epoch(spe)
+
+        return dl
 
     def preprocess_batch(self, batch):
         """Move batch tensors to device.

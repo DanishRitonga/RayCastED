@@ -59,7 +59,7 @@ When adding a new config parameter:
 
 ### Classification & Overprediction
 
-1. **bg_cls_decay double-application**: `raycasted/model/train.py:361` applies bg_cls_decay twice — once in the loop, once in the partial function. This over-regularizes background classes, causing them to be treated as easy negatives.
+1. **bg_cls_decay applied once (resolved)**: `loss.py:527` applies bg_cls_decay once. Previous gotcha about double-application was stale. Current effective bg:fg loss ratio with focal_alpha=0.25, bg_cls_decay=0.5, bg_fg_ratio=3 is ~4.5:1 (bg dominates).
 
 2. **focal_alpha=0.5 causes mode collapse**: When alpha=0.5, background gets 3x more weight than foreground. Combined with the nc=80 issue (75 ghost channels), this overwhelms the 5 real classes.
 
@@ -99,13 +99,19 @@ When adding a new config parameter:
 
 17. **XY decode consistency**: Training (`loss.py:403`) returns normalized coords (÷[W,H]). Inference (`head.py:257`) returns pixel coords. Both use same sigmoid+offset+anchor+stride formula.
 
-18. **Hardcoded `steps_per_epoch=133`** (`loss.py:744`): Used for smooth loss annealing and aux_xy decay schedules. If actual steps/epoch differs, schedules activate at wrong times. TODO: compute dynamically.
+18. **`steps_per_epoch` computed dynamically (resolved)**: Was hardcoded at 133. Now passed from `RayCastTrainer.get_dataloader()` via `set_steps_per_epoch()` on the criterion. Also set on `_RayCastCriterionWrapper` for the resume path.
+
+19. **O2M/O2O decay schedule fixed (resolved)**: Parent `E2ELoss.decay()` uses `self.updates` (step counter) as numerator. Previously `hyp.epochs` was set to `max_epochs` (200), causing o2m→0.1 at step 199 (~1.5 epochs). Now set to `max_epochs × steps_per_epoch` so the schedule spans the full training.
+
+20. **TAL o2o loss now uses o2o branch (resolved)**: `loss.py:__call__` was calling `self.one2many.loss(one2one_preds, batch)` which used the o2m assigner (topk=15, topk2=15). Fixed to `self.one2one.loss(one2one_preds, batch)` which uses the o2o assigner (topk=7, topk2=3→1). This was the root cause of all o2o experiments showing no improvement — the o2o branch was never trained with its own assignment.
+
+21. **Hard containment filter removed (tal.py)**: `select_candidates_in_gts` was dead code (never called after removal). All 5376 anchors are candidates; Gaussian decay provides soft spatial weighting. The method has been removed.
 
 ### Eval Script
 
-19. **`main/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
+22. **`main/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
 
-20. **Eval must call `configure_rays(n_rays)` before rasterization**: `_polygons_to_masks_fast` uses `_const.RAY_COS`/`_const.RAY_SIN` (late-binding module attributes).
+23. **Eval must call `configure_rays(n_rays)` before rasterization**: `_polygons_to_masks_fast` uses `_const.RAY_COS`/`_const.RAY_SIN` (late-binding module attributes).
 
 ## Experiment Log
 

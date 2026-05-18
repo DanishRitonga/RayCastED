@@ -2,10 +2,13 @@
 
 RayCastAssigner subclasses TaskAlignedAssigner to replace box-based
 assignment with polygon-aware logic:
-  - select_candidates_in_gts: 75th-percentile radius containment
-  - get_box_metrics: Polar-IoU geometric overlap for one2many alignment
-  - _compute_cost_matrix: unified additive cost for Hungarian one2one
+  - get_box_metrics: Polar-IoU geometric overlap for alignment metric
+  - get_pos_mask: Gaussian spatial decay (no hard containment filter)
   - select_topk_candidates: dynamic topk cap per GT to avoid garbage padding
+
+All anchors are candidates — no hard containment filter. The Gaussian
+decay in get_pos_mask provides soft spatial weighting so distant anchors
+receive near-zero alignment metric and are naturally excluded by topk.
 
 The two branches use different ranking strategies:
 
@@ -23,8 +26,6 @@ bipartite matching (scipy.linear_sum_assignment) for the one2one branch.
 get_targets is NOT overridden — the parent implementation is dimension-
 agnostic (uses gt_bboxes.shape[-1] dynamically) and works for any
 polygon dimensionality (2 + N_RAYS) without modification.
-
-Spec reference: docs/project.md §11
 """
 
 import numpy as np
@@ -42,15 +43,14 @@ class RayCastAssigner(TaskAlignedAssigner):
       align = cls_score^alpha * PolarIoU^beta * exp(-d^2 / 2sigma^2)
 
     Gaussian decay gives soft spatial proximity scoring — anchors near the
-    GT centroid get full weight, distant ones fade smoothly. Hard cutoff
-    at 3sigma excludes negligible-weight anchors. sigma = radius_scale * R75.
+    GT centroid get full weight, distant ones fade smoothly. No hard
+    containment filter: all anchors are candidates. sigma = radius_scale * R75.
 
     Both o2m and o2o branches use this assigner with different topk/topk2:
       - o2m: topk=N, topk2=N -> dense multi-anchor supervision
       - o2o: topk=M, topk2=1 -> single best anchor per GT (NMS-free)
 
-    Overrides four methods from TaskAlignedAssigner:
-      - select_candidates_in_gts: 3sigma radius containment
+    Overrides three methods from TaskAlignedAssigner:
       - get_box_metrics: Polar-IoU overlap for alignment metric
       - get_pos_mask: Gaussian spatial decay on align_metric
       - select_topk_candidates: dynamic topk cap per GT
@@ -130,57 +130,7 @@ class RayCastAssigner(TaskAlignedAssigner):
         )
 
     # -----------------------------------------------------------------
-    # Override 1: radius-based containment (hard mask, widened to 3σ)
-    # -----------------------------------------------------------------
-
-    def select_candidates_in_gts(self, xy_centers, gt_bboxes, mask_gt, eps=1e-9):
-        """Select anchors within containment radius of each GT polygon centroid.
-
-        Replaces the parent's box-containment check (xyxy corner test) with
-        a polar-radius containment test using the 75th-percentile GT ray value.
-
-        The hard cutoff is set to 3σ (3 × radius_scale × R75) to include
-        anchors with non-negligible Gaussian weight. Actual ranking and
-        quality scoring is handled by Gaussian decay in get_pos_mask.
-
-        Args:
-            xy_centers: Anchor grid positions, shape (N_anchors, 2).
-            gt_bboxes: GT polygon targets, shape (B, N_max_gt, 2+N_RAYS).
-                       Columns: [cx, cy, d_1..d_R] in normalised coords.
-            mask_gt: Valid GT mask, shape (B, N_max_gt, 1).
-            eps: Unused (kept for API compatibility).
-
-        Returns:
-            Boolean mask of shape (B, N_max_gt, N_anchors).
-        """
-        _ = eps
-        n_anchors = xy_centers.shape[0]
-        bs, n_boxes, _ = gt_bboxes.shape
-        mask = torch.zeros(bs, n_boxes, n_anchors, dtype=torch.bool, device=gt_bboxes.device)
-
-        for b in range(bs):
-            valid = mask_gt[b, :, 0].bool()
-            valid_idx = valid.nonzero(as_tuple=False).squeeze(-1)
-            if valid_idx.numel() == 0:
-                continue
-
-            gt_xy = gt_bboxes[b, valid_idx, :2]
-            gt_rays = gt_bboxes[b, valid_idx, 2:]
-
-            radii = self._compute_gt_radii(gt_rays)
-            sigma = radii * self.radius_scale
-
-            # Hard cutoff at 3σ — includes anchors with weight > exp(-4.5) ≈ 0.011
-            hard_cutoff = sigma * 3.0
-            dist = torch.cdist(gt_xy.float(), xy_centers.float())
-            valid_mask = (dist <= hard_cutoff[:, None]) & (hard_cutoff[:, None] > 0)
-
-            mask[b, valid_idx] = valid_mask
-
-        return mask
-
-    # -----------------------------------------------------------------
-    # Override 2: get_box_metrics — Polar-IoU alignment metric
+    # get_box_metrics — Polar-IoU alignment metric
     # -----------------------------------------------------------------
 
     def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
@@ -199,15 +149,15 @@ class RayCastAssigner(TaskAlignedAssigner):
         bbox_scores[mask_gt_bool] = pd_scores[ind[0], :, ind[1]][mask_gt_bool]
 
         for b in range(self.bs):
-            candidate_mask = mask_gt_bool[b].any(dim=0)
-            cand_idx = candidate_mask.nonzero(as_tuple=False).squeeze(-1)
-            n_cand = cand_idx.shape[0]
-            if n_cand == 0:
-                continue
-
             valid_gt_mask = mask_gt_bool[b].any(dim=1)
             valid_gt_idx = valid_gt_mask.nonzero(as_tuple=False).squeeze(-1)
             n_valid_gt = valid_gt_idx.shape[0]
+            if n_valid_gt == 0:
+                continue
+
+            # All anchors are candidates (no hard containment)
+            cand_idx = torch.arange(na, device=pd_bboxes.device)
+            n_cand = na
 
             pd_rays = pd_bboxes[b, cand_idx, 2:]
             gt_rays = gt_bboxes[b, valid_gt_idx, 2:]
@@ -235,24 +185,19 @@ class RayCastAssigner(TaskAlignedAssigner):
 
         Formula:  align_metric = cls^α × PolarIoU^β × exp(-d² / 2σ²)
 
-        The Gaussian weight gives soft, continuous spatial proximity scoring:
-          - Anchors near GT centroid get weight ≈ 1.0 (full credit)
-          - Anchors at 2σ get weight ≈ 0.14 (still contribute to ranking)
-          - Anchors beyond 3σ are excluded by the hard containment mask
+        No hard containment filter — all anchors are candidates. The Gaussian
+        decay provides soft spatial weighting:
+          - Anchors near GT centroid get weight ≈ 1.0
+          - Anchors far from any GT get weight ≈ 0 (never selected by topk)
+          - Background anchors still receive negative gradient via cls loss
 
-        This only affects ranking (topk selection) and quality scores
-        (target_scores normalization). mask_pos stays binary, overlaps
-        stays raw PolarIoU for conflict resolution.
+        This ensures every anchor gets training signal (positive or negative),
+        which is critical for NMS-free o2o inference.
         """
-        # Step 1: Hard containment (widened to 3σ)
-        mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes, mask_gt)
+        # Step 1: Polar-IoU alignment metric (all anchors are candidates)
+        align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt)
 
-        # Step 2: Polar-IoU alignment metric
-        align_metric, overlaps = self.get_box_metrics(
-            pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt
-        )
-
-        # Step 3: Gaussian spatial decay — multiply into align_metric
+        # Step 2: Gaussian spatial decay — multiply into align_metric
         if self.radius_scale > 0:
             for b in range(self.bs):
                 valid = mask_gt[b, :, 0].bool()
@@ -261,21 +206,17 @@ class RayCastAssigner(TaskAlignedAssigner):
                     continue
 
                 radii = self._compute_gt_radii(gt_bboxes[b, valid_idx, 2:])
-                sigma = radii * self.radius_scale  # (n_valid_gt,)
+                sigma = radii * self.radius_scale
                 dist = torch.cdist(gt_bboxes[b, valid_idx, :2].float(), anc_points.float())
 
-                gauss = torch.exp(
-                    -dist.pow(2) / (2.0 * sigma.pow(2).unsqueeze(-1) + self.eps)
-                )
+                gauss = torch.exp(-dist.pow(2) / (2.0 * sigma.pow(2).unsqueeze(-1) + self.eps))
                 align_metric[b, valid_idx] *= gauss
 
-        # Step 4: Top-k selection
-        mask_topk = self.select_topk_candidates(
-            align_metric, topk_mask=mask_gt.expand(-1, -1, self.topk).bool()
-        )
+        # Step 3: Top-k selection
+        mask_topk = self.select_topk_candidates(align_metric, topk_mask=mask_gt.expand(-1, -1, self.topk).bool())
 
-        # Step 5: Final binary mask (Gaussian only affected ranking, not mask)
-        mask_pos = mask_topk * mask_in_gts * mask_gt
+        # Step 4: Final binary mask (no hard containment)
+        mask_pos = mask_topk * mask_gt
 
         return mask_pos, align_metric, overlaps
 
@@ -353,14 +294,13 @@ class HungarianRayCastAssigner(RayCastAssigner):
         cost = torch.zeros([bs, n_max_boxes, na], dtype=torch.float32, device=pd_bboxes.device)
 
         for b in range(bs):
-            candidate_mask = mask_gt_bool[b].any(dim=0)
-            cand_idx = candidate_mask.nonzero(as_tuple=False).squeeze(-1)
-            n_cand = cand_idx.shape[0]
-            if n_cand == 0:
-                continue
-
             valid_gt_mask = mask_gt_bool[b].any(dim=1)
             valid_gt_idx = valid_gt_mask.nonzero(as_tuple=False).squeeze(-1)
+            n_valid_gt = valid_gt_idx.shape[0]
+            if n_valid_gt == 0:
+                continue
+
+            cand_idx = torch.arange(na, device=pd_bboxes.device)
 
             # Focal classification cost (DETR-style, fixed params)
             gt_cls = gt_labels[b, valid_gt_idx, 0].long().clamp(min=0)
@@ -385,8 +325,7 @@ class HungarianRayCastAssigner(RayCastAssigner):
             total = self.cost_class * cost_cls + self.cost_centroid * cost_xy + self.cost_ray * cost_ray
             total = total.nan_to_num(nan=1e8, posinf=1e8, neginf=-1e8)
 
-            pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
-            cost[b, valid_gt_idx[:, None], cand_idx[None, :]] = total.T * pair_mask.float()
+            cost[b, valid_gt_idx[:, None], cand_idx[None, :]] = total.T
 
         return cost
 
@@ -408,8 +347,9 @@ class HungarianRayCastAssigner(RayCastAssigner):
         Returns:
             Tuple of (target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx).
         """
-        mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes, mask_gt)
+        mask_gt_bool = mask_gt.bool()
 
+        # All anchors are candidates (no hard containment)
         bs = pd_scores.shape[0]
         na = pd_scores.shape[1]
         device = gt_bboxes.device
@@ -419,8 +359,6 @@ class HungarianRayCastAssigner(RayCastAssigner):
         target_scores = torch.zeros_like(pd_scores)
         fg_mask = torch.zeros(bs, na, dtype=torch.bool, device=device)
         target_gt_idx = torch.zeros(bs, na, dtype=torch.long, device=device)
-
-        mask_gt_bool = mask_gt.bool()
 
         # Use unified cost matrix
         cost_matrix = self._compute_cost_matrix(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt_bool)
@@ -433,9 +371,9 @@ class HungarianRayCastAssigner(RayCastAssigner):
 
             valid_gt_idx = valid_gt_mask.nonzero(as_tuple=False).squeeze(-1)
 
-            candidate_mask = mask_in_gts[b].any(dim=0)
-            cand_idx = candidate_mask.nonzero(as_tuple=False).squeeze(-1)
-            n_cand = cand_idx.shape[0]
+            # All anchors are candidates
+            cand_idx = torch.arange(na, device=device)
+            n_cand = na
             if n_cand == 0:
                 continue
 
