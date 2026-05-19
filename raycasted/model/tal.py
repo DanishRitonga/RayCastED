@@ -139,7 +139,10 @@ class RayCastAssigner(TaskAlignedAssigner):
         Formula: align = cls_score^alpha * PolarIoU^beta
         """
         na = pd_bboxes.shape[-2]
-        mask_gt_bool = mask_gt.bool()
+        # mask_gt comes in as (bs, n_max_boxes, 1) from _forward — must expand
+        # to (bs, n_max_boxes, na) for correct boolean indexing (fancy indexing
+        # does NOT auto-broadcast like arithmetic ops).
+        mask_gt_bool = mask_gt.bool().expand(-1, -1, na)
         overlaps = torch.zeros([self.bs, self.n_max_boxes, na], dtype=torch.float32, device=pd_bboxes.device)
         bbox_scores = torch.zeros([self.bs, self.n_max_boxes, na], dtype=pd_scores.dtype, device=pd_scores.device)
 
