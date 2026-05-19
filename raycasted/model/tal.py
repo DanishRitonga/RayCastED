@@ -137,19 +137,12 @@ class RayCastAssigner(TaskAlignedAssigner):
         """Compute spatial masks and Gaussian weights in one pass.
 
         For each valid GT, computes:
-          - dist: (n_valid_gt, na) centroid-to-anchor distances
-          - cand_mask: True where dist < 3σ (for optional PolarIoU masking)
+          - cand_mask: (n_valid_gt, na) bool — anchors within 3σ
           - gauss: exp(-d²/2σ²) for spatial decay
-
-        The Gaussian values <exp(-4.5) at 3σ naturally zero out distant anchors
-        via the alignment metric product, so the PolarIoU computation on those
-        entries is wasted. However, vectorized all-pairs PolarIoU on GPU is
-        faster than Python loops, so we compute PolarIoU on the full set and
-        let the Gaussian decay zero out the irrelevant entries.
 
         Returns:
             List of dicts per batch element with keys:
-                valid_idx, sigma, dist, gauss
+                valid_idx, cand_mask, gauss
         """
         bs = gt_bboxes.shape[0]
         per_batch = []
@@ -159,36 +152,50 @@ class RayCastAssigner(TaskAlignedAssigner):
             if valid_idx.numel() == 0:
                 per_batch.append({
                     'valid_idx': valid_idx,
-                    'sigma': None,
-                    'dist': None,
+                    'cand_mask': None,
                     'gauss': None,
                 })
                 continue
 
             radii = self._compute_gt_radii(gt_bboxes[b, valid_idx, 2:])
             sigma = radii * self.radius_scale
+            cutoff = sigma * 3.0  # 3σ gate
 
             # (n_valid_gt, na) distance matrix in normalised space
             dist = torch.cdist(gt_bboxes[b, valid_idx, :2].float(), anc_points.float())
 
+            cand_mask = dist <= cutoff.unsqueeze(-1)  # (n_valid_gt, na)
             gauss = torch.exp(-dist.pow(2) / (2.0 * sigma.pow(2).unsqueeze(-1) + self.eps))
 
             per_batch.append({
                 'valid_idx': valid_idx,
-                'sigma': sigma,
-                'dist': dist,
+                'cand_mask': cand_mask,
                 'gauss': gauss,
             })
         return per_batch
 
-    def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
-        """Compute alignment metric for one2many branch using Polar-IoU.
+    def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt, prefilt=None):
+        """Compute alignment metric using block-sparse Polar-IoU.
 
         Formula: align = cls_score^alpha * PolarIoU^beta
 
-        Uses vectorized all-pairs PolarIoU per batch element — one kernel
-        launch per image, no Python inner loop over GTs.
+        When prefilt is provided, only computes PolarIoU for anchors within
+        3σ of each GT centroid using a padded block approach:
+          1. For each batch element, extract per-GT nearby anchor rays into
+             a dense (n_valid_gt, K_max, R) tensor (zero-padded).
+          2. Call polar_iou_torch once on the full block — single kernel launch.
+          3. Scatter results back into the (bs, n_max, na) overlaps tensor.
+
+        This reduces the PolarIoU computation from na*n_valid_gt pairs to
+        K_max*n_valid_gt per image (K_max ~200-500 vs na ~8400).
+
+        Args:
+            prefilt: Optional precomputed candidate masks from
+                _prefilter_by_distance. When None (backward compat),
+                falls back to all-pairs PolarIoU.
         """
+        from raycasted.data.etl.ops.iou import polar_iou_torch
+
         na = pd_bboxes.shape[-2]
         # mask_gt comes in as (bs, n_max_boxes, 1) from _forward — must expand
         # to (bs, n_max_boxes, na) for correct boolean indexing (fancy indexing
@@ -209,20 +216,55 @@ class RayCastAssigner(TaskAlignedAssigner):
             if n_valid_gt == 0:
                 continue
 
-            # All anchors as candidates — single vectorized PolarIoU call
-            cand_idx = torch.arange(na, device=pd_bboxes.device)
-            n_cand = na
+            if prefilt is not None:
+                info = prefilt[b]
+                cand_mask = info['cand_mask']
+                if cand_mask is None:
+                    continue
 
-            pd_rays = pd_bboxes[b, cand_idx, 2:]
-            gt_rays = gt_bboxes[b, valid_gt_idx, 2:]
-            pd_exp = pd_rays[:, None, :].expand(-1, n_valid_gt, -1)
-            gt_exp = gt_rays[None, :, :].expand(n_cand, -1, -1)
-            iou = polar_iou_pairwise_flat_torch(pd_exp, gt_exp)
+                # Determine K_max: max candidates across all GTs, capped
+                cand_counts = cand_mask.sum(dim=1)  # (n_valid_gt,)
+                K_max = int(cand_counts.max().item())
+                K_max = max(K_max, self.topk)  # at least topk
+                K_max = min(K_max, na)  # can't exceed total anchors
 
-            pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
-            overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = iou.T.to(overlaps.dtype) * pair_mask.to(
-                overlaps.dtype
-            )
+                # Build padded blocks: (n_valid_gt, K_max, n_rays)
+                n_rays = pd_bboxes.shape[-1] - 2
+                pd_block = pd_bboxes[b].new_zeros(n_valid_gt, K_max, n_rays)
+                gt_block = pd_bboxes[b].new_zeros(n_valid_gt, K_max, n_rays)
+                anchor_indices = pd_bboxes[b].new_zeros(n_valid_gt, K_max, dtype=torch.long)
+
+                gt_rays = gt_bboxes[b, valid_gt_idx, 2:]  # (n_valid_gt, n_rays)
+
+                for gi in range(n_valid_gt):
+                    anchor_idx = cand_mask[gi].nonzero(as_tuple=False).squeeze(-1)
+                    k = min(anchor_idx.shape[0], K_max)
+                    pd_block[gi, :k] = pd_bboxes[b, anchor_idx[:k], 2:]
+                    gt_block[gi, :k] = gt_rays[gi].unsqueeze(0).expand(k, -1)
+                    anchor_indices[gi, :k] = anchor_idx[:k]
+
+                # Single kernel launch on the padded block
+                iou_block = polar_iou_torch(pd_block, gt_block)  # (n_valid_gt, K_max)
+
+                # Scatter back into overlaps
+                for gi in range(n_valid_gt):
+                    k = min(int(cand_counts[gi].item()), K_max)
+                    overlaps[b, valid_gt_idx[gi], anchor_indices[gi, :k]] = iou_block[gi, :k].to(overlaps.dtype)
+            else:
+                # Fallback: all-pairs (backward compat)
+                cand_idx = torch.arange(na, device=pd_bboxes.device)
+                n_cand = na
+
+                pd_rays = pd_bboxes[b, cand_idx, 2:]
+                gt_rays = gt_bboxes[b, valid_gt_idx, 2:]
+                pd_exp = pd_rays[:, None, :].expand(-1, n_valid_gt, -1)
+                gt_exp = gt_rays[None, :, :].expand(n_cand, -1, -1)
+                iou = polar_iou_pairwise_flat_torch(pd_exp, gt_exp)
+
+                pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
+                overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = iou.T.to(overlaps.dtype) * pair_mask.to(
+                    overlaps.dtype
+                )
 
         if self.align_threshold > 0:
             overlaps = overlaps * (overlaps >= self.align_threshold).float()
@@ -249,8 +291,10 @@ class RayCastAssigner(TaskAlignedAssigner):
         else:
             prefilt = None
 
-        # Step 2: Polar-IoU alignment metric (vectorized per batch)
-        align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt)
+        # Step 2: Polar-IoU alignment metric (block-sparse when prefilt available)
+        align_metric, overlaps = self.get_box_metrics(
+            pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt, prefilt=prefilt
+        )
 
         # Step 3: Gaussian spatial decay — reuse precomputed gauss from Step 1
         if prefilt is not None:
