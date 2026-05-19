@@ -66,6 +66,7 @@ class TrainingSettings(BaseModel):
 
     # Soft targets — keep assigner quality scores instead of hard 0/1 binarisation
     soft_targets: bool = False
+    soft_targets_o2o: bool | None = None  # per-branch override for o2o
 
     # Per-o2o classification loss overrides — the o2o branch must be a
     # "background specialist" because NMS-free inference has no safety net.

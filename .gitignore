@@ -11,3 +11,9 @@
 cache
 output
 results
+
+.claude
+.opencode
+runs/
+
+log*
