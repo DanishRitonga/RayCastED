@@ -44,7 +44,7 @@ training:
   head_channel_min: 64       # minimum channels in polygon head. Was 16
 
   # Early stopping
-  patience: 300              # epochs with no improvement before stopping (default: 100)
+  patience: 100              # epochs with no improvement before stopping (default: 100)
 
   # Learning rate
   cos_lr: true               # cosine LR schedule. Was false
@@ -76,8 +76,8 @@ training:
 
   # Classification loss — focal loss for one2one (extreme fg/bg imbalance)
   focal_gamma: 2.0            # Focal loss gamma (DETR-style for Hungarian matching)
-  focal_alpha: 0.25          # Focal loss alpha — standard (fg=0.25, bg=0.75). 0.5 caused mode collapse.
-                               # Background samples get (1-alpha)=0.75 weight (they dominate numerically)
+  focal_alpha: 0.75           # Focal loss alpha — (fg=0.75, bg=0.25). 0.5 caused mode collapse.
+                               # Previous best: mAP50=0.411 with alpha=0.75
   log_ray_loss: true           # Log-space L1 on rays — equalizes relative errors across scales
   bg_fg_ratio: 3               # Max background anchors per foreground anchor in cls loss (subsampling)
 
@@ -95,7 +95,7 @@ training:
 
   # Pixel-Level Balancing: area-based fg weighting to boost small nuclei
   plb_enabled: true             # Enable PLB (area-based weighting)
-  bg_cls_decay: 0.5             # Bg cls gradient multiplier. 1.0=full bg gradient, 0.0=no bg gradient
+  bg_cls_decay: 1.0             # Bg cls gradient multiplier. 1.0=full bg gradient, 0.0=no bg gradient
   fg_cls_boost: 0.0             # Fg cls boost by alignment quality: weight = 1 + boost * quality (0.0=disabled)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)

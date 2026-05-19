@@ -22,7 +22,7 @@ bash clean_cache.sh
 **Main directories:**
 - `raycasted/model/` — model definitions, train.py, loss.py, tal.py
 - `main/pannuke.yaml` — training config
-- `tests/phase_6/` — 27 pytest tests
+- `tests/phase_6/` — 28 pytest tests
 
 **Key files by role:**
 - `raycasted/model/blocks/head.py` — RayCastDetect head (separate o2o heads), bias_init, postprocess
@@ -43,6 +43,8 @@ Inference: fuse() → keeps only o2o heads (one2one_cv2 + one2one_cv3) → postp
 ```
 
 **Architecture:** P2-P3-P4 pyramid (strides 4/8/16), 5376 total anchors at 256px input.
+
+**IMPORTANT: n_rays=64 in training.** While `constants.py` defaults to 32 rays, all training runs use `n_rays: 64` in `main/pannuke.yaml`. The model head, loss functions, and assigner all use `n_rays` from config. Previous experiment log results (mAP50=0.411 etc.) used n_rays=32 — current runs with n_rays=64 are not directly comparable. Always check `pannuke.yaml` for the active n_rays value.
 
 ## Training Config Threading Pattern
 

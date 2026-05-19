@@ -581,11 +581,13 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[4] += (pred_rays * 0).sum()
 
         # --- Diagnostic: log raw (unweighted) losses + fg count every 100 steps ---
-        if hasattr(self, '_diag_step'):
+        _branch = getattr(self, 'branch_name', '???')
+        _skip_diag = _branch == 'o2o_hun'
+        if hasattr(self, '_diag_step') and not _skip_diag:
             self._diag_step += 1
-        else:
+        elif not hasattr(self, '_diag_step') and not _skip_diag:
             self._diag_step = 0
-        if self._diag_step % 100 == 0:
+        if self._diag_step % 100 == 0 and not _skip_diag:
             _raw = loss.detach().clone()
             n_fg_actual = fg_mask.sum().item() if fg_mask.sum() > 0 else 0
             _branch = getattr(self, 'branch_name', '???')
@@ -935,6 +937,15 @@ class RayCastE2ELoss(E2ELoss):
             tal_w = 1.0 - hw
             loss_one2one = loss_one2one_tal * tal_w + loss_one2one_hun[0] * hw
             loss_detach = loss_detach_o2o * tal_w + loss_one2one_hun[1] * hw
+
+            if hasattr(self.one2many, '_diag_step') and self.one2many._diag_step % 100 == 0:
+                _hun_raw = loss_one2one_hun[0].detach()
+                LOGGER.info(
+                    '\nDIAG o2o_hun step=%d | hw=%.3f | raw: %s',
+                    self.one2many._diag_step,
+                    hw,
+                    ' '.join(f'{v:.4f}' for v in _hun_raw.tolist()),
+                )
         else:
             loss_one2one = loss_one2one_tal
             loss_detach = loss_detach_o2o
