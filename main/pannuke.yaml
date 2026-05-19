@@ -124,7 +124,6 @@ training:
   refinement_kernel_size: 3    # Kernel size for polygon refinement block
                                # 3 = standard RayRefinementBlock (Run 11 baseline)
                                # 7 = LargeKernelRefinementBlock — tested in Run 12, negligible impact
-                               # Conclusion: bottleneck is in neck, not head
 
   # Pretrained backbone (COCO weights, layers 0-10 only)
   pretrained_backbone: null  # DISABLED for scratch training experiment 
