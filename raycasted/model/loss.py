@@ -630,6 +630,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss.detach(),
         )
 
+    def loss(self, preds, batch):
+        """Override parent to return (weighted_loss, loss_detach, assignment_info)."""
+        batch_size = preds['boxes'].shape[0]
+        assign_info, loss, loss_detach = self.get_assigned_targets_and_loss(preds, batch)
+        return loss * batch_size, loss_detach, assign_info
+
 
 class RayCastE2ELoss(E2ELoss):
     """E2E dual-assignment loss with smoothness annealing and GradNorm.
@@ -920,53 +926,34 @@ class RayCastE2ELoss(E2ELoss):
         one2many_preds = parsed['one2many']
         one2one_preds = parsed['one2one']
 
-        loss_one2many = self.one2many.loss(one2many_preds, batch)
-        loss_one2one_tal = self.one2one.loss(one2one_preds, batch)
+        loss_one2many, _, o2m_assign = self.one2many.loss(one2many_preds, batch)
+        loss_one2one_tal, loss_detach_o2o, _ = self.one2one.loss(one2one_preds, batch)
 
-        # Hungarian blended o2o loss
         hw = self._hungarian_weight
         if self.hungarian_assigner is not None and hw > 0:
             loss_one2one_hun = self._compute_hungarian_o2o_loss(one2one_preds, batch)
             tal_w = 1.0 - hw
-            loss_one2one = loss_one2one_tal[0] * tal_w + loss_one2one_hun[0] * hw
-            loss_detach = loss_one2one_tal[1] * tal_w + loss_one2one_hun[1] * hw
+            loss_one2one = loss_one2one_tal * tal_w + loss_one2one_hun[0] * hw
+            loss_detach = loss_detach_o2o * tal_w + loss_one2one_hun[1] * hw
         else:
-            loss_one2one = loss_one2one_tal[0]
-            loss_detach = loss_one2one_tal[1]
+            loss_one2one = loss_one2one_tal
+            loss_detach = loss_detach_o2o
 
-        total_loss = loss_one2many[0] * self.o2m + loss_one2one * self.o2o
+        total_loss = loss_one2many * self.o2m + loss_one2one * self.o2o
 
         has_aux = self.aux_xy_lambda > 0 and 'aux_xy_raw' in one2many_preds
 
         if has_aux:
-            aux_raw = one2many_preds['aux_xy_raw'].permute(0, 2, 1).contiguous()
+            fg_mask, _target_gt_idx, target_bboxes, _anc, _stride = o2m_assign
+
             feats = one2many_preds['feats']
             anchor_points, stride_tensor = make_anchors(feats, self.one2many.stride, 0.5)
-            imgsz = torch.tensor(feats[0].shape[2:], device=aux_raw.device, dtype=aux_raw.dtype) * stride_tensor[0]
+            imgsz = torch.tensor(feats[0].shape[2:], device=feats[0].device, dtype=feats[0][0].dtype) * stride_tensor[0]
 
+            aux_raw = one2many_preds['aux_xy_raw'].permute(0, 2, 1).contiguous()
             aux_xy_offset = aux_raw.sigmoid()
             aux_xy_pixel = (aux_xy_offset * 2.0 - 0.5 + anchor_points) * stride_tensor
             aux_pred_xy = aux_xy_pixel / imgsz[[1, 0]]
-
-            targets = torch.cat((batch['batch_idx'].view(-1, 1), batch['cls'].view(-1, 1), batch['bboxes']), 1)
-            targets = self.one2many.preprocess(targets.to(self.one2many.device), aux_raw.shape[0])
-            _, gt_bboxes = targets.split((1, self.one2many.raycast_dim), 2)
-            mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
-
-            _, target_bboxes, _, fg_mask, _ = self.one2many.assigner(
-                one2many_preds['scores'].permute(0, 2, 1).contiguous().detach().sigmoid(),
-                torch.cat(
-                    [
-                        aux_pred_xy.detach(),
-                        F.softplus(one2many_preds['boxes'].permute(0, 2, 1).contiguous()[..., 2:].detach()),
-                    ],
-                    dim=-1,
-                ),
-                anchor_points * stride_tensor / imgsz[[1, 0]],
-                targets.split((1, self.one2many.raycast_dim), 2)[0],
-                gt_bboxes,
-                mask_gt,
-            )
 
             n_fg = max(fg_mask.sum(), 1)
             if n_fg > 0:
