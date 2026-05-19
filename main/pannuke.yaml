@@ -97,7 +97,7 @@ training:
   # Per-o2o cls loss overrides — the o2o branch is NMS-free, so it must learn
   # to suppress ALL background anchors. These overrides make the o2o cls head
   # a "background specialist" while keeping the o2m branch unchanged.
-  focal_gamma_o2o: 0.0        # Plain BCE — every negative gets equal gradient
+  focal_gamma_o2o: 2.0        # Focal loss — suppresses easy bg, keeps hard negatives
   focal_alpha_o2o: 0.25       # Standard weighting — bg gets 3× weight of fg
   bg_fg_ratio_o2o: 0          # All bg anchors get gradient (no subsampling)
 
