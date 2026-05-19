@@ -134,26 +134,22 @@ class RayCastAssigner(TaskAlignedAssigner):
     # -----------------------------------------------------------------
 
     def _prefilter_by_distance(self, gt_bboxes, anc_points, mask_gt):
-        """Compute per-GT candidate anchor masks and reuse data for Gaussian decay.
+        """Compute spatial masks and Gaussian weights in one pass.
 
-        For each GT, anchors beyond 3σ receive Gaussian weight <0.011 and
-        never make it through topk. We return a boolean mask per-GT so that
-        PolarIoU is only computed for the relevant anchor subset.
+        For each valid GT, computes:
+          - dist: (n_valid_gt, na) centroid-to-anchor distances
+          - cand_mask: True where dist < 3σ (for optional PolarIoU masking)
+          - gauss: exp(-d²/2σ²) for spatial decay
 
-        Also returns precomputed (sigma, dist) so get_pos_mask can reuse them
-        for the Gaussian decay step without recomputing cdist.
-
-        Args:
-            gt_bboxes: (bs, n_max, raycast_dim) — normalised centroids + rays.
-            anc_points: (na, 2) — normalised anchor grid positions.
-            mask_gt: (bs, n_max, 1) — valid GT mask.
+        The Gaussian values <exp(-4.5) at 3σ naturally zero out distant anchors
+        via the alignment metric product, so the PolarIoU computation on those
+        entries is wasted. However, vectorized all-pairs PolarIoU on GPU is
+        faster than Python loops, so we compute PolarIoU on the full set and
+        let the Gaussian decay zero out the irrelevant entries.
 
         Returns:
-            List of dicts per batch element, each containing:
-                valid_idx: (n_valid_gt,) indices of valid GTs
-                cand_mask: (n_valid_gt, na) bool — True for anchors within 3σ
-                sigma: (n_valid_gt,) per-GT sigma values
-                dist: (n_valid_gt, na) centroid-to-anchor distance matrix
+            List of dicts per batch element with keys:
+                valid_idx, sigma, dist, gauss
         """
         bs = gt_bboxes.shape[0]
         per_batch = []
@@ -163,40 +159,35 @@ class RayCastAssigner(TaskAlignedAssigner):
             if valid_idx.numel() == 0:
                 per_batch.append({
                     'valid_idx': valid_idx,
-                    'cand_mask': None,
                     'sigma': None,
                     'dist': None,
+                    'gauss': None,
                 })
                 continue
 
             radii = self._compute_gt_radii(gt_bboxes[b, valid_idx, 2:])
             sigma = radii * self.radius_scale
-            cutoff = sigma * 3.0  # 3σ hard gate
 
             # (n_valid_gt, na) distance matrix in normalised space
             dist = torch.cdist(gt_bboxes[b, valid_idx, :2].float(), anc_points.float())
 
-            # Per-GT mask: anchor must be within 3σ of THIS GT
-            cand_mask = dist <= cutoff.unsqueeze(-1)  # (n_valid_gt, na)
+            gauss = torch.exp(-dist.pow(2) / (2.0 * sigma.pow(2).unsqueeze(-1) + self.eps))
 
             per_batch.append({
                 'valid_idx': valid_idx,
-                'cand_mask': cand_mask,
                 'sigma': sigma,
                 'dist': dist,
+                'gauss': gauss,
             })
         return per_batch
 
-    def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt, prefilt=None):
+    def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
         """Compute alignment metric for one2many branch using Polar-IoU.
 
         Formula: align = cls_score^alpha * PolarIoU^beta
 
-        Args:
-            prefilt: Optional precomputed distance data from
-                _prefilter_by_distance. When provided, PolarIoU is only
-                computed per-GT for anchors within 3σ. When None
-                (backward compat), all anchors are candidates.
+        Uses vectorized all-pairs PolarIoU per batch element — one kernel
+        launch per image, no Python inner loop over GTs.
         """
         na = pd_bboxes.shape[-2]
         # mask_gt comes in as (bs, n_max_boxes, 1) from _forward — must expand
@@ -212,50 +203,26 @@ class RayCastAssigner(TaskAlignedAssigner):
         bbox_scores[mask_gt_bool] = pd_scores[ind[0], :, ind[1]][mask_gt_bool]
 
         for b in range(self.bs):
-            if prefilt is not None:
-                info = prefilt[b]
-                valid_gt_idx = info['valid_idx']
-                cand_mask = info['cand_mask']
-                if valid_gt_idx.numel() == 0 or cand_mask is None:
-                    continue
+            valid_gt_mask = mask_gt_bool[b].any(dim=1)
+            valid_gt_idx = valid_gt_mask.nonzero(as_tuple=False).squeeze(-1)
+            n_valid_gt = valid_gt_idx.shape[0]
+            if n_valid_gt == 0:
+                continue
 
-                # Per-GT PolarIoU: only compute for anchors within 3σ of each GT
-                for gi_local in range(valid_gt_idx.shape[0]):
-                    gi = valid_gt_idx[gi_local]
-                    anchor_idx = cand_mask[gi_local].nonzero(as_tuple=False).squeeze(-1)
-                    n_cand = anchor_idx.shape[0]
-                    if n_cand == 0:
-                        continue
+            # All anchors as candidates — single vectorized PolarIoU call
+            cand_idx = torch.arange(na, device=pd_bboxes.device)
+            n_cand = na
 
-                    pd_rays = pd_bboxes[b, anchor_idx, 2:]
-                    gt_ray = gt_bboxes[b, gi, 2:]  # single GT
-                    pd_exp = pd_rays  # (n_cand, 32)
-                    gt_exp = gt_ray.unsqueeze(0).expand(n_cand, -1)  # (n_cand, 32)
-                    iou = polar_iou_pairwise_flat_torch(
-                        pd_exp.unsqueeze(1), gt_exp.unsqueeze(1)
-                    ).squeeze(1)  # (n_cand,)
+            pd_rays = pd_bboxes[b, cand_idx, 2:]
+            gt_rays = gt_bboxes[b, valid_gt_idx, 2:]
+            pd_exp = pd_rays[:, None, :].expand(-1, n_valid_gt, -1)
+            gt_exp = gt_rays[None, :, :].expand(n_cand, -1, -1)
+            iou = polar_iou_pairwise_flat_torch(pd_exp, gt_exp)
 
-                    overlaps[b, gi, anchor_idx] = iou.to(overlaps.dtype)
-            else:
-                valid_gt_mask = mask_gt_bool[b].any(dim=1)
-                valid_gt_idx = valid_gt_mask.nonzero(as_tuple=False).squeeze(-1)
-                n_valid_gt = valid_gt_idx.shape[0]
-                if n_valid_gt == 0:
-                    continue
-
-                cand_idx = torch.arange(na, device=pd_bboxes.device)
-                n_cand = na
-
-                pd_rays = pd_bboxes[b, cand_idx, 2:]
-                gt_rays = gt_bboxes[b, valid_gt_idx, 2:]
-                pd_exp = pd_rays[:, None, :].expand(-1, n_valid_gt, -1)
-                gt_exp = gt_rays[None, :, :].expand(n_cand, -1, -1)
-                iou = polar_iou_pairwise_flat_torch(pd_exp, gt_exp)
-
-                pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
-                overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = iou.T.to(overlaps.dtype) * pair_mask.to(
-                    overlaps.dtype
-                )
+            pair_mask = mask_gt_bool[b][valid_gt_idx[:, None], cand_idx[None, :]]
+            overlaps[b, valid_gt_idx[:, None], cand_idx[None, :]] = iou.T.to(overlaps.dtype) * pair_mask.to(
+                overlaps.dtype
+            )
 
         if self.align_threshold > 0:
             overlaps = overlaps * (overlaps >= self.align_threshold).float()
@@ -272,42 +239,31 @@ class RayCastAssigner(TaskAlignedAssigner):
 
         Formula:  align_metric = cls^α × PolarIoU^β × exp(-d² / 2σ²)
 
-        Two-stage spatial filtering:
-          1. Hard prefilter: skip PolarIoU for anchors >3σ from any GT centroid.
-             These get Gaussian weight <0.011 and would never be selected by topk.
-          2. Soft Gaussian decay: multiply alignment metric by exp(-d²/2σ²).
-
-        Together this gives identical results to computing all-pairs PolarIoU
-        but avoids the ~40-160× cost of computing PolarIoU for distant anchors.
+        The Gaussian decay naturally zeros out distant anchors (<0.011 at 3σ),
+        so they never survive topk selection. This gives soft spatial weighting
+        without hard containment filtering.
         """
-        # Prefilter: find candidate anchors within 3σ of each GT centroid
+        # Step 1: Precompute distances + Gaussian weights (reused in Step 3)
         if self.radius_scale > 0:
             prefilt = self._prefilter_by_distance(gt_bboxes, anc_points, mask_gt)
         else:
             prefilt = None
 
-        # Step 1: Polar-IoU alignment metric (prefitered candidates only)
-        align_metric, overlaps = self.get_box_metrics(
-            pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt, prefilt=prefilt
-        )
+        # Step 2: Polar-IoU alignment metric (vectorized per batch)
+        align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt)
 
-        # Step 2: Gaussian spatial decay — multiply into align_metric
-        # Reuse dist/sigma from prefilter to avoid recomputing cdist
-        if self.radius_scale > 0:
+        # Step 3: Gaussian spatial decay — reuse precomputed gauss from Step 1
+        if prefilt is not None:
             for b in range(self.bs):
                 info = prefilt[b]
                 if info['valid_idx'].numel() == 0:
                     continue
+                align_metric[b, info['valid_idx']] *= info['gauss']
 
-                gauss = torch.exp(
-                    -info['dist'].pow(2) / (2.0 * info['sigma'].pow(2).unsqueeze(-1) + self.eps)
-                )
-                align_metric[b, info['valid_idx']] *= gauss
-
-        # Step 3: Top-k selection
+        # Step 4: Top-k selection
         mask_topk = self.select_topk_candidates(align_metric, topk_mask=mask_gt.expand(-1, -1, self.topk).bool())
 
-        # Step 4: Final binary mask (no hard containment)
+        # Step 5: Final binary mask (no hard containment)
         mask_pos = mask_topk * mask_gt
 
         return mask_pos, align_metric, overlaps
