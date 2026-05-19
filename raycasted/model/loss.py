@@ -674,6 +674,10 @@ class RayCastE2ELoss(E2ELoss):
         bg_cls_decay: float = 1.0,
         fg_cls_boost: float = 0.0,
         soft_targets: bool = False,
+        soft_targets_o2o: bool | None = None,
+        focal_gamma_o2o: float | None = None,
+        focal_alpha_o2o: float | None = None,
+        bg_fg_ratio_o2o: int | None = None,
         class_weights: torch.Tensor | None = None,
         o2o_topk2_start: int = 1,
         o2o_topk2_anneal_epoch: int = 0,
@@ -720,6 +724,19 @@ class RayCastE2ELoss(E2ELoss):
         # Tag branches so DIAG logging can label output
         self.one2many.branch_name = 'o2m'
         self.one2one.branch_name = 'o2o'
+
+        # Per-branch soft targets: o2o can use soft targets independently
+        if soft_targets_o2o is not None:
+            self.one2one.soft_targets = soft_targets_o2o
+
+        # Per-branch cls loss overrides: o2o must be a "background specialist"
+        # for NMS-free inference. None = inherit from base (same as o2m).
+        if focal_gamma_o2o is not None:
+            self.one2one.focal_gamma = focal_gamma_o2o
+        if focal_alpha_o2o is not None:
+            self.one2one.focal_alpha = focal_alpha_o2o
+        if bg_fg_ratio_o2o is not None:
+            self.one2one.bg_fg_ratio = bg_fg_ratio_o2o
 
         # Fix: parent E2ELoss.decay() uses self.updates (step counter) as
         # numerator and one2one.hyp.epochs as denominator.  To make the
@@ -938,13 +955,18 @@ class RayCastE2ELoss(E2ELoss):
             loss_one2one = loss_one2one_tal * tal_w + loss_one2one_hun[0] * hw
             loss_detach = loss_detach_o2o * tal_w + loss_one2one_hun[1] * hw
 
-            if hasattr(self.one2many, '_diag_step') and self.one2many._diag_step % 100 == 0:
-                _hun_raw = loss_one2one_hun[0].detach()
+            _o2m_step = getattr(self.one2many, '_diag_step', 0)
+            if _o2m_step % 100 == 0:
+                if not getattr(self, '_hun_diag_fired', False):
+                    print(f'  ✓ Hungarian o2o branch FIRST DIAG at step={_o2m_step}, hw={hw:.3f}')
+                    self._hun_diag_fired = True
+                _hun_fg = loss_one2one_hun[2][0].sum().item() if loss_one2one_hun[2][0].sum() > 0 else 0
                 LOGGER.info(
-                    '\nDIAG o2o_hun step=%d | hw=%.3f | raw: %s',
-                    self.one2many._diag_step,
+                    '\nDIAG o2o_hun step=%d | hw=%.3f | fg=%d | raw: %s',
+                    _o2m_step,
                     hw,
-                    ' '.join(f'{v:.4f}' for v in _hun_raw.tolist()),
+                    _hun_fg,
+                    ' '.join(f'{v:.4f}' for v in loss_one2one_hun[0].detach().tolist()),
                 )
         else:
             loss_one2one = loss_one2one_tal

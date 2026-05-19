@@ -67,6 +67,13 @@ class TrainingSettings(BaseModel):
     # Soft targets — keep assigner quality scores instead of hard 0/1 binarisation
     soft_targets: bool = False
 
+    # Per-o2o classification loss overrides — the o2o branch must be a
+    # "background specialist" because NMS-free inference has no safety net.
+    # Set to None to inherit the base value.
+    focal_gamma_o2o: float | None = None
+    focal_alpha_o2o: float | None = None
+    bg_fg_ratio_o2o: int | None = None
+
     # Per-class inverse-frequency weights (sqrt-smoothed). None = no weighting.
     class_weights: list[float] | None = None
 

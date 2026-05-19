@@ -87,6 +87,20 @@ training:
   # targets. mAP50(P) dropped 4 points. Keep disabled.
   soft_targets: false
 
+  # Per-o2o soft targets: use alignment quality as cls target for the o2o branch only.
+  # Unlike soft_targets (applies to both branches), this only affects the o2o cls head.
+  # The o2o branch assigns 1 positive per GT — soft targets teach the head to predict
+  # match quality (e.g. 0.87 for strong match, 0.31 for weak), suppressing marginal
+  # positives at inference time and reducing overprediction.
+  soft_targets_o2o: true
+
+  # Per-o2o cls loss overrides — the o2o branch is NMS-free, so it must learn
+  # to suppress ALL background anchors. These overrides make the o2o cls head
+  # a "background specialist" while keeping the o2m branch unchanged.
+  focal_gamma_o2o: 0.0        # Plain BCE — every negative gets equal gradient
+  focal_alpha_o2o: 0.25       # Standard weighting — bg gets 3× weight of fg
+  bg_fg_ratio_o2o: 0          # All bg anchors get gradient (no subsampling)
+
   # class_weights disabled — caused mode collapse. fg-only amplification with
   # weak bg gradient pushed model to always predict the least-penalized class.
   # Re-add with conservative values (cap at 2.0) once bg suppression is stable.

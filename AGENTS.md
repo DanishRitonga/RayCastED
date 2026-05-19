@@ -44,7 +44,7 @@ Inference: fuse() → keeps only o2o heads (one2one_cv2 + one2one_cv3) → postp
 
 **Architecture:** P2-P3-P4 pyramid (strides 4/8/16), 5376 total anchors at 256px input.
 
-**IMPORTANT: n_rays=64 in training.** While `constants.py` defaults to 32 rays, all training runs use `n_rays: 64` in `main/pannuke.yaml`. The model head, loss functions, and assigner all use `n_rays` from config. Previous experiment log results (mAP50=0.411 etc.) used n_rays=32 — current runs with n_rays=64 are not directly comparable. Always check `pannuke.yaml` for the active n_rays value.
+**IMPORTANT: n_rays=64 in ALL training runs.** While `constants.py` defaults to 32 rays, `main/pannuke.yaml` sets `n_rays: 64` and this has been the case for every experiment (including the logged results below). The model head, loss functions, and assigner all use `n_rays` from config. Always check `pannuke.yaml` for the active n_rays value.
 
 ## Training Config Threading Pattern
 
