@@ -655,6 +655,10 @@ class RayCastE2ELoss(E2ELoss):
     Smoothness lambda anneals from smooth_start to smooth_end over
     smooth_anneal_epochs. Inherits o2m/o2o weight decay from parent.
 
+    2-phase Hungarian curriculum:
+      Phase 1 (0 → phase2_start): pure dual-TAL, o2m > o2o
+      Phase 2 (phase2_start → end): Hungarian o2o ramps 0→max_weight
+
     When ``gradnorm=True``, replaces static λ weights with GradNorm
     (Chen et al., 2018) dynamic weights that equalise gradient norms
     across all 5 tasks, preventing cls_loss from dominating the shared
@@ -687,6 +691,7 @@ class RayCastE2ELoss(E2ELoss):
         focal_gamma_o2o: float | None = None,
         focal_alpha_o2o: float | None = None,
         bg_fg_ratio_o2o: int | None = None,
+        bg_cls_decay_o2o: float | None = None,
         fg_cls_boost_o2o: float | None = None,
         class_weights: torch.Tensor | None = None,
         o2o_topk2_start: int = 1,
@@ -702,8 +707,10 @@ class RayCastE2ELoss(E2ELoss):
         fg_cls_quality_scale: float = 0.0,
         fg_cls_quality_scale_o2o: float | None = None,
         hungarian_phase2_start: int = 0,
-        hungarian_phase3_start: int = 0,
+        hungarian_phase3_start: int | None = None,
         hungarian_max_weight: float = 0.9,
+        hungarian_ramp_epochs: int = 0,
+        phase2_freeze_epochs: int = 0,
         hungarian_cost_class: float = 1.0,
         hungarian_cost_centroid: float = 1.0,
         hungarian_cost_ray: float = 1.0,
@@ -760,6 +767,8 @@ class RayCastE2ELoss(E2ELoss):
             self.one2one.focal_alpha = focal_alpha_o2o
         if bg_fg_ratio_o2o is not None:
             self.one2one.bg_fg_ratio = bg_fg_ratio_o2o
+        if bg_cls_decay_o2o is not None:
+            self.one2one.bg_cls_decay = bg_cls_decay_o2o
         if fg_cls_boost_o2o is not None:
             self.one2one.fg_cls_boost = fg_cls_boost_o2o
         if fg_cls_quality_scale_o2o is not None:
@@ -819,12 +828,30 @@ class RayCastE2ELoss(E2ELoss):
         # Can be set dynamically via set_steps_per_epoch() once dataset is known.
         self.steps_per_epoch = self._steps_per_epoch
 
-        # Hungarian 3-phase schedule
+        # Hungarian 2-phase curriculum
         self._hungarian_phase2_start = hungarian_phase2_start
-        self._hungarian_phase3_start = hungarian_phase3_start
         self._hungarian_max_weight = hungarian_max_weight
-        self._hungarian_weight = 0.0  # current blending weight (0 = pure TAL, 1 = pure Hungarian)
+        self._hungarian_ramp_epochs = hungarian_ramp_epochs
+        self._phase2_freeze_epochs = phase2_freeze_epochs
+        self._hungarian_weight = 0.0
         self._max_epochs = max_epochs
+        self._backbone_frozen = False
+        self._phase2_entered = False
+
+        if hungarian_phase3_start is not None:
+            logger.warning(
+                'hungarian_phase3_start is deprecated (2-phase curriculum). '
+                'Ignoring value=%s. Use hungarian_ramp_epochs instead.',
+                hungarian_phase3_start,
+            )
+
+        if phase2_freeze_epochs > 0:
+            logger.info(
+                'phase2_freeze_epochs=%d: backbone will freeze at epoch %d for %d epochs.',
+                phase2_freeze_epochs,
+                self._hungarian_phase2_start,
+                phase2_freeze_epochs,
+            )
 
         # Sigma annealing: broad→tight radius_scale (DCFL, CVPR 2023)
         self._sigma_anneal_start = sigma_anneal_start if sigma_anneal_start > 0 else assigner_radius_scale
@@ -916,9 +943,15 @@ class RayCastE2ELoss(E2ELoss):
 
             if self.hungarian_assigner is not None:
                 print(
-                    f'  3-phase Hungarian: phase2@epoch {self._hungarian_phase2_start}, '
-                    f'phase3@epoch {self._hungarian_phase3_start}, max_weight={self._hungarian_max_weight}'
+                    f'  2-phase Hungarian: phase2@epoch {self._hungarian_phase2_start}, '
+                    f'max_weight={self._hungarian_max_weight}, '
+                    f'ramp_epochs={self._hungarian_ramp_epochs or "auto"}'
                 )
+                if self._phase2_freeze_epochs > 0:
+                    print(
+                        f'  Backbone freeze: {self._phase2_freeze_epochs} epochs '
+                        f'at phase2 start (epoch {self._hungarian_phase2_start})'
+                    )
 
         # Loss weight annealing
         current_epoch = self.updates / max(self.steps_per_epoch, 1)
@@ -959,20 +992,31 @@ class RayCastE2ELoss(E2ELoss):
             self.one2many.assigner.radius_scale = new_radius_scale
             self.one2one.assigner.radius_scale = new_radius_scale
 
-        # Hungarian blending: smooth ramp across 3 phases
+        # Hungarian blending: 2-phase ramp
         # Phase 1 (0→p2): hungarian_weight = 0 (pure TAL)
-        # Phase 2 (p2→p3): hungarian_weight ramps 0→max_weight
-        # Phase 3 (p3+): hungarian_weight = max_weight
+        # Phase 2 (p2→end): hungarian_weight ramps 0→max_weight
         if self.hungarian_assigner is not None:
             p2 = self._hungarian_phase2_start
-            p3 = self._hungarian_phase3_start
             if current_epoch < p2:
                 self._hungarian_weight = 0.0
-            elif current_epoch < p3:
-                progress = (current_epoch - p2) / max(p3 - p2, 1)
-                self._hungarian_weight = progress * self._hungarian_max_weight
             else:
-                self._hungarian_weight = self._hungarian_max_weight
+                ramp = self._hungarian_ramp_epochs
+                if ramp > 0:
+                    progress = min((current_epoch - p2) / ramp, 1.0)
+                else:
+                    remaining = max(self._max_epochs - p2, 1)
+                    progress = min((current_epoch - p2) / remaining, 1.0)
+                self._hungarian_weight = progress * self._hungarian_max_weight
+
+        # Backbone freeze at phase 2 start (prevents transient mAP dip)
+        if self._phase2_freeze_epochs > 0 and self.hungarian_assigner is not None:
+            p2 = self._hungarian_phase2_start
+            if current_epoch >= p2 and not self._phase2_entered:
+                self._phase2_entered = True
+                self._freeze_backbone()
+                self._freeze_end_epoch = current_epoch + self._phase2_freeze_epochs
+            if self._backbone_frozen and current_epoch >= self._freeze_end_epoch:
+                self._unfreeze_backbone()
 
         # Auxiliary XY: decay after aux_xy_decay_epoch
         if self._aux_xy_base > 0 and current_epoch >= self.aux_xy_decay_epoch:
@@ -982,6 +1026,29 @@ class RayCastE2ELoss(E2ELoss):
             self.aux_xy_lambda = self._aux_xy_base * max(1.0 - decay_progress, 0.0)
         elif self._aux_xy_base > 0:
             self.aux_xy_lambda = self._aux_xy_base
+
+    def _freeze_backbone(self):
+        """Freeze backbone parameters to stabilize Hungarian transition."""
+        model = self.model
+        if hasattr(model, 'model'):
+            # Backbone = all layers except the last (detection head)
+            backbone = list(model.model.children())[:-1]
+            for module in backbone:
+                for param in module.parameters():
+                    param.requires_grad_(False)
+            self._backbone_frozen = True
+            logger.info('Backbone FROZEN at epoch %.1f (phase2 start)', self.updates / max(self.steps_per_epoch, 1))
+
+    def _unfreeze_backbone(self):
+        """Unfreeze backbone parameters after Hungarian transition stabilizes."""
+        model = self.model
+        if hasattr(model, 'model'):
+            backbone = list(model.model.children())[:-1]
+            for module in backbone:
+                for param in module.parameters():
+                    param.requires_grad_(True)
+            self._backbone_frozen = False
+            logger.info('Backbone UNFROZEN at epoch %.1f', self.updates / max(self.steps_per_epoch, 1))
 
     def _compute_hungarian_o2o_loss(self, one2one_preds, batch):
         """Compute o2o loss using Hungarian assigner (temporary assigner swap)."""

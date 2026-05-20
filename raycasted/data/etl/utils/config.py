@@ -75,6 +75,7 @@ class TrainingSettings(BaseModel):
     focal_gamma_o2o: float | None = None
     focal_alpha_o2o: float | None = None
     bg_fg_ratio_o2o: int | None = None
+    bg_cls_decay_o2o: float | None = None  # per-branch bg suppression for o2o
     fg_cls_boost_o2o: float | None = None  # per-branch quality re-weighting for o2o
     fg_cls_quality_scale_o2o: float | None = None  # per-branch multiplicative quality for o2o
 
@@ -102,13 +103,13 @@ class TrainingSettings(BaseModel):
     # STAL: Small-Target-Aware Label Assignment (YOLO26)
     stal_min_positives: int = 0  # minimum positive anchors per GT (0 = disabled)
 
-    # 3-phase training: TAL-only → TAL+Hungarian blend → Hungarian-dominant
+    # 2-phase Hungarian curriculum: TAL-only → Hungarian ramp
     # Phase 1 (0 → phase2_start): standard dual-TAL, o2m > o2o
-    # Phase 2 (phase2_start → phase3_start): Hungarian o2o ramps 0→hungarian_max_weight
-    # Phase 3 (phase3_start → end): Hungarian o2o dominates, TAL o2o fades to minimum
+    # Phase 2 (phase2_start → end): Hungarian o2o ramps 0→hungarian_max_weight
     hungarian_phase2_start: int = 100
-    hungarian_phase3_start: int = 250
     hungarian_max_weight: float = 0.9
+    hungarian_ramp_epochs: int = 0
+    phase2_freeze_epochs: int = 0
     hungarian_cost_class: float = 1.0
     hungarian_cost_centroid: float = 1.0
     hungarian_cost_ray: float = 1.0
