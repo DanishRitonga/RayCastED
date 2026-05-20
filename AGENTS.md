@@ -153,6 +153,20 @@ Eval (no NMS, conf=0.20): AJI=0.3442, AP@0.5=0.0440, bPQ=0.3602, mPQ=0.0786, F1=
 - Phase 5: Dataset tests (raycast_dataset.py)
 - Phase 6: E2E integration tests
 
+## Run Tracking
+
+**All training runs must be documented in `docs/runs/`** — one markdown file per run (e.g., `docs/runs/train13.md`, `docs/runs/train18.md`). Each run file should include:
+
+- Run number and date
+- Config changes from previous run (diff of `pannuke.yaml` or explicit list)
+- Key hyperparameters (especially anything non-default)
+- Training results: val mAP50, mAP50-95, precision, recall at best epoch
+- Eval results: AJI, bPQ, mPQ, AP@0.5, F1, prediction count vs GT
+- Diagnosis: what worked, what didn't, and why
+- Next steps / follow-up experiments
+
+This ensures every run is reproducible and we can trace the evolution of config decisions.
+
 ## Style & Conventions
 
 - Follow ruff formatting and linting (`uv run ruff check . && uv run ruff format .`)

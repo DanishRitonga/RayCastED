@@ -777,16 +777,15 @@ class RayCastE2ELoss(E2ELoss):
         # Fix: parent E2ELoss.decay() uses self.updates (step counter) as
         # numerator and one2one.hyp.epochs as denominator.  To make the
         # schedule span the full max_epochs (not just 200 steps), we set
-        # hyp.epochs to the total step count.  This is updated dynamically
-        # via set_steps_per_epoch() once the dataset size is known.
+        # hyp.epochs to max_epochs. Note: self.updates is incremented once per
+        # epoch (not per step), so the decay schedule must use epoch units.
         self._steps_per_epoch = steps_per_epoch if steps_per_epoch > 0 else 1
-        total_steps = max_epochs * self._steps_per_epoch
         for branch in (self.one2many, self.one2one):
             if not hasattr(branch, 'hyp') or branch.hyp is None:
                 from ultralytics.cfg import get_cfg
 
                 branch.hyp = get_cfg()
-            branch.hyp.epochs = total_steps
+            branch.hyp.epochs = max_epochs
 
         # Override parent's hardcoded tal_topk values with our custom values.
         # Stock Ultralytics: o2m topk=10/topk2=10, o2o topk=7/topk2=1.
@@ -829,6 +828,20 @@ class RayCastE2ELoss(E2ELoss):
         self.steps_per_epoch = self._steps_per_epoch
 
         # Hungarian 2-phase curriculum
+        # Auto-compute phase2 start from decay schedule if not specified:
+        # o2m(x) = (1 - x/(T-1))*(0.8-0.1) + 0.1, o2o dominates when o2m < 0.5
+        # Solving: x/(T-1) > 0.571 → epoch > 0.571 * max_epochs
+        if hungarian_phase2_start < 0:
+            o2m_start = self.o2m_copy
+            o2m_final = self.final_o2m
+            threshold = (o2m_start + o2m_final) / 2.0
+            crossing = (o2m_start - threshold) / max(o2m_start - o2m_final, 1e-9) * max(max_epochs - 1, 1)
+            hungarian_phase2_start = int(crossing)
+            logger.info(
+                'Hungarian phase2 auto-computed: epoch %d (o2m<%.2f)',
+                hungarian_phase2_start,
+                threshold,
+            )
         self._hungarian_phase2_start = hungarian_phase2_start
         self._hungarian_max_weight = hungarian_max_weight
         self._hungarian_ramp_epochs = hungarian_ramp_epochs
@@ -914,9 +927,8 @@ class RayCastE2ELoss(E2ELoss):
             return
         self._steps_per_epoch = steps_per_epoch
         self.steps_per_epoch = steps_per_epoch
-        total_steps = self._max_epochs * steps_per_epoch
         for branch in (self.one2many, self.one2one):
-            branch.hyp.epochs = total_steps
+            branch.hyp.epochs = self._max_epochs
 
     def update(self):
         """Update o2m/o2o weights + anneal smoothness + topk2 + Hungarian blend + validate E2E."""
