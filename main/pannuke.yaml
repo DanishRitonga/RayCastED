@@ -61,7 +61,7 @@ training:
   # 2-phase Hungarian curriculum: TAL-only → Hungarian ramp
   # Phase 1 (0→100): standard dual-TAL, o2m > o2o
   # Phase 2 (100+): Hungarian o2o ramps 0→0.9 over remaining training
-  hungarian_phase2_start: 100
+  hungarian_phase2_start: 999       # DISABLED — train13 didn't use Hungarian
   hungarian_max_weight: 0.9
   hungarian_ramp_epochs: 0        # 0 = auto (ramp over remaining epochs)
   phase2_freeze_epochs: 0         # backbone freeze at phase2 start (0=disabled)
@@ -124,14 +124,13 @@ training:
   lambda_l1: 14.0               # L1 ray distance weight
   lambda_piou: 13.0             # Polar IoU weight
 
-  # Sigma annealing: broad→tight assignment over training (DCFL, CVPR 2023)
-  # Start with wider spatial influence (more positives), tighten late (sharper localization)
-  sigma_anneal_start: 2.0       # Initial radius_scale (0 = use assigner_radius_scale)
-  sigma_anneal_end: 0.5         # Final radius_scale
-  sigma_anneal_epoch: 200       # Epoch to start annealing
+  # Sigma annealing: DISABLED — train13 didn't use this, re-evaluate later
+  sigma_anneal_start: 0         # 0 = disabled (use assigner_radius_scale)
+  sigma_anneal_end: 0.5
+  sigma_anneal_epoch: 200
 
-  # STAL: Small-Target-Aware Label Assignment (YOLO26)
-  stal_min_positives: 1         # Minimum positive anchors per GT (0 = disabled)
+  # STAL: DISABLED — train13 didn't use this, re-evaluate later
+  stal_min_positives: 0         # 0 = disabled
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false
