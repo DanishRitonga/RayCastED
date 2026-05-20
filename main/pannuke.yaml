@@ -117,10 +117,12 @@ training:
   bg_cls_decay: 1.0             # Bg cls gradient multiplier. 1.0=full bg gradient, 0.0=no bg gradient
   fg_cls_boost: 0.0             # Fg cls boost by alignment quality: weight = 1 + boost * quality (0.0=disabled)
 
-  # Loss weights (literature: regression 3-7x higher than cls)
-  # Current total regression = l1(14) + piou(13) = 27 vs cls=2 → regression 13.5x
+  # Loss weights
+  # lambda_xy=500 compensates for sigmoid+stride/imgsz gradient attenuation (~0.008x effective)
+  # Effective weighted regression ≈ xy(24) + l1(37) + piou(54) = 115 vs cls(0.94) ≈ 122:1
+  # But effective GRADIENT ratio is much lower due to attenuation chain on xy
   lambda_cls: 2.0               # Classification weight
-  lambda_xy: 500.0              # Centroid xy weight (high: stride/imgsz gradient attenuation)
+  lambda_xy: 500.0              # Centroid xy weight (high: compensates sigmoid→stride→imgsz attenuation)
   lambda_l1: 14.0               # L1 ray distance weight
   lambda_piou: 13.0             # Polar IoU weight
 

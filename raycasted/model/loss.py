@@ -351,10 +351,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
         )
 
         # Loss weights — decoded normalised xy space [0,1].
-        # High lambda_xy compensates for stride/imgsz gradient attenuation (~0.03x).
-        # Raw ~0.088; lambda=500 gives weighted~44, effective grad_mult~7.8.
-        # Rebalanced L1/piou (total=27 preserved): more weight to shape-quality loss
-        # so PolarIoU drives polygon shape rather than per-ray pixel distance alone.
+        # High lambda_xy compensates for sigmoid→stride→imgsz gradient attenuation
+        # (~0.008x effective). Raw xy ~0.048; lambda=500 → weighted ~24.
+        # lambda_l1 and lambda_piou are static (set here, updated by E2ELoss.update).
+        # Effective weighted ratio: regression(xy+l1+piou) ≈ 115 vs cls ≈ 0.94 ≈ 122:1
+        # but effective GRADIENT ratio is much lower due to xy attenuation chain.
         self.lambda_cls = lambda_cls
         self.lambda_xy = lambda_xy
         self.lambda_l1 = 14.0
@@ -571,8 +572,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[2] = loss_l1.sum() / n_fg
 
             # L_PolarIoU: -log(PolarIoU) — matches PolarMask formulation
+            # clamp(min=1e-4) bounds gradient magnitude (~10^4 max) to prevent
+            # AMP GradScaler from skipping steps when piou≈0 in early training
             fg_piou = polar_iou_torch(fg_pred_rays, fg_target_rays)
-            piou_loss = -torch.log(fg_piou + 1e-7)
+            piou_loss = -torch.log(fg_piou.clamp(min=1e-4))
             if fg_plb is not None:
                 piou_loss = piou_loss * fg_plb
             loss[3] = piou_loss.sum() / n_fg
@@ -774,7 +777,7 @@ class RayCastE2ELoss(E2ELoss):
         if fg_cls_quality_scale_o2o is not None:
             self.one2one.fg_cls_quality_scale = fg_cls_quality_scale_o2o
 
-        # Fix: parent E2ELoss.decay() uses self.updates (step counter) as
+        # Fix: parent E2ELoss.decay() uses self.updates (epoch counter) as
         # numerator and one2one.hyp.epochs as denominator.  To make the
         # schedule span the full max_epochs (not just 200 steps), we set
         # hyp.epochs to max_epochs. Note: self.updates is incremented once per
@@ -920,8 +923,8 @@ class RayCastE2ELoss(E2ELoss):
         """Update steps_per_epoch after dataset size becomes known.
 
         Called from RayCastTrainer.get_dataloader() once the training dataset
-        has been built.  Recomputes the total step count used by the parent's
-        o2m/o2o decay schedule so it spans the full max_epochs.
+        has been built. Note: hyp.epochs is set to max_epochs (not total steps)
+        because self.updates is an epoch counter, not a step counter.
         """
         if steps_per_epoch <= 0:
             return
@@ -934,7 +937,7 @@ class RayCastE2ELoss(E2ELoss):
         """Update o2m/o2o weights + anneal smoothness + topk2 + Hungarian blend + validate E2E."""
         super().update()
 
-        current_epoch = self.updates / max(self.steps_per_epoch, 1)
+        current_epoch = float(self.updates)
 
         # Validate E2E integrity on first update (catches config drift)
         if self.updates == 1:
@@ -966,7 +969,7 @@ class RayCastE2ELoss(E2ELoss):
                     )
 
         # Loss weight annealing
-        current_epoch = self.updates / max(self.steps_per_epoch, 1)
+        current_epoch = float(self.updates)
 
         # Smooth: reverse-anneal (0 → 1) over first 40% of training
         t_smooth = min(self.updates / self.smooth_anneal_epochs, 1.0)

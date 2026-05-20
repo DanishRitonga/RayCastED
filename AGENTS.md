@@ -61,27 +61,27 @@ When adding a new config parameter:
 
 ### Classification & Overprediction
 
-1. **bg_cls_decay applied once (resolved)**: `loss.py:527` applies bg_cls_decay once. Previous gotcha about double-application was stale. Current effective bg:fg loss ratio with focal_alpha=0.25, bg_cls_decay=0.5, bg_fg_ratio=3 is ~4.5:1 (bg dominates).
+1. **bg_cls_decay applied once (verified)**: `loss.py:524-537` applies bg_cls_decay once (or zero times when `bg_cls_decay=1.0`, which is the current default — the guard skips entirely). No double-application exists.
 
-2. **focal_alpha=0.5 causes mode collapse**: When alpha=0.5, background gets 3x more weight than foreground. Combined with the nc=80 issue (75 ghost channels), this overwhelms the 5 real classes.
+2. **focal_alpha=0.5 causes mode collapse**: With alpha=0.5, focal loss gives equal weight to fg and bg. Combined with `bg_fg_ratio=3` (3x more bg anchors sampled), the effective bg:fg gradient ratio is 3:1. This overwhelms the 5 real classes. Use `focal_alpha=0.75`.
 
-3. **class_weights failure**: `class_weights` in loss.py is ignored during warmup (epochs 0-50) because the assigner uses centroid-distance similarity, which doesn't use cls scores.
+3. **class_weights scales the loss, not the assignment**: `class_weights` in loss.py scales positive cls loss magnitudes from the first epoch — there is no warmup gate. It is disabled because it caused mode collapse (fg-only amplification with weak bg gradient pushed model to predict the least-penalized class).
 
-4. **Shared cv3 fix (resolved)**: O2O branch now has separate `one2one_cv3` cls head. `fuse()` sets `cv2=cv3=None`, keeping only o2o heads. Shared head caused 11.5x overprediction.
+4. **Shared cv3 fix (verified)**: O2O branch has separate `one2one_cv3` cls head via `copy.deepcopy`. `fuse()` sets `cv2=cv3=None`, keeping only o2o heads. Shared head caused 11.5x overprediction.
 
 5. **Separate head alone doesn't fix overprediction**: Even with separate o2o cls head, model still produces 11.3x overprediction (746k preds vs 66k GT). The o2o head needs more positive signal during training — topk2 annealing (3→1) addresses this.
 
-6. **Hard binarization destroys quality signal**: `loss.py:475` sets `cls_targets[cls_targets > 0] = 1.0`. All positives get same target regardless of match quality. Soft targets for o2o may help.
+6. **Hard binarization destroys quality signal**: `loss.py:480` sets `cls_targets[cls_targets > 0] = 1.0` (on a cloned tensor, so no autograd issue). All positives get same target regardless of match quality. Soft targets for o2o may help.
 
 ### Assignment & Warmup
 
-7. **warmup sigma must be configurable**: Sigma is hardcoded at 0.15 in `tal.py:get_box_metrics`. Always thread sigma through loss.py → tal.py and update pannuke.yaml.
+7. **warmup sigma must be configurable**: Sigma was previously hardcoded at 0.15. Now configurable via `assigner_radius_scale` in pannuke.yaml. Always thread sigma through loss.py → tal.py and update pannuke.yaml.
 
-8. **assigner_radius_scale must match model geometry**: Default fallback [8,16,32] in loss.py is wrong for P2-P3-P4 architecture. Use model's stride values instead.
+8. **assigner_radius_scale must match model geometry**: Default fallback [8,16,32] in tal.py is wrong for P2-P3-P4 architecture. In practice the model's actual strides are always passed, so the fallback is never used. Latent risk only if `RayCastAssigner()` is called directly without stride.
 
 9. **dynamic topk masks garbage**: `select_topk_candidates` in tal.py masks out zero-metric entries. You can increase tal_topk to get more candidates through the containment filter.
 
-10. **3-phase Hungarian blending**: Hungarian assigner for o2o blended via smooth schedule in `RayCastE2ELoss`. Phase 1 (0→100): pure TAL. Phase 2 (100→250): Hungarian ramps 0→0.9, TAL fades. Phase 3 (250+): Hungarian at 0.9, TAL at 0.1. Config: `hungarian_phase2_start`, `hungarian_phase3_start`, `hungarian_max_weight`, `hungarian_cost_{class,centroid,ray}`. Implementation: `_compute_hungarian_o2o_loss()` temporarily swaps the o2o assigner.
+10. **2-phase Hungarian blending**: Hungarian assigner for o2o blended via smooth schedule in `RayCastE2ELoss`. Phase 1 (0→p2): pure TAL. Phase 2 (p2→end): Hungarian ramps 0→max_weight, TAL fades as `1 - hw`. The old 3-phase system is deprecated — `hungarian_phase3_start` is ignored. Config: `hungarian_phase2_start` (use -1 for auto), `hungarian_max_weight`, `hungarian_cost_{class,centroid,ray}`. Implementation: `_compute_hungarian_o2o_loss()` temporarily swaps the o2o assigner.
 
 11. **Topk2 annealing**: `o2o_topk2_start` (default 3) and `o2o_topk2_anneal_epoch` (default 120) linearly anneal topk2 from start→1 over [anneal_epoch, max_epochs]. Inspired by One-to-Few (CVPR 2023). Config in pannuke.yaml.
 
@@ -89,7 +89,7 @@ When adding a new config parameter:
 
 12. **nc must be set at construction time**: Pass `nc=self.data['nc']` in `get_model()` (train.py). If nc is set after construction, cv3 conv layers stay at 80 channels.
 
-13. **bias_init default (640) wrong**: `head.bias_init()` uses a hardcoded default. After the first `set_model_attributes` call, it's harmless but wrong during initial construction.
+13. **bias_init default (256) correct for PanNuke**: `head.bias_init()` uses default `crop_size=256`. The old gotcha about default 640 was stale — the actual default is 256 which matches PanNuke. If using a different imgsz, `set_model_attributes` calls `bias_init(crop_size=imgsz)` to correct it.
 
 ### Ultralytics Integration
 
@@ -103,11 +103,17 @@ When adding a new config parameter:
 
 18. **`steps_per_epoch` computed dynamically (resolved)**: Was hardcoded at 133. Now passed from `RayCastTrainer.get_dataloader()` via `set_steps_per_epoch()` on the criterion. Also set on `_RayCastCriterionWrapper` for the resume path.
 
-19. **O2M/O2O decay schedule fixed (resolved)**: Parent `E2ELoss.decay()` uses `self.updates` (step counter) as numerator. Previously `hyp.epochs` was set to `max_epochs` (200), causing o2m→0.1 at step 199 (~1.5 epochs). Now set to `max_epochs × steps_per_epoch` so the schedule spans the full training.
+19. **O2M/O2O decay schedule fixed (resolved)**: Parent `E2ELoss.decay()` uses `self.updates` (epoch counter) as numerator. Previously `hyp.epochs` was set to `max_epochs × steps_per_epoch` (total steps), but since `updates` is incremented once per epoch, the decay barely moved — o2o stayed at ~20% weight. Now `hyp.epochs = max_epochs` so the schedule spans the full training in epoch units.
 
 20. **TAL o2o loss now uses o2o branch (resolved)**: `loss.py:__call__` was calling `self.one2many.loss(one2one_preds, batch)` which used the o2m assigner (topk=15, topk2=15). Fixed to `self.one2one.loss(one2one_preds, batch)` which uses the o2o assigner (topk=7, topk2=3→1). This was the root cause of all o2o experiments showing no improvement — the o2o branch was never trained with its own assignment.
 
 21. **Hard containment filter removed (tal.py)**: `select_candidates_in_gts` was dead code (never called after removal). All 5376 anchors are candidates; Gaussian decay provides soft spatial weighting. The method has been removed.
+
+22. **`current_epoch` computation fixed**: Was `self.updates / steps_per_epoch` (dividing epoch counter by 166 → giving 0.006 at epoch 1). This meant topk2 annealing, sigma annealing, Hungarian blending, and backbone freeze were never triggered. Now `current_epoch = float(self.updates)`.
+
+23. **piou_loss gradient explosion fixed**: `-log(piou + 1e-7)` produced gradients ~10^7 when piou≈0 in early training, causing AMP GradScaler to skip steps. Now uses `-log(piou.clamp(min=1e-4))` to bound gradient magnitude.
+
+24. **Empty-batch collate fixed**: `raycast_dataset.py` hardcoded `4+32` for fallback tensor shape, which crashes with n_rays=64. Now uses `N_RAYS` constant.
 
 ### Eval Script
 
@@ -131,8 +137,8 @@ Eval (no NMS, conf=0.20): AJI=0.3442, AP@0.5=0.0440, bPQ=0.3602, mPQ=0.0786, F1=
 **Conclusion: decay=1.0 > decay=0.5.** Higher o2m decay means o2o branch dominates sooner, better for separate o2o cls head training.
 
 ### Pending Experiments
-- Topk2 annealing (3→1 at epoch 120) — training in progress
-- 3-phase Hungarian blending (code implemented, needs training run)
+- Topk2 annealing (3→1 at epoch 120) — was never triggered due to current_epoch bug, now fixed
+- 2-phase Hungarian blending (code implemented, needs training run)
 - Soft cls targets for o2o only
 - Higher inference conf (0.5) — tested, still 609k preds at conf=0.5. Training fix needed.
 - Reduce max_det from 300 to 50-100
@@ -143,7 +149,7 @@ Eval (no NMS, conf=0.20): AJI=0.3442, AP@0.5=0.0440, bPQ=0.3602, mPQ=0.0786, F1=
 - `tests/phase_6/` — 27 tests via pytest
 - Single test file: `uv run python -m pytest tests/phase_6/test_tal.py -x -v`
 
-**Pre-existing failures:** 7 tests fail (Hungarian assigner tests, loss constructor lambda_l1 14 vs 25, smoothness annealing). 19 pass. These are pre-existing and unrelated to recent changes.
+**Pre-existing failures:** 7 tests fail (Hungarian assigner tests, loss constructor lambda_l1 14 vs 25, smoothness annealing). 19 pass. These are pre-existing and unrelated to recent changes. Total: 28 tests (including the decay schedule test).
 
 **Test file naming:**
 - Phase 1: TAL assignment tests (tal.py)

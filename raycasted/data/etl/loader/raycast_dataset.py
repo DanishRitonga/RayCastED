@@ -374,6 +374,8 @@ def collate_fn(batch):
     if target_list:
         targets = torch.from_numpy(np.concatenate(target_list, axis=0))
     else:
-        targets = torch.zeros((0, 4 + 32), dtype=torch.float32)  # fallback, shape doesn't matter for empty
+        from raycasted.data.etl.utils.constants import N_RAYS
+
+        targets = torch.zeros((0, 4 + N_RAYS), dtype=torch.float32)
 
     return images, targets
