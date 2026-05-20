@@ -101,8 +101,8 @@ training:
   # for NMS-free inference. These override the base values above for o2o only.
   focal_gamma_o2o: 2.0        # Focal loss — suppresses easy bg, keeps hard negatives
   focal_alpha_o2o: 0.75       # Fg weight — match o2m (train13 proved 0.75 works)
-  bg_fg_ratio_o2o: 3          # Subsample bg — focal alone can't handle 5000:50 ratio
-  bg_cls_decay_o2o: 0.5       # Scale bg loss to 50% — reduce bg dominance
+  bg_fg_ratio_o2o: 3          # Subsample bg — matches train13 (mAP50=0.411)
+  bg_cls_decay_o2o: 1.0       # Full bg weight — don't starve bg suppression (0.5 over-corrected)
   fg_cls_boost_o2o: null       # Additive boost disabled for o2o
   fg_cls_quality_scale_o2o: null  # Multiplicative disabled — was starving fg (TAL quality 0.2-0.5)
 
