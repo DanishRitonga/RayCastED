@@ -63,6 +63,7 @@ class TrainingSettings(BaseModel):
     plb_enabled: bool = False  # area-based fg weighting to boost small nuclei
     bg_cls_decay: float = 1.0  # background classification loss decay (1.0=full, 0.0=off)
     fg_cls_boost: float = 0.0  # fg cls boost by alignment quality (0.0=disabled)
+    fg_cls_quality_scale: float = 0.0  # multiplicative quality re-weight (0.0=disabled, 1.0=full quality scaling)
 
     # Soft targets — keep assigner quality scores instead of hard 0/1 binarisation
     soft_targets: bool = False
@@ -74,6 +75,14 @@ class TrainingSettings(BaseModel):
     focal_gamma_o2o: float | None = None
     focal_alpha_o2o: float | None = None
     bg_fg_ratio_o2o: int | None = None
+    fg_cls_boost_o2o: float | None = None  # per-branch quality re-weighting for o2o
+    fg_cls_quality_scale_o2o: float | None = None  # per-branch multiplicative quality for o2o
+
+    # Loss weights (literature: regression should be 3-7x higher than cls)
+    lambda_l1: float = 14.0  # L1 ray distance weight
+    lambda_piou: float = 13.0  # Polar IoU weight
+    lambda_cls: float = 2.0  # classification weight
+    lambda_xy: float = 500.0  # centroid xy weight
 
     # Per-class inverse-frequency weights (sqrt-smoothed). None = no weighting.
     class_weights: list[float] | None = None
@@ -84,6 +93,14 @@ class TrainingSettings(BaseModel):
     # o2o topk2 annealing (one-to-few → strict 1:1)
     o2o_topk2_start: int = 1
     o2o_topk2_anneal_epoch: int = 0
+
+    # Sigma annealing: broad→tight assignment over training (DCFL, CVPR 2023)
+    sigma_anneal_start: float = 0.0  # initial radius_scale (0 = use assigner_radius_scale)
+    sigma_anneal_end: float = 0.0  # final radius_scale (0 = no annealing)
+    sigma_anneal_epoch: int = 0  # epoch to start annealing (0 = disabled)
+
+    # STAL: Small-Target-Aware Label Assignment (YOLO26)
+    stal_min_positives: int = 0  # minimum positive anchors per GT (0 = disabled)
 
     # 3-phase training: TAL-only → TAL+Hungarian blend → Hungarian-dominant
     # Phase 1 (0 → phase2_start): standard dual-TAL, o2m > o2o

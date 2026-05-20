@@ -74,12 +74,15 @@ training:
   aux_xy_weight: 10.0           # Huber loss weight for aux xy predictions
   aux_xy_ramp_epochs: 100       # epoch at which aux xy weight begins linear decay to zero
 
-  # Classification loss — focal loss for one2one (extreme fg/bg imbalance)
-  focal_gamma: 2.0            # Focal loss gamma (DETR-style for Hungarian matching)
-  focal_alpha: 0.75           # Focal loss alpha — (fg=0.75, bg=0.25). 0.5 caused mode collapse.
-                               # Previous best: mAP50=0.411 with alpha=0.75
+  # Classification loss — base settings for both o2m and o2o branches
+  # (o2o branch is overridden by the per-branch section below)
+  focal_gamma: 2.0            # Focal loss gamma (0=BCE, >0=focal). Both branches.
+  focal_alpha: 0.75           # fg weight (bg weight = 1-alpha = 0.25). Applies to o2m branch.
+                               # o2o uses focal_alpha_o2o=0.25 instead (standard RetinaNet setting).
+                               # 0.5 caused mode collapse. Previous best: mAP50=0.411 with alpha=0.75
   log_ray_loss: true           # Log-space L1 on rays — equalizes relative errors across scales
-  bg_fg_ratio: 3               # Max background anchors per foreground anchor in cls loss (subsampling)
+  bg_fg_ratio: 3               # Max bg anchors per fg anchor in cls loss (o2m branch)
+                               # o2o uses bg_fg_ratio_o2o=0 (no subsampling, focal handles easy bg)
 
   # Soft targets — use assigner's quality-weighted alignment scores instead of
   # hard 0/1 binarisation. TESTED: harmful in E2E dual-assigner setup. Quality
@@ -92,14 +95,16 @@ training:
   # The o2o branch assigns 1 positive per GT — soft targets teach the head to predict
   # match quality (e.g. 0.87 for strong match, 0.31 for weak), suppressing marginal
   # positives at inference time and reducing overprediction.
-  soft_targets_o2o: true
+  soft_targets_o2o: false
 
-  # Per-o2o cls loss overrides — the o2o branch is NMS-free, so it must learn
-  # to suppress ALL background anchors. These overrides make the o2o cls head
-  # a "background specialist" while keeping the o2m branch unchanged.
+  # Per-o2o cls loss overrides — overrides the base values above for the o2o branch only.
+  # The o2o branch is NMS-free, so it must learn to suppress background anchors via
+  # focal loss (gamma=2 suppresses easy negatives) instead of bg subsampling.
   focal_gamma_o2o: 2.0        # Focal loss — suppresses easy bg, keeps hard negatives
-  focal_alpha_o2o: 0.25       # Standard weighting — bg gets 3× weight of fg
-  bg_fg_ratio_o2o: 0          # All bg anchors get gradient (no subsampling)
+  focal_alpha_o2o: 0.25       # Standard RetinaNet weighting — fg=0.25, bg=0.75
+  bg_fg_ratio_o2o: 0          # No subsampling — focal handles easy bg instead
+  fg_cls_boost_o2o: null       # Additive boost disabled for o2o (use multiplicative instead)
+  fg_cls_quality_scale_o2o: 1.0  # Multiplicative: weight = quality × 1.0 (penalizes weak matches)
 
   # class_weights disabled — caused mode collapse. fg-only amplification with
   # weak bg gradient pushed model to always predict the least-penalized class.
@@ -111,6 +116,22 @@ training:
   plb_enabled: true             # Enable PLB (area-based weighting)
   bg_cls_decay: 1.0             # Bg cls gradient multiplier. 1.0=full bg gradient, 0.0=no bg gradient
   fg_cls_boost: 0.0             # Fg cls boost by alignment quality: weight = 1 + boost * quality (0.0=disabled)
+
+  # Loss weights (literature: regression 3-7x higher than cls)
+  # Current total regression = l1(14) + piou(13) = 27 vs cls=2 → regression 13.5x
+  lambda_cls: 2.0               # Classification weight
+  lambda_xy: 500.0              # Centroid xy weight (high: stride/imgsz gradient attenuation)
+  lambda_l1: 14.0               # L1 ray distance weight
+  lambda_piou: 13.0             # Polar IoU weight
+
+  # Sigma annealing: broad→tight assignment over training (DCFL, CVPR 2023)
+  # Start with wider spatial influence (more positives), tighten late (sharper localization)
+  sigma_anneal_start: 2.0       # Initial radius_scale (0 = use assigner_radius_scale)
+  sigma_anneal_end: 0.5         # Final radius_scale
+  sigma_anneal_epoch: 200       # Epoch to start annealing
+
+  # STAL: Small-Target-Aware Label Assignment (YOLO26)
+  stal_min_positives: 1         # Minimum positive anchors per GT (0 = disabled)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false

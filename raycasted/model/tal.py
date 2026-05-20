@@ -100,6 +100,7 @@ class RayCastAssigner(TaskAlignedAssigner):
         )
         self.radius_scale = radius_scale
         self.align_threshold = align_threshold
+        self.stal_min_positives = 0  # set by RayCastE2ELoss if enabled
         # Number of nearest anchors to prefilter for PolarIoU.
         # Must be > topk for proper IoU-based ranking. Default: max(topk*5, 100).
         self.prefilter_k = prefilter_k if prefilter_k > 0 else max(topk * 5, 100)
@@ -252,6 +253,19 @@ class RayCastAssigner(TaskAlignedAssigner):
         mask_topk = self.select_topk_candidates(align_metric, topk_mask=mask_gt.expand(-1, -1, self.topk).bool())
 
         mask_pos = mask_topk * mask_gt
+
+        # STAL: enforce minimum positive assignments per GT (YOLO26)
+        if self.stal_min_positives > 0:
+            pos_per_gt = mask_pos.sum(dim=-1)  # [bs, n_max_boxes]
+            valid_gt = mask_gt.any(dim=-1)  # [bs, n_max_boxes]
+            missing = (pos_per_gt < self.stal_min_positives) & valid_gt
+            if missing.any():
+                distances = torch.cdist(gt_bboxes[:, :, :2].float(), anc_points.float())
+                _, nearest_idx = distances.min(dim=-1)  # [bs, n_max_boxes]
+                for b in range(self.bs):
+                    missing_gts = missing[b].nonzero(as_tuple=True)[0]
+                    for g in missing_gts:
+                        mask_pos[b, g, nearest_idx[b, g]] = 1
 
         return mask_pos, align_metric, overlaps
 

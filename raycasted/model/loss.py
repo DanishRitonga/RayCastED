@@ -295,8 +295,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
         plb_enabled: bool = False,
         bg_cls_decay: float = 1.0,
         fg_cls_boost: float = 0.0,
+        fg_cls_quality_scale: float = 0.0,
         soft_targets: bool = False,
         class_weights: torch.Tensor | None = None,
+        lambda_cls: float = 2.0,
+        lambda_xy: float = 500.0,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -323,6 +326,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         #     weight = bg_cls_decay for bg, (1.0 + fg_cls_boost * quality) for fg
         self.bg_cls_decay = bg_cls_decay
         self.fg_cls_boost = fg_cls_boost
+        self.fg_cls_quality_scale = fg_cls_quality_scale
 
         # Soft targets — use assigner's quality-weighted alignment scores directly
         # instead of hard binarising to 0/1. Gives the classifier a graded signal
@@ -351,8 +355,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Raw ~0.088; lambda=500 gives weighted~44, effective grad_mult~7.8.
         # Rebalanced L1/piou (total=27 preserved): more weight to shape-quality loss
         # so PolarIoU drives polygon shape rather than per-ray pixel distance alone.
-        self.lambda_cls = 2.0
-        self.lambda_xy = 500.0
+        self.lambda_cls = lambda_cls
+        self.lambda_xy = lambda_xy
         self.lambda_l1 = 14.0
         self.lambda_piou = 13.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
@@ -517,10 +521,15 @@ class RayCastDetectionLoss(v8DetectionLoss):
         if self.bg_fg_ratio > 0:
             loss_cls = loss_cls.masked_fill(ignore_mask, 0.0)
 
-        if self.bg_cls_decay < 1.0 or self.fg_cls_boost > 0:
-            if self.fg_cls_boost > 0:
-                # Quality-aware fg boosting: weight = 1 + fg_cls_boost * quality
-                # Perfect match (quality=1) gets 1+fg_cls_boost, marginal gets ~1.0
+        if self.bg_cls_decay < 1.0 or self.fg_cls_boost > 0 or self.fg_cls_quality_scale > 0:
+            if self.fg_cls_quality_scale > 0:
+                # Multiplicative quality re-weighting: weight = quality × scale
+                # Penalizes weak matches (q=0.3 → 30% loss). Literature-recommended.
+                fg_weight = fg_quality * self.fg_cls_quality_scale
+                bg_weight = torch.where(cls_targets > 0, fg_weight, self.bg_cls_decay)
+            elif self.fg_cls_boost > 0:
+                # Additive quality boosting: weight = 1 + boost × quality
+                # Amplifies good matches but never reduces any fg below 1.0.
                 fg_weight = 1.0 + self.fg_cls_boost * fg_quality
                 bg_weight = torch.where(cls_targets > 0, fg_weight, self.bg_cls_decay)
             else:
@@ -678,9 +687,20 @@ class RayCastE2ELoss(E2ELoss):
         focal_gamma_o2o: float | None = None,
         focal_alpha_o2o: float | None = None,
         bg_fg_ratio_o2o: int | None = None,
+        fg_cls_boost_o2o: float | None = None,
         class_weights: torch.Tensor | None = None,
         o2o_topk2_start: int = 1,
         o2o_topk2_anneal_epoch: int = 0,
+        sigma_anneal_start: float = 0.0,
+        sigma_anneal_end: float = 0.0,
+        sigma_anneal_epoch: int = 0,
+        stal_min_positives: int = 0,
+        lambda_l1: float = 14.0,
+        lambda_piou: float = 13.0,
+        lambda_cls: float = 2.0,
+        lambda_xy: float = 500.0,
+        fg_cls_quality_scale: float = 0.0,
+        fg_cls_quality_scale_o2o: float | None = None,
         hungarian_phase2_start: int = 0,
         hungarian_phase3_start: int = 0,
         hungarian_max_weight: float = 0.9,
@@ -718,6 +738,9 @@ class RayCastE2ELoss(E2ELoss):
             fg_cls_boost=fg_cls_boost,
             soft_targets=soft_targets,
             class_weights=class_weights,
+            lambda_cls=lambda_cls,
+            lambda_xy=lambda_xy,
+            fg_cls_quality_scale=fg_cls_quality_scale,
         )
         super().__init__(model, loss_fn=loss_fn)
 
@@ -737,6 +760,10 @@ class RayCastE2ELoss(E2ELoss):
             self.one2one.focal_alpha = focal_alpha_o2o
         if bg_fg_ratio_o2o is not None:
             self.one2one.bg_fg_ratio = bg_fg_ratio_o2o
+        if fg_cls_boost_o2o is not None:
+            self.one2one.fg_cls_boost = fg_cls_boost_o2o
+        if fg_cls_quality_scale_o2o is not None:
+            self.one2one.fg_cls_quality_scale = fg_cls_quality_scale_o2o
 
         # Fix: parent E2ELoss.decay() uses self.updates (step counter) as
         # numerator and one2one.hyp.epochs as denominator.  To make the
@@ -798,6 +825,23 @@ class RayCastE2ELoss(E2ELoss):
         self._hungarian_max_weight = hungarian_max_weight
         self._hungarian_weight = 0.0  # current blending weight (0 = pure TAL, 1 = pure Hungarian)
         self._max_epochs = max_epochs
+
+        # Sigma annealing: broad→tight radius_scale (DCFL, CVPR 2023)
+        self._sigma_anneal_start = sigma_anneal_start if sigma_anneal_start > 0 else assigner_radius_scale
+        self._sigma_anneal_end = sigma_anneal_end if sigma_anneal_end > 0 else assigner_radius_scale
+        self._sigma_anneal_epoch = sigma_anneal_epoch
+
+        # STAL: minimum positive anchors per GT (0 = disabled)
+        self._stal_min_positives = stal_min_positives
+        if stal_min_positives > 0:
+            self.one2many.assigner.stal_min_positives = stal_min_positives
+            self.one2one.assigner.stal_min_positives = stal_min_positives
+
+        # Configurable loss weights (literature: regression 3-7x higher than cls)
+        self._lambda_l1 = lambda_l1
+        self._lambda_piou = lambda_piou
+        self._lambda_cls = lambda_cls
+        self._lambda_xy = lambda_xy
 
         # Create Hungarian assigner for o2o branch (initially inactive)
         self.hungarian_assigner = None
@@ -884,8 +928,8 @@ class RayCastE2ELoss(E2ELoss):
         lambda_smooth = self.smooth_start + t_smooth * (self.smooth_end - self.smooth_start)
 
         # Static lambdas — no warmup ramp (total=27 preserved)
-        lambda_l1 = 14.0
-        lambda_piou = 13.0
+        lambda_l1 = self._lambda_l1
+        lambda_piou = self._lambda_piou
 
         for branch in (self.one2many, self.one2one):
             branch.lambda_smooth = lambda_smooth
@@ -901,6 +945,19 @@ class RayCastE2ELoss(E2ELoss):
                 progress = min((current_epoch - self._o2o_topk2_anneal_epoch) / remaining, 1.0)
                 new_topk2 = max(int(round(self._o2o_topk2_start - progress * (self._o2o_topk2_start - 1))), 1)
             self.one2one.assigner.topk2 = new_topk2
+
+        # Sigma annealing: broad→tight radius_scale (DCFL, CVPR 2023)
+        if self._sigma_anneal_epoch > 0 and self._sigma_anneal_start != self._sigma_anneal_end:
+            if current_epoch < self._sigma_anneal_epoch:
+                new_radius_scale = self._sigma_anneal_start
+            else:
+                remaining = max(self._max_epochs - self._sigma_anneal_epoch, 1)
+                progress = min((current_epoch - self._sigma_anneal_epoch) / remaining, 1.0)
+                new_radius_scale = self._sigma_anneal_start + progress * (
+                    self._sigma_anneal_end - self._sigma_anneal_start
+                )
+            self.one2many.assigner.radius_scale = new_radius_scale
+            self.one2one.assigner.radius_scale = new_radius_scale
 
         # Hungarian blending: smooth ramp across 3 phases
         # Phase 1 (0→p2): hungarian_weight = 0 (pure TAL)
@@ -957,9 +1014,6 @@ class RayCastE2ELoss(E2ELoss):
 
             _o2m_step = getattr(self.one2many, '_diag_step', 0)
             if _o2m_step % 100 == 0:
-                if not getattr(self, '_hun_diag_fired', False):
-                    print(f'  ✓ Hungarian o2o branch FIRST DIAG at step={_o2m_step}, hw={hw:.3f}')
-                    self._hun_diag_fired = True
                 _hun_fg = loss_one2one_hun[2][0].sum().item() if loss_one2one_hun[2][0].sum() > 0 else 0
                 LOGGER.info(
                     '\nDIAG o2o_hun step=%d | hw=%.3f | fg=%d | raw: %s',
