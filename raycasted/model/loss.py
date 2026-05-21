@@ -602,30 +602,34 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # deserved_i = min(quality_i, uniqueness_i)
         #   quality_i = assigner's alignment score (soft targets signal)
         #   uniqueness_i = 1 - max overlap with anchors assigned to OTHER GTs
-        # When lambda_suppress=0, this is a no-op.
+        # Only applied to o2o branch — o2m has too many fg anchors for O(N²) pairwise dist.
         if self.lambda_suppress > 0 and n_fg > 1:
-            fg_conf = pred_scores[fg_mask].float().sigmoid().amax(dim=-1)
-            fg_quality_scalar = fg_quality[fg_mask].amax(dim=-1).clamp(min=0.01)
+            _branch = getattr(self, 'branch_name', '???')
+            if _branch == 'o2o':
+                fg_conf = pred_scores[fg_mask].float().sigmoid().amax(dim=-1)
+                fg_quality_scalar = fg_quality[fg_mask].amax(dim=-1).clamp(min=0.01)
 
-            fg_gt_idx = target_gt_idx[fg_mask]
-            fg_xy = pred_xy[fg_mask]
+                fg_gt_idx = target_gt_idx[fg_mask]
+                fg_xy = pred_xy[fg_mask]
 
-            pairwise_dist = torch.cdist(fg_xy.unsqueeze(0), fg_xy.unsqueeze(0)).squeeze(0)
-            same_gt = fg_gt_idx.unsqueeze(1) == fg_gt_idx.unsqueeze(0)
+                pairwise_dist = torch.cdist(fg_xy.unsqueeze(0), fg_xy.unsqueeze(0)).squeeze(0)
+                same_gt = fg_gt_idx.unsqueeze(1) == fg_gt_idx.unsqueeze(0)
 
-            cross_gt_mask = ~same_gt & (pairwise_dist < self.suppress_radius)
-            if cross_gt_mask.any():
-                proximity = 1.0 - pairwise_dist / self.suppress_radius
-                proximity = proximity.clamp(min=0.0)
-                proximity = proximity * cross_gt_mask.float()
-                max_proximity = proximity.amax(dim=-1)
-                uniqueness = 1.0 - max_proximity
+                cross_gt_mask = ~same_gt & (pairwise_dist < self.suppress_radius)
+                if cross_gt_mask.any():
+                    proximity = 1.0 - pairwise_dist / self.suppress_radius
+                    proximity = proximity.clamp(min=0.0)
+                    proximity = proximity * cross_gt_mask.float()
+                    max_proximity = proximity.amax(dim=-1)
+                    uniqueness = 1.0 - max_proximity
+                else:
+                    uniqueness = torch.ones(fg_conf.shape[0], device=self.device)
+
+                deserved = torch.min(fg_quality_scalar, uniqueness)
+                suppress_loss = (fg_conf - deserved).clamp(min=0.0).pow(2)
+                loss[5] = suppress_loss.sum() / n_fg
             else:
-                uniqueness = torch.ones(fg_conf.shape[0], device=self.device)
-
-            deserved = torch.min(fg_quality_scalar, uniqueness)
-            suppress_loss = (fg_conf - deserved).clamp(min=0.0).pow(2)
-            loss[5] = suppress_loss.sum() / n_fg
+                loss[5] = torch.zeros(1, device=self.device).squeeze()
         elif self.lambda_suppress > 0:
             loss[5] = torch.zeros(1, device=self.device).squeeze()
 
