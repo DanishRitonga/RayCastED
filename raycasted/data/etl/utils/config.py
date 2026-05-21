@@ -85,6 +85,10 @@ class TrainingSettings(BaseModel):
     lambda_cls: float = 2.0  # classification weight
     lambda_xy: float = 500.0  # centroid xy weight
 
+    # Unified suppression loss (quality ranking + spatial repulsion)
+    lambda_suppress: float = 0.0  # 0 = disabled
+    suppress_radius: float = 0.05  # normalised repulsion radius (~13px at 256px)
+
     # Per-class inverse-frequency weights (sqrt-smoothed). None = no weighting.
     class_weights: list[float] | None = None
 
