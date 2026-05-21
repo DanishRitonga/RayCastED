@@ -300,6 +300,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         class_weights: torch.Tensor | None = None,
         lambda_cls: float = 2.0,
         lambda_xy: float = 500.0,
+        lambda_suppress: float = 0.0,
+        suppress_radius: float = 0.05,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -361,6 +363,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.lambda_l1 = 14.0
         self.lambda_piou = 13.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
+        self.lambda_suppress = lambda_suppress
+        self.suppress_radius = suppress_radius
         self.bg_fg_ratio = bg_fg_ratio
 
     def preprocess(self, targets, batch_size, scale_tensor=None):
@@ -415,7 +419,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         Returns:
             (assignment_info, loss_5vec, loss_detach)
         """
-        loss = torch.zeros(5, device=self.device)  # [xy, cls, L1, piou, smooth]
+        loss = torch.zeros(6, device=self.device)  # [xy, cls, L1, piou, smooth, suppress]
 
         # --- Prediction parsing ---
         pred_distri = preds['boxes'].permute(0, 2, 1).contiguous()  # [B, N, raycast_dim]
@@ -591,6 +595,39 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[2] += (pred_rays * 0).sum()
             loss[3] += (pred_rays * 0).sum()
             loss[4] += (pred_rays * 0).sum()
+            loss[5] += (pred_xy * 0).sum()
+
+        # --- L_suppress: Unified suppression loss (quality ranking + spatial repulsion) ---
+        # Penalises fg anchors that predict higher confidence than they "deserve".
+        # deserved_i = min(quality_i, uniqueness_i)
+        #   quality_i = assigner's alignment score (soft targets signal)
+        #   uniqueness_i = 1 - max overlap with anchors assigned to OTHER GTs
+        # When lambda_suppress=0, this is a no-op.
+        if self.lambda_suppress > 0 and n_fg > 1:
+            fg_conf = pred_scores[fg_mask].float().sigmoid().amax(dim=-1)
+            fg_quality_scalar = fg_quality[fg_mask].amax(dim=-1).clamp(min=0.01)
+
+            fg_gt_idx = target_gt_idx[fg_mask]
+            fg_xy = pred_xy[fg_mask]
+
+            pairwise_dist = torch.cdist(fg_xy.unsqueeze(0), fg_xy.unsqueeze(0)).squeeze(0)
+            same_gt = fg_gt_idx.unsqueeze(1) == fg_gt_idx.unsqueeze(0)
+
+            cross_gt_mask = ~same_gt & (pairwise_dist < self.suppress_radius)
+            if cross_gt_mask.any():
+                proximity = 1.0 - pairwise_dist / self.suppress_radius
+                proximity = proximity.clamp(min=0.0)
+                proximity = proximity * cross_gt_mask.float()
+                max_proximity = proximity.amax(dim=-1)
+                uniqueness = 1.0 - max_proximity
+            else:
+                uniqueness = torch.ones(fg_conf.shape[0], device=self.device)
+
+            deserved = torch.min(fg_quality_scalar, uniqueness)
+            suppress_loss = (fg_conf - deserved).clamp(min=0.0).pow(2)
+            loss[5] = suppress_loss.sum() / n_fg
+        elif self.lambda_suppress > 0:
+            loss[5] = torch.zeros(1, device=self.device).squeeze()
 
         # --- Diagnostic: log raw (unweighted) losses + fg count every 100 steps ---
         _branch = getattr(self, 'branch_name', '???')
@@ -625,18 +662,16 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # --- Apply loss weights ---
         # If GradNorm is active, use its dynamic weights; otherwise use static lambdas.
         if self.gradnorm_manager is not None and self.gradnorm_manager.enabled:
-            w = self.gradnorm_manager.get_weights()  # [5]
-            loss[0] *= w[0]
-            loss[1] *= w[1]
-            loss[2] *= w[2]
-            loss[3] *= w[3]
-            loss[4] *= w[4]
+            w = self.gradnorm_manager.get_weights()  # [5] or [6]
+            for i in range(min(len(w), 6)):
+                loss[i] *= w[i]
         else:
             loss[0] *= self.lambda_xy
             loss[1] *= self.lambda_cls
             loss[2] *= self.lambda_l1
             loss[3] *= self.lambda_piou
             loss[4] *= self.lambda_smooth
+            loss[5] *= self.lambda_suppress
 
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
@@ -709,6 +744,8 @@ class RayCastE2ELoss(E2ELoss):
         lambda_xy: float = 500.0,
         fg_cls_quality_scale: float = 0.0,
         fg_cls_quality_scale_o2o: float | None = None,
+        lambda_suppress: float = 0.0,
+        suppress_radius: float = 0.05,
         hungarian_phase2_start: int = 0,
         hungarian_phase3_start: int | None = None,
         hungarian_max_weight: float = 0.9,
@@ -751,6 +788,8 @@ class RayCastE2ELoss(E2ELoss):
             lambda_cls=lambda_cls,
             lambda_xy=lambda_xy,
             fg_cls_quality_scale=fg_cls_quality_scale,
+            lambda_suppress=lambda_suppress,
+            suppress_radius=suppress_radius,
         )
         super().__init__(model, loss_fn=loss_fn)
 

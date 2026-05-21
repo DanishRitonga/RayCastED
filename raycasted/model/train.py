@@ -226,6 +226,8 @@ class _RayCastCriterionWrapper:
             lambda_xy=tcfg.get('lambda_xy', 500.0),
             fg_cls_quality_scale=tcfg.get('fg_cls_quality_scale', 0.0),
             fg_cls_quality_scale_o2o=tcfg.get('fg_cls_quality_scale_o2o', None),
+            lambda_suppress=tcfg.get('lambda_suppress', 0.0),
+            suppress_radius=tcfg.get('suppress_radius', 0.05),
             hungarian_phase2_start=tcfg.get('hungarian_phase2_start', 0),
             hungarian_phase3_start=tcfg.get('hungarian_phase3_start', None),
             hungarian_max_weight=tcfg.get('hungarian_max_weight', 0.9),
@@ -504,7 +506,7 @@ class RayCastTrainer(DetectionTrainer):
 
     def get_validator(self):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
-        self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'piou_loss', 'smooth_loss', 'aux_xy_loss')
+        self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'piou_loss', 'smooth_loss', 'suppress_loss', 'aux_xy_loss')
         args_copy = copy.copy(self.args)
         if self.training_config and 'inference_conf' in self.training_config:
             args_copy.conf = self.training_config['inference_conf']

@@ -148,15 +148,21 @@ Eval (no NMS, conf=0.20): AJI=0.3442, AP@0.5=0.0440, bPQ=0.3602, mPQ=0.0786, F1=
 
 ### Train21 Results (current_epoch fix + Hungarian blending, 400 epochs)
 Val: mAP50=0.448, mAP50-95=0.322, prec=0.46, recall=0.467
-Eval (no NMS, conf=0.50): 493,583 preds vs 65,848 GT (7.5x)
+Eval (no NMS, conf=0.50): AJI=0.4068, AP@0.5=0.0565, bPQ=0.4762, mPQ=0.1065, F1=0.2163, Prec=0.123, Recall=0.919, 493,583 preds vs 65,848 GT (7.5x)
 DIAG: o2o cls fg=0.071, bg=0.031 (barely differentiated). Hungarian weight=0.896 at epoch 400.
 **Diagnosis: mAP improved (0.448 vs train13's 0.411) but overprediction persists. Root cause: o2o cls head gets only 28 fg anchors/image (topk2=1) and 825 bg (bg_fg_ratio=3) — 98.7% of anchors get zero cls gradient. Fix must be in training signal, not post-processing.**
 
+### Train22 Results (o2o cls signal boost, best epoch 129, early stopped at 229)
+Val: mAP50=0.339, mAP50-95=0.262, prec=0.341, recall=0.439
+Eval (no NMS, conf=0.50): AJI=0.422, AP@0.5=0.123, bPQ=0.338, mPQ=0.291, F1=0.444, Prec=0.397, Recall=0.504, **83,674 preds vs 65,848 GT (1.27x)**
+Config: `o2o_topk2_anneal_epoch=250`, `bg_fg_ratio_o2o=0`, `soft_targets_o2o=true`, `hungarian_phase2_start=9999`
+**Diagnosis: Overprediction solved (7.5x→1.27x!) but recall halved (0.92→0.50) and bPQ dropped (0.476→0.338). All three fixes combined too aggressively — cls gradient overwhelmed regression. F1 doubled, AP@0.5 doubled, mPQ nearly tripled. Need to find the right balance.**
+
 ### Pending Experiments
-- Keep topk2=3 permanently (never anneal to 1) — triples o2o fg from 28→84
-- Disable bg subsampling for o2o (bg_fg_ratio_o2o: 0) — all anchors in cls loss, focal handles imbalance
-- Enable soft targets for o2o (soft_targets_o2o: true) — quality-calibrated cls targets
-- Higher inference conf (0.5) — tested, still 493k preds. Training fix needed.
+- Isolate fixes one at a time: try only bg_fg_ratio_o2o=0 (no soft targets)
+- Or try bg_fg_ratio_o2o=10 instead of 0 (partial relaxation)
+- Keep all three but increase regression lambdas to balance
+- Suppress loss (lambda_suppress) available — test on stable config
 - Reduce max_det from 300 to 50-100
 
 ## Testing
