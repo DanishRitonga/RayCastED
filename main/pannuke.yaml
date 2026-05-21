@@ -56,12 +56,12 @@ training:
   assigner_beta: 6.0          # Polar-IoU exponent — high β creates geometric dominance for dense cells
   align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
   o2o_topk2_start: 3           # o2o branch initial positives per GT (annealed to 1)
-  o2o_topk2_anneal_epoch: 250  # start annealing topk2 3→1 at epoch 250 (gives cls head time to learn with 3x positives)
+  o2o_topk2_anneal_epoch: 120  # epoch to start annealing topk2 from o2o_topk2_start→1
 
   # 2-phase Hungarian curriculum: TAL-only → Hungarian ramp
   # Phase 1 (0→100): standard dual-TAL, o2m > o2o
   # Phase 2 (100+): Hungarian o2o ramps 0→0.9 over remaining training
-  hungarian_phase2_start: 9999       # disabled — Hungarian 1:1 recreates sparsity problem
+  hungarian_phase2_start: -1         # -1 = auto (start when o2o>o2m, ~57% of max_epochs)
   hungarian_max_weight: 0.9
   hungarian_ramp_epochs: 0        # 0 = auto (ramp over remaining epochs)
   phase2_freeze_epochs: 0         # backbone freeze at phase2 start (0=disabled)
@@ -93,8 +93,9 @@ training:
   # Per-o2o soft targets: use alignment quality as cls target for the o2o branch only.
   # Teaches the head to predict match quality (e.g. 0.87 for strong match, 0.31 for weak),
   # suppressing marginal positives at inference time and reducing overprediction.
-  # Previous "harmful" test was invalid — o2o branch was using wrong assigner (gotcha #20).
-  soft_targets_o2o: true
+  # Train22: combined with bg_fg_ratio_o2o=0, too aggressive — recall dropped 0.92→0.50.
+  # Re-test in isolation after train23 isolates bg_fg_ratio effect.
+  soft_targets_o2o: false
 
   # Per-o2o cls loss overrides — the o2o branch must be a "background specialist"
   # for NMS-free inference. These override the base values above for o2o only.
