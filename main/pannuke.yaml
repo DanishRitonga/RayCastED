@@ -56,12 +56,12 @@ training:
   assigner_beta: 6.0          # Polar-IoU exponent — high β creates geometric dominance for dense cells
   align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
   o2o_topk2_start: 3           # o2o branch initial positives per GT (annealed to 1)
-  o2o_topk2_anneal_epoch: 120  # epoch to start annealing topk2 from o2o_topk2_start→1
+  o2o_topk2_anneal_epoch: 250  # start annealing topk2 3→1 at epoch 250 (gives cls head time to learn with 3x positives)
 
   # 2-phase Hungarian curriculum: TAL-only → Hungarian ramp
   # Phase 1 (0→100): standard dual-TAL, o2m > o2o
   # Phase 2 (100+): Hungarian o2o ramps 0→0.9 over remaining training
-  hungarian_phase2_start: -1        # -1 = auto (start when o2o>o2m, ~57% of max_epochs)
+  hungarian_phase2_start: 9999       # disabled — Hungarian 1:1 recreates sparsity problem
   hungarian_max_weight: 0.9
   hungarian_ramp_epochs: 0        # 0 = auto (ramp over remaining epochs)
   phase2_freeze_epochs: 0         # backbone freeze at phase2 start (0=disabled)
@@ -82,7 +82,7 @@ training:
                                # 0.5 caused mode collapse. Previous best: mAP50=0.411 with alpha=0.75
   log_ray_loss: true           # Log-space L1 on rays — equalizes relative errors across scales
   bg_fg_ratio: 3               # Max bg anchors per fg anchor in cls loss (o2m branch)
-                               # o2o uses bg_fg_ratio_o2o=0 (no subsampling, focal handles easy bg)
+                                # o2o uses bg_fg_ratio_o2o=0 (no subsampling, focal handles imbalance)
 
   # Soft targets — use assigner's quality-weighted alignment scores instead of
   # hard 0/1 binarisation. TESTED: harmful in E2E dual-assigner setup. Quality
@@ -91,17 +91,16 @@ training:
   soft_targets: false
 
   # Per-o2o soft targets: use alignment quality as cls target for the o2o branch only.
-  # Unlike soft_targets (applies to both branches), this only affects the o2o cls head.
-  # The o2o branch assigns 1 positive per GT — soft targets teach the head to predict
-  # match quality (e.g. 0.87 for strong match, 0.31 for weak), suppressing marginal
-  # positives at inference time and reducing overprediction.
-  soft_targets_o2o: false
+  # Teaches the head to predict match quality (e.g. 0.87 for strong match, 0.31 for weak),
+  # suppressing marginal positives at inference time and reducing overprediction.
+  # Previous "harmful" test was invalid — o2o branch was using wrong assigner (gotcha #20).
+  soft_targets_o2o: true
 
   # Per-o2o cls loss overrides — the o2o branch must be a "background specialist"
   # for NMS-free inference. These override the base values above for o2o only.
   focal_gamma_o2o: 2.0        # Focal loss — suppresses easy bg, keeps hard negatives
   focal_alpha_o2o: 0.75       # Fg weight — match o2m (train13 proved 0.75 works)
-  bg_fg_ratio_o2o: 3          # Subsample bg — matches train13 (mAP50=0.411)
+  bg_fg_ratio_o2o: 0          # No bg subsampling — focal loss handles imbalance, 98.7% exclusion was starving cls head
   bg_cls_decay_o2o: 1.0       # Full bg weight — don't starve bg suppression (0.5 over-corrected)
   fg_cls_boost_o2o: null       # Additive boost disabled for o2o
   fg_cls_quality_scale_o2o: null  # Multiplicative disabled — was starving fg (TAL quality 0.2-0.5)

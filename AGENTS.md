@@ -1,5 +1,15 @@
 # AGENTS.md - RayCastED Instructions
 
+## PRIME DIRECTIVE: NO POST-PROCESSING
+
+**The entire point of this project is NMS-free, post-processing-free inference.** The model must produce the correct set of predictions directly from the o2o head — no NMS, no deduplication, no clustering, no confidence thresholding tricks, no post-hoc filtering. If the model overpredicts, the fix must be in **training** (loss, assignment, cls signal quality), never in post-processing.
+
+This means:
+- topk2=1 at inference is NOT a post-processing step — it's the training assignment ensuring 1:1 matching
+- `postprocess()` in head.py only does top-k selection by confidence (inherent to E2E design), NOT deduplication
+- DO NOT add NMS, DO NOT add anchor clustering, DO NOT add spatial deduplication
+- Overprediction must be solved by making the o2o cls head confident enough to suppress false positives
+
 ## Core Commands
 
 ```bash
@@ -69,7 +79,7 @@ When adding a new config parameter:
 
 4. **Shared cv3 fix (verified)**: O2O branch has separate `one2one_cv3` cls head via `copy.deepcopy`. `fuse()` sets `cv2=cv3=None`, keeping only o2o heads. Shared head caused 11.5x overprediction.
 
-5. **Separate head alone doesn't fix overprediction**: Even with separate o2o cls head, model still produces 11.3x overprediction (746k preds vs 66k GT). The o2o head needs more positive signal during training — topk2 annealing (3→1) addresses this.
+5. **Separate head alone doesn't fix overprediction**: Even with separate o2o cls head, model still produces 11.3x overprediction (746k preds vs 66k GT). The o2o cls head gets too few positives (topk2=1 → 28 fg/image vs o2m's 420) to learn good fg/bg discrimination. Overprediction must be fixed via training signal, NOT post-processing.
 
 6. **Hard binarization destroys quality signal**: `loss.py:480` sets `cls_targets[cls_targets > 0] = 1.0` (on a cloned tensor, so no autograd issue). All positives get same target regardless of match quality. Soft targets for o2o may help.
 
@@ -136,11 +146,17 @@ Eval (no NMS, conf=0.20): AJI=0.3442, AP@0.5=0.0440, bPQ=0.3602, mPQ=0.0786, F1=
 
 **Conclusion: decay=1.0 > decay=0.5.** Higher o2m decay means o2o branch dominates sooner, better for separate o2o cls head training.
 
+### Train21 Results (current_epoch fix + Hungarian blending, 400 epochs)
+Val: mAP50=0.448, mAP50-95=0.322, prec=0.46, recall=0.467
+Eval (no NMS, conf=0.50): 493,583 preds vs 65,848 GT (7.5x)
+DIAG: o2o cls fg=0.071, bg=0.031 (barely differentiated). Hungarian weight=0.896 at epoch 400.
+**Diagnosis: mAP improved (0.448 vs train13's 0.411) but overprediction persists. Root cause: o2o cls head gets only 28 fg anchors/image (topk2=1) and 825 bg (bg_fg_ratio=3) — 98.7% of anchors get zero cls gradient. Fix must be in training signal, not post-processing.**
+
 ### Pending Experiments
-- Topk2 annealing (3→1 at epoch 120) — was never triggered due to current_epoch bug, now fixed
-- 2-phase Hungarian blending (code implemented, needs training run)
-- Soft cls targets for o2o only
-- Higher inference conf (0.5) — tested, still 609k preds at conf=0.5. Training fix needed.
+- Keep topk2=3 permanently (never anneal to 1) — triples o2o fg from 28→84
+- Disable bg subsampling for o2o (bg_fg_ratio_o2o: 0) — all anchors in cls loss, focal handles imbalance
+- Enable soft targets for o2o (soft_targets_o2o: true) — quality-calibrated cls targets
+- Higher inference conf (0.5) — tested, still 493k preds. Training fix needed.
 - Reduce max_det from 300 to 50-100
 
 ## Testing
