@@ -94,8 +94,8 @@ training:
   # Teaches the head to predict match quality (e.g. 0.87 for strong match, 0.31 for weak),
   # suppressing marginal positives at inference time and reducing overprediction.
   # Train22: combined with bg_fg_ratio_o2o=0, too aggressive — recall dropped 0.92→0.50.
-  # Re-test in isolation after train23 isolates bg_fg_ratio effect.
-  soft_targets_o2o: false
+  # Train25: testing on train23's stable base (bg_fg_ratio_o2o=0 already set).
+  soft_targets_o2o: true
 
   # Per-o2o cls loss overrides — the o2o branch must be a "background specialist"
   # for NMS-free inference. These override the base values above for o2o only.
@@ -130,7 +130,7 @@ training:
   # than they "deserve". deserved = min(quality, uniqueness).
   # quality = assigner alignment score; uniqueness = 1 - spatial proximity to other-GT anchors.
   # Teaches cls head to suppress duplicate predictions and rank same-GT anchors.
-  lambda_suppress: 2.0           # Unified suppression loss (quality + spatial repulsion)
+  lambda_suppress: 0.0           # Disabled — train24 showed it hurts (spatial repulsion too aggressive for dense nuclei)
   suppress_radius: 0.05          # Normalised repulsion radius (~13px at 256px)
 
   # Sigma annealing: DISABLED — train13 didn't use this, re-evaluate later
