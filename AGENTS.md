@@ -158,9 +158,16 @@ Eval (no NMS, conf=0.50): AJI=0.422, AP@0.5=0.123, bPQ=0.338, mPQ=0.291, F1=0.44
 Config: `o2o_topk2_anneal_epoch=250`, `bg_fg_ratio_o2o=0`, `soft_targets_o2o=true`, `hungarian_phase2_start=9999`
 **Diagnosis: Overprediction solved (7.5x→1.27x!) but recall halved (0.92→0.50) and bPQ dropped (0.476→0.338). All three fixes combined too aggressively — cls gradient overwhelmed regression. F1 doubled, AP@0.5 doubled, mPQ nearly tripled. Need to find the right balance.**
 
+### Train23 Results (bg_fg_ratio_o2o=0 only, 400 epochs)
+Val: mAP50=0.517, mAP50-95=0.378, prec=0.550, recall=0.508
+Eval (no NMS, conf=0.50): AJI=0.514, AP@0.5=0.347, bPQ=0.491, mPQ=0.403, F1=0.640, Prec=0.660, Recall=0.621, **62,048 preds vs 65,848 GT (0.94x)**
+DIAG: o2o cls fg=0.275, bg=0.112 (2.5x gap). Hungarian weight=0.896 at epoch 400.
+**Diagnosis: bg_fg_ratio_o2o=0 alone solved overprediction (7.5x→0.94x) while improving every metric except recall. AP@0.5 sextupled, F1 tripled, mPQ quadrupled. Best run so far.**
+
 ### Pending Experiments
-- Isolate fixes one at a time: try only bg_fg_ratio_o2o=0 (no soft targets)
-- Or try bg_fg_ratio_o2o=10 instead of 0 (partial relaxation)
+- Suppress loss (lambda_suppress) on train23's stable config — may improve precision further
+- Lower conf threshold (0.3) to recover recall — model slightly underpredicts at 0.5
+- Reduce max_det from 300 to 50-100
 - Keep all three but increase regression lambdas to balance
 - Suppress loss (lambda_suppress) available — test on stable config
 - Reduce max_det from 300 to 50-100

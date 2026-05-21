@@ -130,7 +130,7 @@ training:
   # than they "deserve". deserved = min(quality, uniqueness).
   # quality = assigner alignment score; uniqueness = 1 - spatial proximity to other-GT anchors.
   # Teaches cls head to suppress duplicate predictions and rank same-GT anchors.
-  lambda_suppress: 0.0           # 0 = disabled (try 2.0 after train22)
+  lambda_suppress: 2.0           # Unified suppression loss (quality + spatial repulsion)
   suppress_radius: 0.05          # Normalised repulsion radius (~13px at 256px)
 
   # Sigma annealing: DISABLED — train13 didn't use this, re-evaluate later
