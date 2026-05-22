@@ -541,10 +541,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 bg_weight = torch.where(cls_targets > 0, 1.0, self.bg_cls_decay)
             loss_cls = loss_cls * bg_weight
 
-        target_scores_sum = max(cls_targets.sum(), 1)
+        target_scores_sum = max(fg_mask.sum(), 1) if self.soft_targets else max(cls_targets.sum(), 1)
         loss[1] = loss_cls.sum() / target_scores_sum
 
-        # Track fg/bg cls contributions for diagnostics (normalized same as loss[1])
         _cls_fg_sum = (loss_cls * cls_targets).sum().item() / max(target_scores_sum, 1)
         _cls_bg_sum = (loss_cls * (1 - cls_targets)).sum().item() / max(target_scores_sum, 1)
 
