@@ -125,11 +125,13 @@ When adding a new config parameter:
 
 24. **Empty-batch collate fixed**: `raycast_dataset.py` hardcoded `4+32` for fallback tensor shape, which crashes with n_rays=64. Now uses `N_RAYS` constant.
 
+25. **Soft targets normalization fixed**: `loss.py:544` — with `soft_targets=True`, `cls_targets.sum()` sums quality values (~14 for 28 fg) instead of count (28), inflating cls loss ~7x. Now uses `fg_mask.sum()` as denominator when soft_targets is enabled.
+
 ### Eval Script
 
-22. **`main/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
+26. **`main/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
 
-23. **Eval must call `configure_rays(n_rays)` before rasterization**: `_polygons_to_masks_fast` uses `_const.RAY_COS`/`_const.RAY_SIN` (late-binding module attributes).
+27. **Eval must call `configure_rays(n_rays)` before rasterization**: `_polygons_to_masks_fast` uses `_const.RAY_COS`/`_const.RAY_SIN` (late-binding module attributes).
 
 ## Experiment Log
 
@@ -164,13 +166,20 @@ Eval (no NMS, conf=0.50): AJI=0.514, AP@0.5=0.347, bPQ=0.491, mPQ=0.403, F1=0.64
 DIAG: o2o cls fg=0.275, bg=0.112 (2.5x gap). Hungarian weight=0.896 at epoch 400.
 **Diagnosis: bg_fg_ratio_o2o=0 alone solved overprediction (7.5x→0.94x) while improving every metric except recall. AP@0.5 sextupled, F1 tripled, mPQ quadrupled. Best run so far.**
 
+### Train24 Results (train23 + lambda_suppress=2.0, early stopped ~252)
+Val: mAP50=0.449 (regressed from train23's 0.517)
+**Diagnosis: Suppress loss spatial repulsion too aggressive for dense PanNuke nuclei — incorrectly suppresses valid adjacent predictions. Killed.**
+
+### Train25 Results (train23 + soft_targets_o2o=true, early stopped at 327, best epoch 227)
+Val: mAP50=0.423, mAP50-95=0.321, prec=0.433, recall=0.484
+Eval (conf=0.49): AJI=0.478, AP@0.5=0.205, bPQ=0.415, mPQ=0.357, F1=0.544, Prec=0.536, Recall=0.551, 67,646 preds (1.03x)
+**Diagnosis: INCONCLUSIVE — trained with broken normalization. Soft targets used `cls_targets.sum()` (quality values ~14) as denominator instead of fg count (28), inflating o2o cls loss ~7x (2852 vs expected ~400). Fix applied: `loss.py:544` uses `fg_mask.sum()` for soft targets. Needs re-run (train26).**
+
 ### Pending Experiments
-- Suppress loss (lambda_suppress) on train23's stable config — may improve precision further
+- Train26: soft_targets_o2o=true with normalization fix (fair test)
 - Lower conf threshold (0.3) to recover recall — model slightly underpredicts at 0.5
-- Reduce max_det from 300 to 50-100
-- Keep all three but increase regression lambdas to balance
-- Suppress loss (lambda_suppress) available — test on stable config
-- Reduce max_det from 300 to 50-100
+- Reduce max_det from 300 to 100
+- Gentle suppress loss: lambda_suppress=0.5, suppress_radius=0.02 on train23 base
 
 ## Testing
 

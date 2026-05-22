@@ -442,7 +442,9 @@ class HungarianRayCastAssigner(RayCastAssigner):
                 fg_mask[b, anc_i] = True
                 target_gt_idx[b, anc_i] = gt_i
 
-                # Quality score from cost: 1/(1+cost) ∈ (0, 1]
-                target_scores[b, anc_i, gt_labels[b, gt_i, 0].long()] = 1.0 / (1.0 + cost_np[gi, ci])
+                # Quality score from cost: sigmoid(-cost) ∈ (0, 1)
+                # Using sigmoid instead of 1/(1+cost) because cost can be negative
+                # (pos_cost - neg_cost), which makes 1/(1+cost) produce values outside [0,1].
+                target_scores[b, anc_i, gt_labels[b, gt_i, 0].long()] = torch.sigmoid(-cost_matrix[b, gt_i, anc_i])
 
         return target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx
