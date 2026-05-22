@@ -91,11 +91,10 @@ training:
   soft_targets: false
 
   # Per-o2o soft targets: use alignment quality as cls target for the o2o branch only.
-  # Teaches the head to predict match quality (e.g. 0.87 for strong match, 0.31 for weak),
-  # suppressing marginal positives at inference time and reducing overprediction.
-  # Train22: combined with bg_fg_ratio_o2o=0, too aggressive — recall dropped 0.92→0.50.
-  # Train25: testing on train23's stable base (bg_fg_ratio_o2o=0 already set).
-  soft_targets_o2o: true
+  # Train25: broken normalization (cls_targets.sum() vs fg_mask.sum()). Train26: fixed norm
+  # but soft targets still counterproductive — shift confidence distribution down without
+  # improving discriminability. Killed. Hard 0/1 targets with bg_fg_ratio_o2o=0 remain best.
+  soft_targets_o2o: false
 
   # Per-o2o cls loss overrides — the o2o branch must be a "background specialist"
   # for NMS-free inference. These override the base values above for o2o only.

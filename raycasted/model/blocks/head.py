@@ -251,7 +251,7 @@ class RayCastDetect(Detect):
 
         poly = x['boxes']  # [B, raycast_dim, N_anchors]
         xy_offset = poly[:, :2, :].sigmoid()  # bounded [0, 1]
-        rays = F.softplus(poly[:, 2:, :])  # strictly positive
+        rays = F.softplus(poly[:, 2:, :])  # strictly positive, [B, n_rays, N]
 
         # Decode xy from grid-relative to absolute pixel coords
         xy_abs = (xy_offset * 2.0 - 0.5 + self.anchors) * self.strides
@@ -264,6 +264,17 @@ class RayCastDetect(Detect):
 
         dbox = torch.cat([xy_abs, rays_abs], dim=1)
         scores = x['scores'].sigmoid()
+
+        # IoU-aware scoring: multiply cls scores by shape regularity.
+        # Well-formed cells have consistent ray lengths (low coeff of variation).
+        # False positives often have erratic ray patterns (high CV).
+        # quality = 1 - CV(rays) = 1 - std(rays)/mean(rays), clamped to [0, 1]
+        rays_mean = rays_abs.mean(dim=1, keepdim=True)  # [B, 1, N]
+        rays_std = rays_abs.std(dim=1, keepdim=True)    # [B, 1, N]
+        cv = rays_std / (rays_mean + 1e-6)
+        quality = (1.0 - cv).clamp(min=0.0, max=1.0)
+        scores = scores * quality
+
         return torch.cat((dbox, scores), 1)
 
     def postprocess(self, preds: torch.Tensor) -> torch.Tensor:
