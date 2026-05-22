@@ -264,6 +264,48 @@ def _focal_loss(
     return loss
 
 
+def _quality_focal_loss(
+    pred_scores: torch.Tensor,
+    target_scores: torch.Tensor,
+    beta: float = 2.0,
+    class_weights: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Quality Focal Loss (QFL) from Generalized Focal Loss (Li et al., NeurIPS 2020).
+
+    QFL(σ) = -|y - σ|^β * [(1-y)*log(1-σ) + y*log(σ)]
+
+    Key differences from standard focal loss with naive soft target interpolation:
+    - CE part is full BCE with continuous target (NOT log(p_t) where p_t interpolates)
+    - Focusing factor is |y - σ|^β (NOT (1-p_t)^γ)
+    - No alpha weighting (paper drops it — quality label itself modulates the loss)
+    - Global minimum at σ = y (correctly predicts the quality score)
+
+    When y=0.5 and σ=0.5: standard FL gives MAXIMUM loss, QFL gives ZERO loss.
+
+    Args:
+        pred_scores: [B, N, C] raw logits from the detection head.
+        target_scores: [B, N, C] quality labels ∈ [0, 1].
+            y=0 → negative (bg), 0<y≤1 → positive with quality y.
+        beta: Focusing parameter (β=2 works best per GFL paper).
+        class_weights: [C] per-class weight applied to positive samples.
+
+    Returns:
+        [B, N, C] element-wise quality focal loss (no reduction).
+    """
+    pred_prob = pred_scores.float().sigmoid()
+    y = target_scores.float()
+
+    bce = F.binary_cross_entropy_with_logits(pred_scores.float(), y, reduction='none')
+    modulating_factor = (y - pred_prob).abs().pow(beta)
+    loss = modulating_factor * bce
+
+    if class_weights is not None:
+        pos_mask = (y > 0).float()
+        loss = loss * (1.0 + pos_mask * (class_weights.unsqueeze(0).unsqueeze(0) - 1.0))
+
+    return loss
+
+
 class RayCastDetectionLoss(v8DetectionLoss):
     """Polygon detection loss with 5 terms.
 
@@ -509,7 +551,14 @@ class RayCastDetectionLoss(v8DetectionLoss):
             self.class_weights = cw.to(pred_scores.device)
             cw = self.class_weights
 
-        if self.focal_gamma > 0:
+        if self.soft_targets and self.focal_gamma > 0:
+            loss_cls = _quality_focal_loss(
+                pred_scores.float(),
+                cls_targets,
+                beta=self.focal_gamma,
+                class_weights=cw,
+            )
+        elif self.focal_gamma > 0:
             loss_cls = _focal_loss(
                 pred_scores.float(),
                 cls_targets,
