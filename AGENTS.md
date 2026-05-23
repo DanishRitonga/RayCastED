@@ -133,6 +133,10 @@ When adding a new config parameter:
 
 30. **max_det reduced to 100**: `RayCastDetect.max_det = 100` (was 300). PanNuke has ~28 cells/image, rare images 50+. 300 was excessive and could include low-confidence false positives.
 
+31. **DINO denoising is dead end for FCN (train28/29)**: In DETR, denoising works via decoder cross-attention that routes queries to specific spatial locations. In FCN, every anchor sees the same feature map — corrupted copies just add confused cls gradient, not contrastive learning. Both train28 (hard targets) and train29 (QFL soft targets) failed: mAP50=0.370 and 0.372 vs train23's 0.517. Denoising config (`dn_num`, etc.) still exists in code but should stay at 0.
+
+32. **Quality head for IoU-aware inference**: 1-channel conv predicting piou per anchor (o2o branch only). At inference: `final_conf = cls × sigmoid(quality)`. Suppresses poorly-localized predictions without any post-processing. Trained with L1 against actual fg_piou. Config: `quality_head_weight` (0=disabled, 1.0=recommended). Head is `one2one_quality_head = copy.deepcopy(quality_head)` — same pattern as separate o2o cls/reg heads.
+
 ### Eval Script
 
 26. **`main/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
@@ -187,10 +191,25 @@ Eval conf=0.49: AJI=0.360, AP@0.5=0.266, bPQ=0.178, F1=0.549, Prec=0.904, Recall
 Eval conf=0.35: AJI=0.515, AP@0.5=0.328, bPQ=0.488, F1=0.619, Prec=0.630, Recall=0.608, 63,639 preds (0.97x)
 **Diagnosis: Standard FL + soft targets still counterproductive even with fixed normalization. Conf distribution shifts down; at conf=0.35 barely matches train23 at conf=0.49. Confirms QFL is needed.**
 
+### Train27 Results (QFL + max_det=100, soft_targets_o2o=true, 400 epochs)
+Val: mAP50=0.514, mAP50-95=0.390, prec=0.543, recall=0.493
+Eval conf=0.25: AJI=0.537, AP@0.5=0.317, bPQ=0.548, F1=0.604, Prec=0.551, Recall=0.668, 79,852 preds (1.21x)
+Eval conf=0.49: AJI=0.240, bPQ=0.062, F1=0.389, Recall=0.243, 16,543 preds (0.25x)
+DIAG o2o: fg/bg gap 3.9x (train23 was 2.5x) — better discrimination in training
+**Diagnosis: QFL shifts conf distribution down less than FL, but same fundamental problem — soft targets spread fg scores across 0.3-1.0 instead of clustering at ~1.0. No clean decision boundary.**
+
+### Train28 Results (DINO denoising + hard targets + max_det=100, early stopped at 296)
+Val: mAP50=0.370, mAP50-95=0.287, prec=0.435, recall=0.414. Best epoch 225.
+DIAG o2o: fg jumped from ~290 to ~1950 per batch. cls loss nearly doubled.
+**Diagnosis: Denoising floods o2o with fg anchors, but hard 0/1 targets give no quality gradient.**
+
+### Train29 Results (DINO denoising + QFL + max_det=100, early stopped at 296)
+Val: mAP50=0.372, mAP50-95=0.288, prec=0.448, recall=0.401. Best epoch 196.
+**Diagnosis: Denoising + QFL together still failed. mAP barely above train28 (0.370). The extra fg from denoising doesn't create useful contrastive signal even with QFL. Denoising is a dead end for FCN.**
+
 ### Pending Experiments
-- Train27: QFL (Quality Focal Loss) for o2o soft targets + max_det=100
-- Train28: QFL + DINO denoising (dn_num=2, dn_centroid_noise=0.05, dn_ray_noise=0.1)
-- Trained quality head for IoU-aware inference scoring (cls × predicted_piou)
+- Train30: Quality head (quality_head_weight=1.0) on top of train23 config
+- Lightweight self-attention on o2o features (hybrid FCN+attention for duplicate suppression)
 
 ## Testing
 

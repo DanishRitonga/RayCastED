@@ -94,7 +94,7 @@ training:
   # Train25: broken normalization (cls_targets.sum() vs fg_mask.sum()). Train26: fixed norm
   # but standard FL formula is wrong for continuous targets — gives MAXIMUM loss when σ=y.
   # Train27: uses QFL (Quality Focal Loss, GFL NeurIPS 2020) — correct formula |y-σ|^β.
-  soft_targets_o2o: true
+  soft_targets_o2o: false
 
   # Per-o2o cls loss overrides — the o2o branch must be a "background specialist"
   # for NMS-free inference. These override the base values above for o2o only.
@@ -109,9 +109,14 @@ training:
   # Injects corrupted GT copies before TAL assignment, providing more fg
   # training signal. With QFL soft targets, corrupted copies get lower
   # quality → model learns confidence discrimination.
-  dn_num: 2                      # corrupted copies per GT for DINO contrastive denoising
-  dn_centroid_noise: 0.05        # max centroid shift in normalised coords (~13px at 256)
-  dn_ray_noise: 0.1              # multiplicative Gaussian ray jitter std
+  dn_num: 0                      # DISABLED — train28/29 showed denoising is dead end for FCN
+  dn_centroid_noise: 0.0
+  dn_ray_noise: 0.0
+
+  # Quality head — 1-channel conv predicting piou per anchor (o2o branch only)
+  # At inference: final_conf = cls × sigmoid(quality). Suppresses poorly-localized
+  # predictions without any post-processing. Trained with L1 against actual piou.
+  quality_head_weight: 1.0
 
   # class_weights disabled — caused mode collapse. fg-only amplification with
   # weak bg gradient pushed model to always predict the least-penalized class.

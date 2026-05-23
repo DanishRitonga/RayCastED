@@ -713,12 +713,17 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 piou_loss = piou_loss * fg_plb
             loss[3] = piou_loss.sum() / n_fg
 
+            self._fg_piou = fg_piou.detach()
+            self._fg_mask = fg_mask
+
             # L_smooth: Curvature (2nd-order) regularisation on predicted rays
             smooth_loss = curvature_smoothness_loss_torch(fg_pred_rays)
             if fg_plb is not None:
                 smooth_loss = smooth_loss * fg_plb
             loss[4] = smooth_loss.sum() / n_fg
         else:
+            self._fg_piou = None
+            self._fg_mask = None
             # DDP safety — touch all prediction tensors to avoid unused-gradient errors
             loss[0] += (pred_xy * 0).sum()
             loss[2] += (pred_rays * 0).sum()
@@ -891,6 +896,7 @@ class RayCastE2ELoss(E2ELoss):
         dn_num: int = 0,
         dn_centroid_noise: float = 0.0,
         dn_ray_noise: float = 0.0,
+        quality_head_weight: float = 0.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -1100,6 +1106,9 @@ class RayCastE2ELoss(E2ELoss):
         self.aux_xy_lambda = lambda_aux_xy
         self._max_epochs = max_epochs
         self.aux_xy_decay_epoch = max(1, aux_xy_ramp_epochs)
+
+        # Quality head weight: L1 loss against actual piou for fg anchors (0 = disabled)
+        self._quality_head_weight = quality_head_weight
 
     def set_steps_per_epoch(self, steps_per_epoch: int) -> None:
         """Update steps_per_epoch after dataset size becomes known.
@@ -1321,6 +1330,26 @@ class RayCastE2ELoss(E2ELoss):
             else:
                 loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
         else:
+            loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
+
+        # Quality head loss: L1 between predicted piou and actual piou (o2o fg anchors only)
+        has_quality = (
+            self._quality_head_weight > 0
+            and 'quality_raw' in one2one_preds
+            and hasattr(self.one2one, '_fg_piou')
+            and self.one2one._fg_piou is not None
+        )
+        if has_quality:
+            quality_raw = one2one_preds['quality_raw'].permute(0, 2, 1).contiguous()
+            quality_pred = quality_raw.sigmoid().squeeze(-1)
+            fg_mask = self.one2one._fg_mask
+            fg_piou = self.one2one._fg_piou
+            n_fg = max(fg_mask.sum(), 1)
+            fg_quality_pred = quality_pred[fg_mask]
+            quality_loss = (fg_quality_pred - fg_piou).abs().sum() / n_fg * self._quality_head_weight
+            total_loss = torch.cat([total_loss, quality_loss.unsqueeze(0)])
+            loss_detach = torch.cat([loss_detach, quality_loss.detach().unsqueeze(0)])
+        elif self._quality_head_weight > 0:
             loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
 
         return total_loss, loss_detach

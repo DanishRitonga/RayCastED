@@ -128,6 +128,7 @@ class RayCastDetect(Detect):
         head_channel_min: int = 64,
         refinement_kernel_size: int = 3,
         aux_xy: bool = False,
+        quality_head: bool = False,
     ):
         """Initialize polygon detection head.
 
@@ -144,6 +145,9 @@ class RayCastDetect(Detect):
                 7 or 13 = LargeKernelRefinementBlock (LKCell-style, wider receptive field).
             aux_xy: If True, attach a lightweight 1x1 conv head for auxiliary xy regression
                 directly on neck features, bypassing the 4-layer head stack.
+            quality_head: If True, attach a 1-channel conv per scale predicting
+                expected PolarIoU. Used at inference as cls × sigmoid(quality) for
+                IoU-aware confidence scoring.
         """
         self.n_rays = n_rays if n_rays is not None else _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays  # xy + rays
@@ -187,6 +191,14 @@ class RayCastDetect(Detect):
         else:
             self.aux_xy = None
 
+        if quality_head:
+            self.quality_head = nn.ModuleList(nn.Conv2d(c, 1, 1) for c in ch)
+            for layer in self.quality_head:
+                nn.init.zeros_(layer.bias)
+                nn.init.zeros_(layer.weight)
+        else:
+            self.quality_head = None
+
         # Separate o2o heads — both box (cv2) and cls (cv3) are deepcopied.
         # Shared cv3 caused 11.5x overprediction: o2m's dense positives (topk=15)
         # taught the shared cls head to fire high scores for many anchors per GT,
@@ -194,6 +206,10 @@ class RayCastDetect(Detect):
         if self._end2end_arg:
             self.one2one_cv2 = copy.deepcopy(self.cv2)
             # one2one_cv3 is created by parent Detect.__init__ as deepcopy of cv3
+
+            if self.quality_head is not None:
+                self.one2one_quality_head = copy.deepcopy(self.quality_head)
+                self.quality_head = None  # o2m doesn't need quality head
 
     @property
     def one2many(self):
@@ -203,13 +219,17 @@ class RayCastDetect(Detect):
     @property
     def one2one(self):
         """Return one2one head components — separate cls head for NMS-free inference."""
-        return dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
+        result = dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
+        if hasattr(self, 'one2one_quality_head') and self.one2one_quality_head is not None:
+            result['quality_head'] = self.one2one_quality_head
+        return result
 
     def forward_head(
         self,
         x: list[torch.Tensor],
         box_head: nn.Module | None = None,
         cls_head: nn.Module | None = None,
+        quality_head: nn.Module | None = None,
     ) -> dict[str, torch.Tensor]:
         """Concatenate polygon predictions and class scores across scales.
 
@@ -227,13 +247,21 @@ class RayCastDetect(Detect):
             aux_raw = torch.cat([self.aux_xy[i](x[i]).view(bs, 2, -1) for i in range(self.nl)], dim=-1)
             result['aux_xy_raw'] = aux_raw
 
+        if hasattr(self, 'quality_head') and self.quality_head is not None:
+            q_raw = torch.cat([self.quality_head[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
+            result['quality_raw'] = q_raw
+
+        if quality_head is not None:
+            q_raw = torch.cat([quality_head[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
+            result['quality_raw'] = q_raw
+
         return result
 
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization.
 
-        Removes cv2 and cv3 (one2many heads), keeping only one2one_cv2 and
-        one2one_cv3 for NMS-free inference.
+        Removes cv2 and cv3 (one2many heads), keeping only one2one_cv2,
+        one2one_cv3, and one2one_quality_head for NMS-free inference.
         """
         self.cv2 = None
         self.cv3 = None
@@ -266,6 +294,9 @@ class RayCastDetect(Detect):
 
         dbox = torch.cat([xy_abs, rays_abs], dim=1)
         scores = x['scores'].sigmoid()
+        if 'quality_raw' in x:
+            quality = x['quality_raw'].sigmoid()
+            scores = scores * quality
         return torch.cat((dbox, scores), 1)
 
     def postprocess(self, preds: torch.Tensor) -> torch.Tensor:

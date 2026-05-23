@@ -165,6 +165,9 @@ class TrainingSettings(BaseModel):
     aux_xy_weight: float = 0.0  # Huber loss weight (0 = disabled, 10.0 = recommended)
     aux_xy_ramp_epochs: int = 100  # epochs over which aux weight decays
 
+    # Quality head — IoU-aware inference scoring
+    quality_head_weight: float = 0.0  # L1 loss weight for piou prediction (0 = disabled, 1.0 = recommended)
+
     # Pretrained backbone
     pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
 

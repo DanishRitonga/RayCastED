@@ -240,6 +240,7 @@ class _RayCastCriterionWrapper:
             dn_num=tcfg.get('dn_num', 0),
             dn_centroid_noise=tcfg.get('dn_centroid_noise', 0.0),
             dn_ray_noise=tcfg.get('dn_ray_noise', 0.0),
+            quality_head_weight=tcfg.get('quality_head_weight', 0.0),
         )
 
 
@@ -443,6 +444,7 @@ class RayCastTrainer(DetectionTrainer):
         old_head = model.model[-1]
         tcfg = self.training_config
         aux_xy = bool(tcfg.get('aux_xy_weight', 0) > 0) if tcfg else False
+        quality_head = bool(tcfg.get('quality_head_weight', 0) > 0) if tcfg else False
 
         if isinstance(old_head, RayCastDetect):
             # YAML already specifies RayCastDetect — ensure n_rays matches
@@ -460,6 +462,21 @@ class RayCastTrainer(DetectionTrainer):
                 for layer in old_head.aux_xy:
                     nn.init.zeros_(layer.bias)
                     nn.init.zeros_(layer.weight)
+
+            # Attach quality head if configured
+            if quality_head and (
+                not hasattr(old_head, 'quality_head') or getattr(old_head, 'quality_head', None) is None
+            ):
+                neck_ch = tuple(old_head.cv2[i][0].conv.in_channels for i in range(old_head.nl))
+                old_head.quality_head = nn.ModuleList(nn.Conv2d(c, 1, 1) for c in neck_ch)
+                for layer in old_head.quality_head:
+                    nn.init.zeros_(layer.bias)
+                    nn.init.zeros_(layer.weight)
+                if old_head._end2end_arg:
+                    import copy
+
+                    old_head.one2one_quality_head = copy.deepcopy(old_head.quality_head)
+                    old_head.quality_head = None
         else:
             ch = _extract_neck_channels(old_head)
             nc = old_head.nc
@@ -478,6 +495,7 @@ class RayCastTrainer(DetectionTrainer):
                 head_channel_min=head_channel_min,
                 refinement_kernel_size=refinement_kernel_size,
                 aux_xy=aux_xy,
+                quality_head=quality_head,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):
@@ -509,7 +527,16 @@ class RayCastTrainer(DetectionTrainer):
 
     def get_validator(self):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
-        self.loss_names = ('xy_loss', 'cls_loss', 'l1_loss', 'piou_loss', 'smooth_loss', 'suppress_loss', 'aux_xy_loss')
+        self.loss_names = (
+            'xy_loss',
+            'cls_loss',
+            'l1_loss',
+            'piou_loss',
+            'smooth_loss',
+            'suppress_loss',
+            'aux_xy_loss',
+            'quality_loss',
+        )
         args_copy = copy.copy(self.args)
         if self.training_config and 'inference_conf' in self.training_config:
             args_copy.conf = self.training_config['inference_conf']
