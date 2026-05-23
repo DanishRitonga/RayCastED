@@ -94,7 +94,7 @@ training:
   # Train25: broken normalization (cls_targets.sum() vs fg_mask.sum()). Train26: fixed norm
   # but standard FL formula is wrong for continuous targets — gives MAXIMUM loss when σ=y.
   # Train27: uses QFL (Quality Focal Loss, GFL NeurIPS 2020) — correct formula |y-σ|^β.
-  soft_targets_o2o: false
+  soft_targets_o2o: true
 
   # Per-o2o cls loss overrides — the o2o branch must be a "background specialist"
   # for NMS-free inference. These override the base values above for o2o only.
