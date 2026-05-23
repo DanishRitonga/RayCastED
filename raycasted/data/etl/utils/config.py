@@ -153,6 +153,14 @@ class TrainingSettings(BaseModel):
     assigner_alpha: float = 0.5  # cls^alpha in alignment metric
     assigner_beta: float = 6.0  # iou^beta in alignment metric
 
+    # DINO-style contrastive denoising (o2o branch only)
+    # Injects corrupted GT copies before TAL assignment, providing more
+    # fg training signal for the o2o cls head. With QFL soft targets,
+    # corrupted copies get lower quality scores → contrastive learning.
+    dn_num: int = 0  # number of corrupted copies per GT (0 = disabled)
+    dn_centroid_noise: float = 0.0  # max centroid shift in normalised coords
+    dn_ray_noise: float = 0.0  # multiplicative Gaussian ray jitter std
+
     # Auxiliary xy head — bypass backbone→head bottleneck
     aux_xy_weight: float = 0.0  # Huber loss weight (0 = disabled, 10.0 = recommended)
     aux_xy_ramp_epochs: int = 100  # epochs over which aux weight decays

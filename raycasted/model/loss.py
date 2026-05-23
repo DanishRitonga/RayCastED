@@ -409,6 +409,16 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.suppress_radius = suppress_radius
         self.bg_fg_ratio = bg_fg_ratio
 
+        # DINO-style contrastive denoising for o2o branch.
+        # Injects corrupted GT copies into targets before assignment,
+        # giving the TAL assigner more positive anchors to assign.
+        # With QFL soft targets, corrupted copies get lower quality
+        # scores → model learns to predict lower confidence for
+        # approximate matches (contrastive signal).
+        self.dn_num = 0
+        self.dn_centroid_noise = 0.0
+        self.dn_ray_noise = 0.0
+
     def preprocess(self, targets, batch_size, scale_tensor=None):
         """Preprocess polygon targets.
 
@@ -434,6 +444,71 @@ class RayCastDetectionLoss(v8DetectionLoss):
         out[batch_idx, within_idx] = targets[:, 1:]  # drop batch_idx
         # NO xywh2xyxy, NO scaling — data is already normalised
         return out
+
+    def _inject_denoising_targets(self, gt_labels, gt_bboxes, mask_gt):
+        """Inject corrupted GT copies for DINO-style contrastive denoising.
+
+        For each real GT object, creates ``dn_num`` noisy copies with:
+        - Centroid shifted by uniform noise in [−dn_centroid_noise, +dn_centroid_noise]
+        - Ray distances scaled by multiplicative Gaussian noise
+
+        The TAL assigner treats these as additional GT objects, assigning
+        nearby anchors as positive. With QFL soft targets, the lower-quality
+        matches on corrupted copies get lower cls targets, providing a
+        contrastive signal: the model must predict high confidence for clean
+        matches and lower confidence for approximate/noisy ones.
+
+        This directly addresses the "too few o2o positives" problem (28 fg
+        anchors/image with topk2=1 vs 420 for o2m).
+
+        Args:
+            gt_labels: [B, N_gt, 1] class labels.
+            gt_bboxes: [B, N_gt, raycast_dim] normalised polygons (cx, cy, rays).
+            mask_gt:   [B, N_gt, 1] boolean mask for real GT objects.
+
+        Returns:
+            (gt_labels, gt_bboxes, mask_gt) with corrupted copies appended.
+        """
+        if self.dn_num <= 0 or self.dn_centroid_noise <= 0:
+            return gt_labels, gt_bboxes, mask_gt
+
+        B, N_gt, _ = gt_labels.shape
+
+        dn_labels = []
+        dn_bboxes = []
+        dn_masks = []
+
+        for _ in range(self.dn_num):
+            # Copy labels and bboxes, only for real GT objects
+            labels_copy = gt_labels.clone()
+            bboxes_copy = gt_bboxes.clone()
+            mask_copy = mask_gt.clone()
+
+            real_gt = mask_gt.squeeze(-1)  # [B, N_gt]
+            noise_scale = real_gt.float().unsqueeze(-1)  # [B, N_gt, 1]
+
+            # Centroid noise: uniform shift in normalised coords
+            centroid_noise = (torch.rand_like(bboxes_copy[:, :, :2]) * 2 - 1) * self.dn_centroid_noise
+            bboxes_copy[:, :, :2] = bboxes_copy[:, :, :2] + centroid_noise * noise_scale
+            # Clamp centroids to [0, 1]
+            bboxes_copy[:, :, :2] = bboxes_copy[:, :, :2].clamp(0.0, 1.0)
+
+            # Ray noise: multiplicative Gaussian jitter
+            if self.dn_ray_noise > 0:
+                ray_noise = torch.randn_like(bboxes_copy[:, :, 2:]) * self.dn_ray_noise
+                ray_scale = (1.0 + ray_noise).clamp(0.5, 2.0)  # prevent collapse or explosion
+                bboxes_copy[:, :, 2:] = bboxes_copy[:, :, 2:] * ray_scale * noise_scale
+                # Zero out rays for padding GTs (noise_scale handles this)
+
+            dn_labels.append(labels_copy)
+            dn_bboxes.append(bboxes_copy)
+            dn_masks.append(mask_copy)
+
+        gt_labels = torch.cat([gt_labels] + dn_labels, dim=1)
+        gt_bboxes = torch.cat([gt_bboxes] + dn_bboxes, dim=1)
+        mask_gt = torch.cat([mask_gt] + dn_masks, dim=1)
+
+        return gt_labels, gt_bboxes, mask_gt
 
     @staticmethod
     def decode_pred_xy(xy_raw, anchor_points, stride_tensor, imgsz):
@@ -479,6 +554,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
         targets = self.preprocess(targets.to(self.device), batch_size)
         gt_labels, gt_bboxes = targets.split((1, self.raycast_dim), 2)  # cls:(B,N,1), poly:(B,N,raycast_dim)
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+
+        # --- DINO-style contrastive denoising ---
+        # Inject corrupted GT copies to provide more o2o fg training signal.
+        # The TAL assigner treats them as additional GT objects; with QFL soft
+        # targets, corrupted copies get lower quality → contrastive learning.
+        gt_labels, gt_bboxes, mask_gt = self._inject_denoising_targets(gt_labels, gt_bboxes, mask_gt)
 
         # --- Decode predictions ---
         xy_raw = pred_distri[..., :2]  # [B, N, 2]
@@ -807,6 +888,9 @@ class RayCastE2ELoss(E2ELoss):
         hungarian_cost_centroid: float = 1.0,
         hungarian_cost_ray: float = 1.0,
         steps_per_epoch: int = 0,
+        dn_num: int = 0,
+        dn_centroid_noise: float = 0.0,
+        dn_ray_noise: float = 0.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -867,6 +951,13 @@ class RayCastE2ELoss(E2ELoss):
             self.one2one.fg_cls_boost = fg_cls_boost_o2o
         if fg_cls_quality_scale_o2o is not None:
             self.one2one.fg_cls_quality_scale = fg_cls_quality_scale_o2o
+
+        # DINO-style contrastive denoising — only for o2o branch
+        # (o2m already has abundant fg signal from topk=15)
+        if dn_num > 0:
+            self.one2one.dn_num = dn_num
+            self.one2one.dn_centroid_noise = dn_centroid_noise
+            self.one2one.dn_ray_noise = dn_ray_noise
 
         # Fix: parent E2ELoss.decay() uses self.updates (epoch counter) as
         # numerator and one2one.hyp.epochs as denominator.  To make the

@@ -127,6 +127,12 @@ When adding a new config parameter:
 
 25. **Soft targets normalization fixed**: `loss.py:544` — with `soft_targets=True`, `cls_targets.sum()` sums quality values (~14 for 28 fg) instead of count (28), inflating cls loss ~7x. Now uses `fg_mask.sum()` as denominator when soft_targets is enabled.
 
+28. **DINO denoising only affects assignment, not predictions**: `_inject_denoising_targets()` adds corrupted GT copies to `gt_labels`/`gt_bboxes` before the TAL assigner. The assigner produces more fg assignments (more anchors get cls gradient), but denoising targets are NOT passed to regression — only the real GTs' regression targets are used. The corrupted copies exist solely to provide additional cls training signal.
+
+29. **Standard FL + soft targets is wrong (train25/26)**: Use QFL (`_quality_focal_loss`) when `soft_targets=True`. Standard FL `(1-p_t)^γ` inflates loss for samples near the correct target (when y=0.5, σ=0.5: FL gives MAXIMUM loss, QFL gives zero). Config: `soft_targets_o2o: true` + `focal_gamma_o2o: 2.0` (reused as QFL beta).
+
+30. **max_det reduced to 100**: `RayCastDetect.max_det = 100` (was 300). PanNuke has ~28 cells/image, rare images 50+. 300 was excessive and could include low-confidence false positives.
+
 ### Eval Script
 
 26. **`main/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
@@ -173,13 +179,18 @@ Val: mAP50=0.449 (regressed from train23's 0.517)
 ### Train25 Results (train23 + soft_targets_o2o=true, early stopped at 327, best epoch 227)
 Val: mAP50=0.423, mAP50-95=0.321, prec=0.433, recall=0.484
 Eval (conf=0.49): AJI=0.478, AP@0.5=0.205, bPQ=0.415, mPQ=0.357, F1=0.544, Prec=0.536, Recall=0.551, 67,646 preds (1.03x)
-**Diagnosis: INCONCLUSIVE — trained with broken normalization. Soft targets used `cls_targets.sum()` (quality values ~14) as denominator instead of fg count (28), inflating o2o cls loss ~7x (2852 vs expected ~400). Fix applied: `loss.py:544` uses `fg_mask.sum()` for soft targets. Needs re-run (train26).**
+**Diagnosis: Soft targets with standard focal loss are counterproductive.** They shift the confidence distribution down without improving discriminability. At conf=0.35 barely matches train23's conf=0.49. Root cause: standard FL formula `(1-p_t)^γ` is WRONG for continuous targets — correct is QFL `|y-σ|^β` (GFL, NeurIPS 2020). Killed — moving to QFL.**
+
+### Train26 Results (soft_targets + fixed normalization + Hungarian quality fix, 400 epochs)
+Val: mAP50=0.509, mAP50-95=0.378, prec=0.550, recall=0.469
+Eval conf=0.49: AJI=0.360, AP@0.5=0.266, bPQ=0.178, F1=0.549, Prec=0.904, Recall=0.394, 28,695 preds (0.44x)
+Eval conf=0.35: AJI=0.515, AP@0.5=0.328, bPQ=0.488, F1=0.619, Prec=0.630, Recall=0.608, 63,639 preds (0.97x)
+**Diagnosis: Standard FL + soft targets still counterproductive even with fixed normalization. Conf distribution shifts down; at conf=0.35 barely matches train23 at conf=0.49. Confirms QFL is needed.**
 
 ### Pending Experiments
-- Train26: soft_targets_o2o=true with normalization fix (fair test)
-- Lower conf threshold (0.3) to recover recall — model slightly underpredicts at 0.5
-- Reduce max_det from 300 to 100
-- Gentle suppress loss: lambda_suppress=0.5, suppress_radius=0.02 on train23 base
+- Train27: QFL (Quality Focal Loss) for o2o soft targets + max_det=100
+- Train28: QFL + DINO denoising (dn_num=2, dn_centroid_noise=0.05, dn_ray_noise=0.1)
+- Trained quality head for IoU-aware inference scoring (cls × predicted_piou)
 
 ## Testing
 

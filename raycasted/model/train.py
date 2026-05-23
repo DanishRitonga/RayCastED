@@ -237,6 +237,9 @@ class _RayCastCriterionWrapper:
             hungarian_cost_centroid=tcfg.get('hungarian_cost_centroid', 1.0),
             hungarian_cost_ray=tcfg.get('hungarian_cost_ray', 1.0),
             steps_per_epoch=self._steps_per_epoch,
+            dn_num=tcfg.get('dn_num', 0),
+            dn_centroid_noise=tcfg.get('dn_centroid_noise', 0.0),
+            dn_ray_noise=tcfg.get('dn_ray_noise', 0.0),
         )
 
 

@@ -115,6 +115,8 @@ class RayCastDetect(Detect):
         - Channels 2..(2+n_rays) (rays): Softplus (inference only)
     """
 
+    max_det = 100
+
     def __init__(
         self,
         nc: int = 80,
