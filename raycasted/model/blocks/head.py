@@ -159,33 +159,46 @@ class AnchorSelfAttention(nn.Module):
         b, n, c = x.shape
         residual = x
 
-        # Disable AMP autocast — LayerNorm + elu+1 + einsum accumulation
-        # is numerically unstable in float16 (produces NaN cls loss)
-        device_type = 'cuda' if x.is_cuda else 'cpu'
-        with torch.amp.autocast(device_type, enabled=False):
-            x = x.float()
-            qkv = self.qkv(self.norm(x))
-            q, k, v = qkv.chunk(3, dim=-1)
+        # Force full float32 path — LayerNorm + elu+1 + einsum accumulation
+        # is numerically unstable in float16 (produces NaN cls loss).
+        # Must cast BOTH input AND module parameters to float32 because
+        # the outer AMP autocast may have already cast params to float16.
+        x = x.float()
+        norm_w = self.norm.weight.float()
+        norm_b = self.norm.bias.float()
+        x = F.layer_norm(x, self.norm.normalized_shape, norm_w, norm_b, self.norm.eps)
 
-            q = q.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-            k = k.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-            v = v.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+        qkv_w = self.qkv.weight.float()
+        qkv_b = self.qkv.bias.float() if self.qkv.bias is not None else None
+        qkv = F.linear(x, qkv_w, qkv_b)
+        q, k, v = qkv.chunk(3, dim=-1)
 
-            q = self._phi(q)
-            k = self._phi(k)
+        q = q.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
 
-            kv = torch.einsum('bhnd,bhne->bhde', k, v)
-            # Proper normalization: divide by sum of all attention weights
-            # (not just query magnitude). Prevents accumulation explosion
-            # with many tokens (P2=4096).
-            k_sum = torch.einsum('bhnd->bhd', k).unsqueeze(-1)  # [B, H, D, 1]
-            attn_denom = torch.einsum('bhnd,bhde->bhne', q, k_sum).clamp(min=1e-6)
-            out = torch.einsum('bhnd,bhde->bhne', q, kv) / attn_denom
+        q = self._phi(q)
+        k = self._phi(k)
 
-            out = out.transpose(1, 2).contiguous().view(b, n, self.inner_dim)
-            out = self.dropout(self.proj(out))
-            out = residual.float() + out
+        # Scale k and v by 1/sqrt(N) before accumulation to prevent
+        # numerical overflow with many tokens (P2 has 4096 anchors).
+        # The 1/N factor cancels in the final division.
+        scale = 1.0 / (n ** 0.5)
+        k = k * scale
+        v = v * scale
 
+        kv = torch.einsum('bhnd,bhne->bhde', k, v)
+        k_sum = torch.einsum('bhnd->bhd', k).unsqueeze(-1)
+        attn_denom = torch.einsum('bhnd,bhde->bhne', q, k_sum).clamp(min=1e-6)
+        out = torch.einsum('bhnd,bhde->bhne', q, kv) / attn_denom
+
+        out = out.transpose(1, 2).contiguous().view(b, n, self.inner_dim)
+
+        proj_w = self.proj.weight.float()
+        proj_b = self.proj.bias.float() if self.proj.bias is not None else None
+        out = F.linear(self.dropout(out), proj_w, proj_b)
+
+        out = residual.float() + out
         return out.to(residual.dtype)
 
 
