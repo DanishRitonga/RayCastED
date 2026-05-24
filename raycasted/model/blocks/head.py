@@ -159,29 +159,34 @@ class AnchorSelfAttention(nn.Module):
         b, n, c = x.shape
         residual = x
 
-        # Force float32 for numerical stability under AMP (LayerNorm + elu+1
-        # feature map + einsum accumulation is unstable in float16)
-        compute_dtype = x.dtype
-        x = x.float()
+        # Disable AMP autocast — LayerNorm + elu+1 + einsum accumulation
+        # is numerically unstable in float16 (produces NaN cls loss)
+        device_type = 'cuda' if x.is_cuda else 'cpu'
+        with torch.amp.autocast(device_type, enabled=False):
+            x = x.float()
+            qkv = self.qkv(self.norm(x))
+            q, k, v = qkv.chunk(3, dim=-1)
 
-        qkv = self.qkv(self.norm(x))
-        q, k, v = qkv.chunk(3, dim=-1)
+            q = q.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+            k = k.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+            v = v.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
 
-        q = q.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+            q = self._phi(q)
+            k = self._phi(k)
 
-        q = self._phi(q)
-        k = self._phi(k)
+            kv = torch.einsum('bhnd,bhne->bhde', k, v)
+            # Proper normalization: divide by sum of all attention weights
+            # (not just query magnitude). Prevents accumulation explosion
+            # with many tokens (P2=4096).
+            k_sum = torch.einsum('bhnd->bhd', k).unsqueeze(-1)  # [B, H, D, 1]
+            attn_denom = torch.einsum('bhnd,bhde->bhne', q, k_sum).clamp(min=1e-6)
+            out = torch.einsum('bhnd,bhde->bhne', q, kv) / attn_denom
 
-        kv = torch.einsum('bhnd,bhne->bhde', k, v)
-        q_norm = q.sum(dim=-1, keepdim=True).clamp(min=1e-6)
-        out = torch.einsum('bhnd,bhde->bhne', q, kv) / q_norm
+            out = out.transpose(1, 2).contiguous().view(b, n, self.inner_dim)
+            out = self.dropout(self.proj(out))
+            out = residual.float() + out
 
-        out = out.transpose(1, 2).contiguous().view(b, n, self.inner_dim)
-        out = self.dropout(self.proj(out))
-
-        return residual + out.to(compute_dtype)
+        return out.to(residual.dtype)
 
 
 class RayCastDetect(Detect):

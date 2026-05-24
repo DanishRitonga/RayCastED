@@ -137,6 +137,14 @@ When adding a new config parameter:
 
 32. **Quality head for IoU-aware inference**: 1-channel conv predicting piou per anchor (o2o branch only). At inference: `final_conf = cls × sigmoid(quality)`. Suppresses poorly-localized predictions without any post-processing. Trained with L1 against actual fg_piou. Config: `quality_head_weight` (0=disabled, 1.0=recommended). Head is `one2one_quality_head = copy.deepcopy(quality_head)` — same pattern as separate o2o cls/reg heads.
 
+33. **Quality head is a wash (train30)**: mAP50=0.504 vs train23's 0.517. The head predicts piou for fg anchors but doesn't help cls head suppress false positives — most false positives are confident AND reasonably localized (just duplicates). Quality head is a dead end.
+
+34. **AnchorSelfAttention — linear self-attention on o2o cls features**: `AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)` applies multi-head linear attention (Katharopoulos et al., 2020, elu+1 feature map) on c3-dim intermediate cls features before the final nc-projection. Two modes:
+    - `self_attention`: Per-scale — each anchor sees all others on the same scale. Applied independently to P2/P3/P4.
+    - `cross_scale_attention`: Cross-scale — concatenate all scales (5376 tokens), attend, split back. Each anchor sees all anchors across P2/P3/P4.
+    - Both can be combined (per-scale first, then cross-scale). Params: +65K each.
+    - Implementation: `forward_head()` splits cv3 Sequential → `[0:-1]` extracts c3 features → attention → `[-1]` projects to nc. Deepcopied for o2o branch. O2M branch has no attention.
+
 ### Eval Script
 
 26. **`main/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
@@ -207,9 +215,15 @@ DIAG o2o: fg jumped from ~290 to ~1950 per batch. cls loss nearly doubled.
 Val: mAP50=0.372, mAP50-95=0.288, prec=0.448, recall=0.401. Best epoch 196.
 **Diagnosis: Denoising + QFL together still failed. mAP barely above train28 (0.370). The extra fg from denoising doesn't create useful contrastive signal even with QFL. Denoising is a dead end for FCN.**
 
+### Train30 Results (quality_head_weight=1.0, 400 epochs)
+Val: mAP50=0.504, mAP50-95=0.376, prec=0.532, recall=0.509
+O2O DIAG: fg=0.252, bg=0.105 (2.4x gap — same as train23's 2.5x)
+**Diagnosis: Quality head is a wash.** mAP slightly worse (0.504 vs 0.517). fg/bg discrimination unchanged. The head predicts piou but doesn't help cls suppress false positives — most FPs are confident AND well-localized (just duplicates).
+
 ### Pending Experiments
-- Train30: Quality head (quality_head_weight=1.0) on top of train23 config
-- Lightweight self-attention on o2o features (hybrid FCN+attention for duplicate suppression)
+- Train31: Per-scale self-attention on o2o cls features
+- Train32: Cross-scale self-attention on o2o cls features
+- Train33: Both per-scale + cross-scale self-attention
 
 ## Testing
 
