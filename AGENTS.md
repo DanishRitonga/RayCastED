@@ -139,11 +139,12 @@ When adding a new config parameter:
 
 33. **Quality head is a wash (train30)**: mAP50=0.504 vs train23's 0.517. The head predicts piou for fg anchors but doesn't help cls head suppress false positives — most false positives are confident AND reasonably localized (just duplicates). Quality head is a dead end.
 
-34. **AnchorSelfAttention — linear self-attention on o2o cls features**: `AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)` applies multi-head linear attention (Katharopoulos et al., 2020, elu+1 feature map) on c3-dim intermediate cls features before the final nc-projection. Two modes:
+34. **AnchorSelfAttention — linear self-attention on o2o cls features (DEAD END)**: `AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)` applies multi-head linear attention (Katharopoulos et al., 2020, elu+1 feature map) on c3-dim intermediate cls features before the final nc-projection. Two modes:
     - `self_attention`: Per-scale — each anchor sees all others on the same scale. Applied independently to P2/P3/P4.
     - `cross_scale_attention`: Cross-scale — concatenate all scales (5376 tokens), attend, split back. Each anchor sees all anchors across P2/P3/P4.
     - Both can be combined (per-scale first, then cross-scale). Params: +65K each.
     - Implementation: `forward_head()` splits cv3 Sequential → `[0:-1]` extracts c3 features → attention → `[-1]` projects to nc. Deepcopied for o2o branch. O2M branch has no attention.
+    - **Both variants HURT performance** (train31: mAP50=0.462, train32: mAP50=0.465 vs train23's 0.517). Root cause: linear attention with 98.7% bg anchors produces a soft weighted mean that washes out fg cls signal. fg/bg gap dropped from 2.5x to 1.7-1.8x. Code exists but should stay disabled (`self_attention: false`, `cross_scale_attention: false`).
 
 ### Eval Script
 
@@ -220,10 +221,18 @@ Val: mAP50=0.504, mAP50-95=0.376, prec=0.532, recall=0.509
 O2O DIAG: fg=0.252, bg=0.105 (2.4x gap — same as train23's 2.5x)
 **Diagnosis: Quality head is a wash.** mAP slightly worse (0.504 vs 0.517). fg/bg discrimination unchanged. The head predicts piou but doesn't help cls suppress false positives — most FPs are confident AND well-localized (just duplicates).
 
+### Train31 Results (per-scale self-attention, 600 epochs)
+Val: mAP50=0.462, mAP50-95=0.347, prec=0.470, recall=0.487
+O2O DIAG: fg=0.158, bg=0.095 (1.7x gap — worse than train23's 2.5x)
+**Diagnosis: Per-scale self-attention HURTS.** Linear attention averages sparse fg into bg noise. fg/bg gap collapsed from 2.5x to 1.7x. Dead end.
+
+### Train32 Results (cross-scale self-attention, 600 epochs)
+Val: mAP50=0.465, mAP50-95=0.349, prec=0.489, recall=0.477
+O2O DIAG: fg=0.156, bg=0.088 (1.8x gap — same problem as train31)
+**Diagnosis: Cross-scale same problem.** More tokens (5376) makes averaging slightly worse. Dead end.
+
 ### Pending Experiments
-- Train31: Per-scale self-attention on o2o cls features
-- Train32: Cross-scale self-attention on o2o cls features
-- Train33: Both per-scale + cross-scale self-attention
+- Train33: Both per-scale + cross-scale self-attention (CANCEL — attention is dead)
 
 ## Testing
 

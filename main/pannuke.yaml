@@ -42,6 +42,8 @@ training:
   # Head architecture
   head_channel_scale: 0.5    # c2 = max(head_channel_min, ch * scale). Was 0.25
   head_channel_min: 64       # minimum channels in polygon head. Was 16
+  cls_channel_scale: 2.0     # c3 = max(cls_channel_min, ch[0] * scale). 2.0 = 256ch (from 128)
+  cls_channel_min: 0         # minimum cls head intermediate channels. 0 = use ch[0]
 
   # Early stopping
   patience: 100              # epochs with no improvement before stopping (default: 100)
@@ -116,14 +118,11 @@ training:
   # Quality head — 1-channel conv predicting piou per anchor (o2o branch only)
   # At inference: final_conf = cls × sigmoid(quality). Suppresses poorly-localized
   # predictions without any post-processing. Trained with L1 against actual piou.
-  quality_head_weight: 1.0
+  quality_head_weight: 0.0
 
-  # Self-attention on o2o cls features — spatial context for duplicate suppression
-  # Linear attention (O(N×C) not O(N²×C)) on c3-dim features before final nc-projection.
-  # Two modes, can be combined:
-  #   self_attention: per-scale — each anchor sees all others on the same scale
-  #   cross_scale_attention: cross-scale — each anchor sees all anchors across P2/P3/P4
-  self_attention: true
+  # Self-attention on o2o cls features — DEAD END (train31/32)
+  # Linear attention averages sparse fg into bg noise, hurting fg/bg discrimination.
+  self_attention: false
   cross_scale_attention: false
 
   # class_weights disabled — caused mode collapse. fg-only amplification with

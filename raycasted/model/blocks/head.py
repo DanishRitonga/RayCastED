@@ -224,6 +224,8 @@ class RayCastDetect(Detect):
         n_rays: int | None = None,
         head_channel_scale: float = 0.5,
         head_channel_min: int = 64,
+        cls_channel_scale: float = 1.0,
+        cls_channel_min: int = 0,
         refinement_kernel_size: int = 3,
         aux_xy: bool = False,
         quality_head: bool = False,
@@ -238,8 +240,13 @@ class RayCastDetect(Detect):
             end2end: Whether to use end-to-end NMS-free detection.
             ch: Tuple of channel sizes from backbone feature maps.
             n_rays: Number of radial rays for polygon parameterization.
-            head_channel_scale: Fraction of input channels for head width.
-            head_channel_min: Minimum head intermediate channels.
+            head_channel_scale: Fraction of input channels for regression head width.
+            head_channel_min: Minimum regression head intermediate channels.
+            cls_channel_scale: Scale factor for cls head intermediate channels.
+                c3_new = max(cls_channel_min, int(ch[0] * cls_channel_scale)).
+                Default 1.0 preserves original c3 = max(ch[0], min(nc, 100)).
+            cls_channel_min: Minimum cls head intermediate channels.
+                0 = use ch[0] as floor (same as original formula).
             refinement_kernel_size: Kernel size for polygon refinement block.
                 3 = standard RayRefinementBlock (default).
                 7 or 13 = LargeKernelRefinementBlock (LKCell-style, wider receptive field).
@@ -286,6 +293,25 @@ class RayCastDetect(Detect):
             for x in ch
         )
 
+        # Replace cv3 (cls head) with scaled intermediate channels
+        # Parent Detect.__init__ builds cv3 with c3 = max(ch[0], min(nc, 100)).
+        # We rebuild with c3_new = max(cls_channel_min, int(ch[0] * cls_channel_scale))
+        # to give the cls head more capacity for fg/bg discrimination.
+        c3_original = max(ch[0], min(nc, 100))
+        _scale_c3 = cls_channel_scale != 1.0 or cls_channel_min > 0
+        c3 = max(cls_channel_min, int(ch[0] * cls_channel_scale)) if _scale_c3 else c3_original
+        if c3 != c3_original:
+            from ultralytics.nn.modules.conv import DWConv
+
+            self.cv3 = nn.ModuleList(
+                nn.Sequential(
+                    nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
+                    nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+                    nn.Conv2d(c3, self.nc, 1),
+                )
+                for x in ch
+            )
+
         # Remove DFL — not applicable to polygon regression
         self.dfl = nn.Identity()
 
@@ -308,8 +334,7 @@ class RayCastDetect(Detect):
             self.quality_head = None
 
         # Self-attention on o2o cls features
-        # c3 is the cls head intermediate dim, set by parent Detect.__init__
-        c3 = max(ch[0], min(nc, 100))
+        # c3 is the cls head intermediate dim (may have been scaled above)
         if self_attention:
             self.cls_attention = AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)
         else:
@@ -326,7 +351,7 @@ class RayCastDetect(Detect):
         # defeating o2o's topk2=1 duplicate suppression.
         if self._end2end_arg:
             self.one2one_cv2 = copy.deepcopy(self.cv2)
-            # one2one_cv3 is created by parent Detect.__init__ as deepcopy of cv3
+            self.one2one_cv3 = copy.deepcopy(self.cv3)  # deepcopy scaled cv3 for o2o
 
             if self.quality_head is not None:
                 self.one2one_quality_head = copy.deepcopy(self.quality_head)

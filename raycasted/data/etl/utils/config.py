@@ -44,6 +44,8 @@ class TrainingSettings(BaseModel):
     # Head architecture
     head_channel_scale: float = 0.5  # c2 = max(head_channel_min, ch * scale). Was 0.25
     head_channel_min: int = 64  # minimum channels in polygon head. Was 16
+    cls_channel_scale: float = 1.0  # c3 = max(cls_channel_min, ch[0] * scale). 1.0 = original
+    cls_channel_min: int = 0  # minimum cls head intermediate channels. 0 = use ch[0]
 
     # Learning rate
     cos_lr: bool = True  # cosine LR schedule. Was False

@@ -174,7 +174,7 @@ class _RayCastCriterionWrapper:
         """
         import torch as _torch
 
-        cw = tcfg.get('class_weights', None)
+        cw = tcfg.get('class_weights')
         if cw is None:
             return None
         if isinstance(cw, str) and cw == 'auto':
@@ -461,6 +461,8 @@ class RayCastTrainer(DetectionTrainer):
         quality_head = bool(tcfg.get('quality_head_weight', 0) > 0) if tcfg else False
         self_attention = bool(tcfg.get('self_attention', False)) if tcfg else False
         cross_scale_attention = bool(tcfg.get('cross_scale_attention', False)) if tcfg else False
+        cls_channel_scale = tcfg.get('cls_channel_scale', 1.0) if tcfg else 1.0
+        cls_channel_min = tcfg.get('cls_channel_min', 0) if tcfg else 0
 
         if isinstance(old_head, RayCastDetect):
             # YAML already specifies RayCastDetect — ensure n_rays matches
@@ -470,6 +472,28 @@ class RayCastTrainer(DetectionTrainer):
                 old_head.n_rays = _const.N_RAYS
                 old_head.raycast_dim = 2 + _const.N_RAYS
                 old_head.no = old_head.nc + old_head.raycast_dim
+
+            # Rebuild cv3 with scaled cls channels if configured differently
+            c3_original = max(old_head.cv3[0][-1].in_channels, old_head.nc)
+            _scale_c3 = cls_channel_scale != 1.0 or cls_channel_min > 0
+            c3_new = max(cls_channel_min, int(c3_original * cls_channel_scale)) if _scale_c3 else c3_original
+            if c3_new != c3_original:
+                from ultralytics.nn.modules.conv import Conv as _Conv
+                from ultralytics.nn.modules.conv import DWConv
+
+                neck_ch = tuple(old_head.cv2[i][0].conv.in_channels for i in range(old_head.nl))
+                old_head.cv3 = nn.ModuleList(
+                    nn.Sequential(
+                        nn.Sequential(DWConv(x, x, 3), _Conv(x, c3_new, 1)),
+                        nn.Sequential(DWConv(c3_new, c3_new, 3), _Conv(c3_new, c3_new, 1)),
+                        nn.Conv2d(c3_new, old_head.nc, 1),
+                    )
+                    for x in neck_ch
+                )
+                if old_head._end2end_arg:
+                    import copy
+
+                    old_head.one2one_cv3 = copy.deepcopy(old_head.cv3)
 
             # Attach auxiliary xy head if configured
             if aux_xy and (not hasattr(old_head, 'aux_xy') or getattr(old_head, 'aux_xy', None) is None):
@@ -538,6 +562,8 @@ class RayCastTrainer(DetectionTrainer):
                 n_rays=n_rays,
                 head_channel_scale=head_channel_scale,
                 head_channel_min=head_channel_min,
+                cls_channel_scale=cls_channel_scale,
+                cls_channel_min=cls_channel_min,
                 refinement_kernel_size=refinement_kernel_size,
                 aux_xy=aux_xy,
                 quality_head=quality_head,
