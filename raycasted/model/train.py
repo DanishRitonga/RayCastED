@@ -430,7 +430,7 @@ class RayCastTrainer(DetectionTrainer):
 
         Args:
             cfg: Model config path or YAML name.
-            weights: Pretrained weights path.
+            weights: Pretrained weights path or checkpoint model object (on resume).
             verbose: Print model info.
 
         Returns:
@@ -439,6 +439,20 @@ class RayCastTrainer(DetectionTrainer):
         register_raycast_head()
         nc = self.data.get('nc') if hasattr(self, 'data') and self.data else None
         model = RayCastDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
+
+        # On resume, `weights` is the checkpoint model object (from load_checkpoint).
+        # RayCastDetectionModel.__init__ creates a fresh model from YAML, losing
+        # any extra modules (attention, quality head) that were attached after
+        # construction. Save the checkpoint head's state dict to restore later.
+        checkpoint_head_sd = None
+        if weights is not None and isinstance(weights, torch.nn.Module):
+            ckpt_head = None
+            for m in weights.model.children():
+                if isinstance(m, RayCastDetect):
+                    ckpt_head = m
+                    break
+            if ckpt_head is not None:
+                checkpoint_head_sd = ckpt_head.state_dict()
 
         # Replace Detect head → RayCastDetect
         old_head = model.model[-1]
@@ -547,6 +561,28 @@ class RayCastTrainer(DetectionTrainer):
         model.init_criterion = _RayCastCriterionWrapper(
             model, max_epochs=max_epochs, training_config=self.training_config
         )
+
+        # On resume, restore extra-head weights from checkpoint that were lost
+        # when RayCastDetectionModel.__init__ reconstructed the model from YAML.
+        # checkpoint_head_sd contains the full head state dict from the checkpoint,
+        # including attention/quality head modules that the YAML doesn't specify.
+        if checkpoint_head_sd:
+            current_head = model.model[-1]
+            current_sd = current_head.state_dict()
+            restored_keys = []
+            for k, v in checkpoint_head_sd.items():
+                if k in current_sd and current_sd[k].shape == v.shape:
+                    current_sd[k] = v
+                    restored_keys.append(k)
+            if restored_keys:
+                current_head.load_state_dict(current_sd)
+                n_restored = sum(checkpoint_head_sd[k].numel() for k in restored_keys)
+                from ultralytics.utils import LOGGER
+
+                LOGGER.info(
+                    f'Restored {len(restored_keys)} head keys from checkpoint '
+                    f'({n_restored:,} params)'
+                )
 
         # Load pretrained backbone weights if configured.
         # Only loads backbone layers (0-10), skipping neck/head so they
