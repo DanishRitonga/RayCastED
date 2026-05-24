@@ -104,6 +104,81 @@ class LargeKernelRefinementBlock(nn.Module):
         self.lk_conv.bias.data.copy_(lk_bias + sk_bias)
 
 
+class AnchorSelfAttention(nn.Module):
+    """Linear self-attention over anchor tokens for duplicate suppression.
+
+    Applies multi-head linear attention (Katharopoulos et al., 2020) on
+    per-scale cls feature maps before the final nc-projection. This gives
+    each anchor visibility of all other anchors on the same scale, enabling
+    the o2o cls head to learn "I'm the 2nd-best anchor for this GT, suppress
+    myself" — the spatial context that pure FCN lacks.
+
+    Complexity: O(N × C × d) instead of O(N² × d) for standard attention,
+    making P2's 4096 anchors feasible. Uses elu+1 feature map for linear
+    decomposition: V' = φ(Q) · (φ(K)ᵀ · V).
+
+    Args:
+        channels: Input feature dimension (c3 from cls head).
+        num_heads: Number of attention heads (default 4).
+        head_dim: Dimension per head (default 32). Total proj dim = num_heads * head_dim.
+        dropout: Dropout rate on attention output (default 0.0).
+    """
+
+    def __init__(self, channels: int, num_heads: int = 4, head_dim: int = 32, dropout: float = 0.0):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.inner_dim = num_heads * head_dim
+
+        self.qkv = nn.Linear(channels, self.inner_dim * 3, bias=False)
+        self.proj = nn.Linear(self.inner_dim, channels)
+        self.norm = nn.LayerNorm(channels)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        nn.init.xavier_uniform_(self.qkv.weight)
+        nn.init.xavier_uniform_(self.proj.weight)
+        if self.proj.bias is not None:
+            nn.init.zeros_(self.proj.bias)
+
+    @staticmethod
+    def _phi(x: torch.Tensor) -> torch.Tensor:
+        return F.elu(x) + 1.0
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply linear self-attention with residual + LayerNorm.
+
+        Args:
+            x: [B, N, C] anchor token features.
+
+        Returns:
+            [B, N, C] updated features with global context.
+        """
+        b, n, c = x.shape
+        residual = x
+
+        qkv = self.qkv(self.norm(x))
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        q = q.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+        v = v.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
+
+        q = self._phi(q)
+        k = self._phi(k)
+
+        kv = torch.einsum('bhnd,bhne->bhde', k, v)
+        q_norm = q.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+        out = torch.einsum('bhnd,bhde->bhne', q, kv) / q_norm
+
+        out = out.transpose(1, 2).contiguous().view(b, n, self.inner_dim)
+        out = self.dropout(self.proj(out))
+
+        return residual + out
+
+
 class RayCastDetect(Detect):
     """Polygon detection head replacing bounding-box regression with raycast.
 
@@ -129,6 +204,8 @@ class RayCastDetect(Detect):
         refinement_kernel_size: int = 3,
         aux_xy: bool = False,
         quality_head: bool = False,
+        self_attention: bool = False,
+        cross_scale_attention: bool = False,
     ):
         """Initialize polygon detection head.
 
@@ -148,10 +225,18 @@ class RayCastDetect(Detect):
             quality_head: If True, attach a 1-channel conv per scale predicting
                 expected PolarIoU. Used at inference as cls × sigmoid(quality) for
                 IoU-aware confidence scoring.
+            self_attention: If True, apply linear self-attention on o2o cls features
+                per-scale before the final nc-projection, giving anchors spatial context
+                to suppress duplicate predictions within the same scale.
+            cross_scale_attention: If True, apply linear self-attention on concatenated
+                o2o cls features across all scales, enabling cross-scale duplicate
+                suppression (e.g., same nucleus predicted at both P2 and P3).
         """
         self.n_rays = n_rays if n_rays is not None else _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays  # xy + rays
         self._end2end_arg = end2end  # store before parent __init__ (end2end is a property)
+        self._self_attention = self_attention
+        self._cross_scale_attention = cross_scale_attention
 
         super().__init__(nc, reg_max, end2end, ch)
 
@@ -199,6 +284,19 @@ class RayCastDetect(Detect):
         else:
             self.quality_head = None
 
+        # Self-attention on o2o cls features
+        # c3 is the cls head intermediate dim, set by parent Detect.__init__
+        c3 = max(ch[0], min(nc, 100))
+        if self_attention:
+            self.cls_attention = AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)
+        else:
+            self.cls_attention = None
+
+        if cross_scale_attention:
+            self.cross_scale_cls_attention = AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)
+        else:
+            self.cross_scale_cls_attention = None
+
         # Separate o2o heads — both box (cv2) and cls (cv3) are deepcopied.
         # Shared cv3 caused 11.5x overprediction: o2m's dense positives (topk=15)
         # taught the shared cls head to fire high scores for many anchors per GT,
@@ -211,6 +309,14 @@ class RayCastDetect(Detect):
                 self.one2one_quality_head = copy.deepcopy(self.quality_head)
                 self.quality_head = None  # o2m doesn't need quality head
 
+            if self.cls_attention is not None:
+                self.one2one_cls_attention = copy.deepcopy(self.cls_attention)
+                self.cls_attention = None  # o2m doesn't need attention
+
+            if self.cross_scale_cls_attention is not None:
+                self.one2one_cross_scale_cls_attention = copy.deepcopy(self.cross_scale_cls_attention)
+                self.cross_scale_cls_attention = None
+
     @property
     def one2many(self):
         """Return one2many head components."""
@@ -222,6 +328,10 @@ class RayCastDetect(Detect):
         result = dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
         if hasattr(self, 'one2one_quality_head') and self.one2one_quality_head is not None:
             result['quality_head'] = self.one2one_quality_head
+        if hasattr(self, 'one2one_cls_attention') and self.one2one_cls_attention is not None:
+            result['cls_attention'] = self.one2one_cls_attention
+        if hasattr(self, 'one2one_cross_scale_cls_attention') and self.one2one_cross_scale_cls_attention is not None:
+            result['cross_scale_cls_attention'] = self.one2one_cross_scale_cls_attention
         return result
 
     def forward_head(
@@ -230,17 +340,61 @@ class RayCastDetect(Detect):
         box_head: nn.Module | None = None,
         cls_head: nn.Module | None = None,
         quality_head: nn.Module | None = None,
+        cls_attention: nn.Module | None = None,
+        cross_scale_cls_attention: nn.Module | None = None,
     ) -> dict[str, torch.Tensor]:
         """Concatenate polygon predictions and class scores across scales.
 
         Returns dict with 'boxes' key containing raycast_dim polygon logits,
         'scores' key containing class logits, and 'feats' key with feature maps.
+
+        Attention modes (can be combined):
+          - cls_attention: Per-scale attention on c3 features before nc-projection.
+            Each anchor sees all others on the same scale. Suppresses same-scale duplicates.
+          - cross_scale_cls_attention: Cross-scale attention on concatenated c3 features.
+            Each anchor sees all anchors across all scales. Suppresses cross-scale duplicates.
         """
         if box_head is None or cls_head is None:
             return {}
         bs = x[0].shape[0]
         poly = torch.cat([box_head[i](x[i]).view(bs, self.raycast_dim, -1) for i in range(self.nl)], dim=-1)
-        scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+
+        has_attention = cls_attention is not None or cross_scale_cls_attention is not None
+
+        if has_attention:
+            # Extract c3 features per scale (all cls head layers except final Conv2d)
+            cls_feats = []
+            spatial_shapes = []
+            for i in range(self.nl):
+                feat = cls_head[i][:-1](x[i])  # [B, c3, H, W]
+                h, w = feat.shape[2], feat.shape[3]
+                spatial_shapes.append((h, w))
+                feat = feat.permute(0, 2, 3, 1).reshape(bs, h * w, -1)  # [B, N_i, c3]
+                cls_feats.append(feat)
+
+            # Per-scale attention: each scale independently
+            if cls_attention is not None:
+                cls_feats = [cls_attention(f) for f in cls_feats]
+
+            # Cross-scale attention: concatenate all scales, attend, split back
+            if cross_scale_cls_attention is not None:
+                all_feats = torch.cat(cls_feats, dim=1)  # [B, sum(N_i), c3]
+                all_feats = cross_scale_cls_attention(all_feats)
+                # Split back per scale
+                split_sizes = [h * w for h, w in spatial_shapes]
+                cls_feats = list(all_feats.split(split_sizes, dim=1))
+
+            # Project each scale through the final Conv2d → nc logits
+            scores_per_scale = []
+            for i, feat in enumerate(cls_feats):
+                h, w = spatial_shapes[i]
+                feat = feat.reshape(bs, h, w, -1).permute(0, 3, 1, 2)  # [B, c3, H, W]
+                scores_i = cls_head[i][-1](feat)  # [B, nc, H, W]
+                scores_per_scale.append(scores_i)
+            scores = torch.cat([s.view(bs, self.nc, -1) for s in scores_per_scale], dim=-1)
+        else:
+            scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+
         result = dict(boxes=poly, scores=scores, feats=x)
 
         if hasattr(self, 'aux_xy') and self.aux_xy is not None:

@@ -118,6 +118,14 @@ training:
   # predictions without any post-processing. Trained with L1 against actual piou.
   quality_head_weight: 1.0
 
+  # Self-attention on o2o cls features — spatial context for duplicate suppression
+  # Linear attention (O(N×C) not O(N²×C)) on c3-dim features before final nc-projection.
+  # Two modes, can be combined:
+  #   self_attention: per-scale — each anchor sees all others on the same scale
+  #   cross_scale_attention: cross-scale — each anchor sees all anchors across P2/P3/P4
+  self_attention: true
+  cross_scale_attention: false
+
   # class_weights disabled — caused mode collapse. fg-only amplification with
   # weak bg gradient pushed model to always predict the least-penalized class.
   # Re-add with conservative values (cap at 2.0) once bg suppression is stable.

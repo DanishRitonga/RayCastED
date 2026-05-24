@@ -445,6 +445,8 @@ class RayCastTrainer(DetectionTrainer):
         tcfg = self.training_config
         aux_xy = bool(tcfg.get('aux_xy_weight', 0) > 0) if tcfg else False
         quality_head = bool(tcfg.get('quality_head_weight', 0) > 0) if tcfg else False
+        self_attention = bool(tcfg.get('self_attention', False)) if tcfg else False
+        cross_scale_attention = bool(tcfg.get('cross_scale_attention', False)) if tcfg else False
 
         if isinstance(old_head, RayCastDetect):
             # YAML already specifies RayCastDetect — ensure n_rays matches
@@ -477,6 +479,35 @@ class RayCastTrainer(DetectionTrainer):
 
                     old_head.one2one_quality_head = copy.deepcopy(old_head.quality_head)
                     old_head.quality_head = None
+
+            # Attach self-attention on o2o cls features if configured
+            if self_attention and (
+                not hasattr(old_head, 'cls_attention') or getattr(old_head, 'cls_attention', None) is None
+            ):
+                from raycasted.model.blocks.head import AnchorSelfAttention
+
+                c3 = max(old_head.cv3[0][-1].in_channels, old_head.nc)
+                old_head.cls_attention = AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)
+                if old_head._end2end_arg:
+                    import copy
+
+                    old_head.one2one_cls_attention = copy.deepcopy(old_head.cls_attention)
+                    old_head.cls_attention = None
+
+            # Attach cross-scale attention on o2o cls features if configured
+            if cross_scale_attention and (
+                not hasattr(old_head, 'cross_scale_cls_attention')
+                or getattr(old_head, 'cross_scale_cls_attention', None) is None
+            ):
+                from raycasted.model.blocks.head import AnchorSelfAttention
+
+                c3 = max(old_head.cv3[0][-1].in_channels, old_head.nc)
+                old_head.cross_scale_cls_attention = AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)
+                if old_head._end2end_arg:
+                    import copy
+
+                    old_head.one2one_cross_scale_cls_attention = copy.deepcopy(old_head.cross_scale_cls_attention)
+                    old_head.cross_scale_cls_attention = None
         else:
             ch = _extract_neck_channels(old_head)
             nc = old_head.nc
@@ -496,6 +527,8 @@ class RayCastTrainer(DetectionTrainer):
                 refinement_kernel_size=refinement_kernel_size,
                 aux_xy=aux_xy,
                 quality_head=quality_head,
+                self_attention=self_attention,
+                cross_scale_attention=cross_scale_attention,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):

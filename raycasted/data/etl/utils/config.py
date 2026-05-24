@@ -168,6 +168,10 @@ class TrainingSettings(BaseModel):
     # Quality head — IoU-aware inference scoring
     quality_head_weight: float = 0.0  # L1 loss weight for piou prediction (0 = disabled, 1.0 = recommended)
 
+    # Self-attention on o2o cls features — spatial context for duplicate suppression
+    self_attention: bool = False  # per-scale linear self-attention before final cls projection
+    cross_scale_attention: bool = False  # cross-scale attention on concatenated features across P2/P3/P4
+
     # Pretrained backbone
     pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
 
