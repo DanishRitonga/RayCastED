@@ -628,7 +628,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 dist_sq = ((anchor_pos - gt_for_fg) ** 2).sum(dim=-1)  # [K]
                 sigma_sq = self.gaussian_sigma**2
                 gaussian_vals = torch.exp(-dist_sq / (2 * sigma_sq))  # [K]
-                cls_targets[fg_mask] = gaussian_vals
+                # cls_targets[fg_mask] is [K, nc] — each fg anchor has one
+                # non-zero entry (assigned class). Replace 1.0 with Gaussian.
+                fg_rows = cls_targets[fg_mask]  # [K, nc]
+                nonzero_mask = fg_rows > 0  # [K, nc]
+                fg_rows = nonzero_mask.float() * gaussian_vals.unsqueeze(-1)  # [K, nc]
+                cls_targets[fg_mask] = fg_rows
                 # Best anchor per GT already gets ~1.0 (d≈0), others decay
         elif self.soft_targets:
             # Keep assigner's quality-weighted alignment scores (e.g., 0.87 for a
