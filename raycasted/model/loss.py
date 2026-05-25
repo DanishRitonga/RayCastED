@@ -1441,34 +1441,37 @@ class RayCastE2ELoss(E2ELoss):
             # Build binary PSS target: 1.0 for best anchor per GT, 0.0 for all others
             pss_target = torch.zeros_like(pss_pred)
             if fg_quality is not None and fg_mask.any():
-                # fg_quality contains per-anchor TAL alignment scores for fg anchors.
-                # The highest quality anchor per GT is the "winner" → target 1.0.
-                # We need to reconstruct per-GT best from the stored assignment info.
-                target_gt_idx = self.one2one._target_gt_idx
-                # For each GT, find the fg anchor with highest quality
-                fg_idx = fg_mask.nonzero(as_tuple=False)
+                target_gt_idx = self.one2one._target_gt_idx  # [B, N]
+                fg_idx = fg_mask.nonzero(as_tuple=False)  # [K, 2]
                 batch_idx = fg_idx[:, 0]
                 anchor_idx = fg_idx[:, 1]
-                assigned_gt = target_gt_idx[batch_idx, anchor_idx]
-                fg_qual_vals = fg_quality  # [B, N_anchors] — already stored
-                fg_qual_per_anchor = fg_qual_vals[batch_idx, anchor_idx]
+                assigned_gt = target_gt_idx[batch_idx, anchor_idx].clamp(min=0)  # [K]
+                # Quality per anchor (max across classes for fg anchors)
+                fg_qual_max = fg_quality[batch_idx, anchor_idx].max(dim=-1).values  # [K]
 
-                # Group by (batch, gt_idx), find argmax quality per group
-                # Composite key: batch * max_gt + gt_idx
-                max_gt = assigned_gt.max().item() + 1 if assigned_gt.numel() > 0 else 1
-                composite = batch_idx * max_gt + assigned_gt
-                unique_composites, inverse = composite.unique(return_inverse=True)
-                # For each unique (batch, gt), find best anchor
-                best_per_group = torch.zeros(unique_composites.shape[0], dtype=torch.long, device=pss_pred.device)
-                for i in range(unique_composites.shape[0]):
-                    mask_i = inverse == i
-                    if mask_i.any():
-                        best_per_group[i] = anchor_idx[mask_i][fg_qual_per_anchor[mask_i].argmax()]
+                # Vectorized per-group argmax using scatter_reduce
+                # Composite key: batch * N_gt_max + gt_idx
+                n_gt_max = target_gt_idx.shape[1]
+                composite = batch_idx * n_gt_max + assigned_gt  # [K]
+
+                # Sort by quality descending so highest quality per group
+                # overwrites in scatter (last write wins)
+                sort_order = fg_qual_max.argsort(descending=True)
+                sorted_composite = composite[sort_order]
+                sorted_anchor = anchor_idx[sort_order]
+
+                # scatter_ with last-write-wins: iterate in descending quality order
+                # so the best anchor per group is the last one written
+                n_groups = batch_size * n_gt_max
+                best_anchor = torch.full((n_groups,), -1, dtype=torch.long, device=pss_pred.device)
+                best_anchor.scatter_(0, sorted_composite, sorted_anchor)
+
                 # Set target=1.0 for best anchors
-                for i, comp in enumerate(unique_composites):
-                    b = comp.item() // max_gt
-                    a = best_per_group[i].item()
-                    pss_target[b, a] = 1.0
+                valid = best_anchor >= 0
+                valid_groups = valid.nonzero(as_tuple=False).squeeze(-1)
+                valid_batch = valid_groups // n_gt_max
+                valid_anchors = best_anchor[valid_groups]
+                pss_target[valid_batch, valid_anchors] = 1.0
 
             pss_loss = F.binary_cross_entropy_with_logits(pss_raw.squeeze(-1), pss_target, reduction='none')
             # Only apply loss on fg anchors (bg anchors already have target 0.0,
