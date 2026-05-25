@@ -985,7 +985,7 @@ class RayCastE2ELoss(E2ELoss):
             bg_cls_decay=bg_cls_decay,
             fg_cls_boost=fg_cls_boost,
             soft_targets=soft_targets,
-            gaussian_soft_targets=gaussian_soft_targets,
+            gaussian_soft_targets=False,  # o2o-only; overridden below
             gaussian_sigma=gaussian_sigma,
             class_weights=class_weights,
             lambda_cls=lambda_cls,

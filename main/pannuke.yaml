@@ -133,7 +133,7 @@ training:
   # Fixes train25/26/27 failure: the problem was piou-based targets (quality spread),
   # not the Gaussian concept. Spatial Gaussian creates natural "winner-take-most" gradient.
   gaussian_soft_targets: true
-  gaussian_sigma: 0.5    # spatial sigma in normalized coords (0.5 ≈ 128px at 256px)
+  gaussian_sigma: 0.1    # spatial sigma in normalized coords (0.1 ≈ 25px at 256px; PanNuke nuclei ~15-30px)
 
   # Self-attention on o2o cls features — DEAD END (train31/32)
   # Linear attention averages sparse fg into bg noise, hurting fg/bg discrimination.
