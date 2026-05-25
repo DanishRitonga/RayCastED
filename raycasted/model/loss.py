@@ -615,13 +615,13 @@ class RayCastDetectionLoss(v8DetectionLoss):
             cls_targets[cls_targets > 0] = 1.0  # start from hard targets
             # Compute Gaussian decay for fg anchors
             if fg_mask.any():
-                # anchor_points_norm: [B, N, 2] in [0,1]
+                # anchor_points_norm: [N, 2] in [0,1] (shared across batch)
                 # gt_bboxes: [B, N_gt, raycast_dim] — centroids at [:,:,:2]
                 # target_gt_idx: [B, N] — index of assigned GT per anchor
                 fg_idx = fg_mask.nonzero(as_tuple=False)  # [K, 2] (batch, anchor)
-                assigned_gt = target_gt_idx[fg_idx[:, 0], fg_idx[:, 1]]  # [K]
+                assigned_gt = target_gt_idx[fg_idx[:, 0], fg_idx[:, 1]].clamp(min=0)  # [K]
                 batch_idx = fg_idx[:, 0]
-                anchor_pos = anchor_points_norm[batch_idx, fg_idx[:, 1]]  # [K, 2]
+                anchor_pos = anchor_points_norm[fg_idx[:, 1]]  # [K, 2]
                 # Gather GT centroids using advanced indexing
                 gt_centroids_expanded = gt_bboxes[:, :, :2]  # [B, N_gt, 2]
                 gt_for_fg = gt_centroids_expanded[batch_idx, assigned_gt]  # [K, 2]
