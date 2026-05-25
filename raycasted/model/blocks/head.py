@@ -479,7 +479,7 @@ class RayCastDetect(Detect):
             result['quality_raw'] = q_raw
 
         if pss_head is not None:
-            pss_raw = torch.cat([pss_head[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
+            pss_raw = torch.cat([pss_head[i](x[i].detach()).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
             result['pss_raw'] = pss_raw
 
         return result
