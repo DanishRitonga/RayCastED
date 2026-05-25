@@ -527,8 +527,8 @@ class RayCastTrainer(DetectionTrainer):
                 neck_ch = tuple(old_head.cv2[i][0].conv.in_channels for i in range(old_head.nl))
                 old_head.pss_head = nn.ModuleList(nn.Conv2d(c, 1, 1) for c in neck_ch)
                 for layer in old_head.pss_head:
-                    nn.init.zeros_(layer.bias)
                     nn.init.zeros_(layer.weight)
+                    nn.init.constant_(layer.bias, 2.0)  # sigmoid(2)≈0.88 → near-identity
                 if old_head._end2end_arg:
                     import copy
 

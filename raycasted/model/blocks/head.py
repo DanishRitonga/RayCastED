@@ -342,8 +342,8 @@ class RayCastDetect(Detect):
         if pss_head:
             self.pss_head = nn.ModuleList(nn.Conv2d(c, 1, 1) for c in ch)
             for layer in self.pss_head:
-                nn.init.zeros_(layer.bias)
                 nn.init.zeros_(layer.weight)
+                nn.init.constant_(layer.bias, 2.0)  # sigmoid(2)≈0.88 → near-identity at start
         else:
             self.pss_head = None
 
