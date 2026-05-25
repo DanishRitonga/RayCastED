@@ -57,15 +57,15 @@ training:
   assigner_alpha: 0.5         # cls score exponent in align = cls^α × piou^β
   assigner_beta: 6.0          # Polar-IoU exponent — high β creates geometric dominance for dense cells
   align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
-  o2o_topk2_start: 3           # o2o branch initial positives per GT (annealed to 1)
-  o2o_topk2_anneal_epoch: 120  # epoch to start annealing topk2 from o2o_topk2_start→1
+  o2o_topk2_start: 7           # o2o branch initial positives per GT (annealed to 1). 7 = matching o2m topk
+  o2o_topk2_anneal_epoch: 250  # epoch to start annealing topk2 from 7→1 (must finish before Hungarian ramps)
 
   # 2-phase Hungarian curriculum: TAL-only → Hungarian ramp
-  # Phase 1 (0→100): standard dual-TAL, o2m > o2o
-  # Phase 2 (100+): Hungarian o2o ramps 0→0.9 over remaining training
-  hungarian_phase2_start: -1         # -1 = auto (start when o2o>o2m, ~57% of max_epochs)
+  # Phase 1 (0→400): standard dual-TAL with topk2=7→3 (rich gradient)
+  # Phase 2 (400+): Hungarian o2o ramps 0→0.9 (topk2 already annealed to ~3)
+  hungarian_phase2_start: 400         # start after topk2 has mostly annealed (7→~3)
   hungarian_max_weight: 0.9
-  hungarian_ramp_epochs: 0        # 0 = auto (ramp over remaining epochs)
+  hungarian_ramp_epochs: 0            # 0 = auto (ramp over remaining epochs)
   phase2_freeze_epochs: 0         # backbone freeze at phase2 start (0=disabled)
   hungarian_cost_class: 1.0
   hungarian_cost_centroid: 1.0
@@ -142,7 +142,7 @@ training:
   # producing per-prediction suppression weights. Fundamentally different from
   # feature-level attention (train31/32/34 dead ends) which operated on 5376
   # bg-dominated anchor features.
-  prediction_refinement_weight: 1.0  # BCE loss weight (0 = disabled, 1.0 = recommended)
+  prediction_refinement_weight: 0.0  # disabled for topk2 ablation (train38)
   prediction_refinement_topk: 100    # number of top predictions to refine
 
   # Self-attention on o2o cls features — DEAD END (train31/32)
