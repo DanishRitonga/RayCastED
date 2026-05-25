@@ -1462,7 +1462,7 @@ class RayCastE2ELoss(E2ELoss):
 
                 # scatter_ with last-write-wins: iterate in descending quality order
                 # so the best anchor per group is the last one written
-                n_groups = batch_size * n_gt_max
+                n_groups = fg_mask.shape[0] * n_gt_max
                 best_anchor = torch.full((n_groups,), -1, dtype=torch.long, device=pss_pred.device)
                 best_anchor.scatter_(0, sorted_composite, sorted_anchor)
 
