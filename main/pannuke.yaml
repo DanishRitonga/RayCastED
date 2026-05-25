@@ -1,7 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"        # YOLO26 variant: n, s, m, l, x
-  model: "raycasted/cfg/yolo26s-run28-p234.yaml"  
+  model: "raycasted/cfg/yolo26s-aifi-p234.yaml"
   n_rays: 64
   max_size: 256
   crop_size: 256
@@ -42,7 +42,7 @@ training:
   # Head architecture
   head_channel_scale: 0.5    # c2 = max(head_channel_min, ch * scale). Was 0.25
   head_channel_min: 64       # minimum channels in polygon head. Was 16
-  cls_channel_scale: 2.0     # c3 = max(cls_channel_min, ch[0] * scale). 2.0 = 256ch (from 128)
+  cls_channel_scale: 1.0     # c3 = max(cls_channel_min, ch[0] * scale). 1.0 = original (dead end at 2.0, train33)
   cls_channel_min: 0         # minimum cls head intermediate channels. 0 = use ch[0]
 
   # Early stopping

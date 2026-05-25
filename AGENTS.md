@@ -146,6 +146,8 @@ When adding a new config parameter:
     - Implementation: `forward_head()` splits cv3 Sequential → `[0:-1]` extracts c3 features → attention → `[-1]` projects to nc. Deepcopied for o2o branch. O2M branch has no attention.
     - **Both variants HURT performance** (train31: mAP50=0.462, train32: mAP50=0.465 vs train23's 0.517). Root cause: linear attention with 98.7% bg anchors produces a soft weighted mean that washes out fg cls signal. fg/bg gap dropped from 2.5x to 1.7-1.8x. Code exists but should stay disabled (`self_attention: false`, `cross_scale_attention: false`).
 
+35. **Larger o2o cls head is a wash (train33)**: `cls_channel_scale=2.0` doubles c3 from 128→256. mAP50=0.512 vs train23's 0.517. fg/bg gap narrowed in the wrong direction (2.0x vs 2.5x) — fg confidence dropped more than bg. More capacity without more gradient signal = more uncertainty, not more discrimination. Config: `cls_channel_scale` (default 1.0), `cls_channel_min` (default 0).
+
 ### Eval Script
 
 26. **`main/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
@@ -231,8 +233,13 @@ Val: mAP50=0.465, mAP50-95=0.349, prec=0.489, recall=0.477
 O2O DIAG: fg=0.156, bg=0.088 (1.8x gap — same problem as train31)
 **Diagnosis: Cross-scale same problem.** More tokens (5376) makes averaging slightly worse. Dead end.
 
+### Train33 Results (cls_channel_scale=2.0, 400 epochs)
+Val: mAP50=0.512, mAP50-95=0.377, prec=0.553, recall=0.509
+O2O DIAG: fg=0.198, bg=0.099 (2.0x gap — worse than train23's 2.5x)
+**Diagnosis: Larger o2o cls head is a wash.** fg/bg gap narrowed in wrong direction (2.0x vs 2.5x) — fg confidence dropped more than bg. More capacity without more gradient signal = more uncertainty. Dead end.
+
 ### Pending Experiments
-- Train33: Both per-scale + cross-scale self-attention (CANCEL — attention is dead)
+- None — all tested approaches are dead ends
 
 ## Testing
 
