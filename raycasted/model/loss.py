@@ -339,6 +339,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         fg_cls_boost: float = 0.0,
         fg_cls_quality_scale: float = 0.0,
         soft_targets: bool = False,
+        gaussian_soft_targets: bool = False,
+        gaussian_sigma: float = 0.5,
         class_weights: torch.Tensor | None = None,
         lambda_cls: float = 2.0,
         lambda_xy: float = 500.0,
@@ -376,6 +378,14 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # instead of hard binarising to 0/1. Gives the classifier a graded signal
         # that distinguishes strong matches from weak ones.
         self.soft_targets = soft_targets
+
+        # Gaussian spatial soft targets — replace piou-based soft targets with
+        # spatial Gaussian decay from GT centroid. Best anchor → 1.0; other fg
+        # anchors → exp(-d²/2σ²). Uses QFL for continuous targets. Fixes
+        # train25/26/27 failure: piou targets spread fg scores across 0.3-1.0
+        # instead of creating a sharp peak at the best anchor.
+        self.gaussian_soft_targets = gaussian_soft_targets
+        self.gaussian_sigma = gaussian_sigma
 
         # Per-class inverse-frequency weights [C]. When provided, scales positive
         # classification loss per class to rebalance rare categories.
@@ -594,7 +604,33 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # --- L_cls: BCE or Focal loss with bg subsampling ---
         # Save raw quality before binarization for fg_cls_boost.
         fg_quality = target_scores.float().clone()
-        if self.soft_targets:
+        if self.gaussian_soft_targets:
+            # Spatial Gaussian soft targets: best anchor per GT → 1.0,
+            # other fg anchors → exp(-d²/2σ²) where d = distance to
+            # assigned GT centroid in normalized [0,1] space.
+            # Unlike piou-based soft targets (train25/26/27), spatial
+            # Gaussian creates a sharp peak at the best anchor and
+            # natural "winner-take-most" gradient for nearby duplicates.
+            cls_targets = fg_quality.clone()
+            cls_targets[cls_targets > 0] = 1.0  # start from hard targets
+            # Compute Gaussian decay for fg anchors
+            if fg_mask.any():
+                # anchor_points_norm: [B, N, 2] in [0,1]
+                # gt_bboxes: [B, N_gt, raycast_dim] — centroids at [:,:,:2]
+                # target_gt_idx: [B, N] — index of assigned GT per anchor
+                fg_idx = fg_mask.nonzero(as_tuple=False)  # [K, 2] (batch, anchor)
+                assigned_gt = target_gt_idx[fg_idx[:, 0], fg_idx[:, 1]]  # [K]
+                batch_idx = fg_idx[:, 0]
+                anchor_pos = anchor_points_norm[batch_idx, fg_idx[:, 1]]  # [K, 2]
+                # Gather GT centroids using advanced indexing
+                gt_centroids_expanded = gt_bboxes[:, :, :2]  # [B, N_gt, 2]
+                gt_for_fg = gt_centroids_expanded[batch_idx, assigned_gt]  # [K, 2]
+                dist_sq = ((anchor_pos - gt_for_fg) ** 2).sum(dim=-1)  # [K]
+                sigma_sq = self.gaussian_sigma**2
+                gaussian_vals = torch.exp(-dist_sq / (2 * sigma_sq))  # [K]
+                cls_targets[fg_mask] = gaussian_vals
+                # Best anchor per GT already gets ~1.0 (d≈0), others decay
+        elif self.soft_targets:
             # Keep assigner's quality-weighted alignment scores (e.g., 0.87 for a
             # strong match, 0.31 for a weak one). This gives the classifier a graded
             # signal — the model learns "this is a confident class-2 prediction" vs
@@ -632,7 +668,16 @@ class RayCastDetectionLoss(v8DetectionLoss):
             self.class_weights = cw.to(pred_scores.device)
             cw = self.class_weights
 
-        if self.soft_targets and self.focal_gamma > 0:
+        if self.gaussian_soft_targets:
+            # QFL is required for Gaussian spatial targets — standard FL gives
+            # maximum loss when σ=y (counterproductive for continuous targets).
+            loss_cls = _quality_focal_loss(
+                pred_scores.float(),
+                cls_targets,
+                beta=self.focal_gamma if self.focal_gamma > 0 else 2.0,
+                class_weights=cw,
+            )
+        elif self.soft_targets and self.focal_gamma > 0:
             loss_cls = _quality_focal_loss(
                 pred_scores.float(),
                 cls_targets,
@@ -671,7 +716,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 bg_weight = torch.where(cls_targets > 0, 1.0, self.bg_cls_decay)
             loss_cls = loss_cls * bg_weight
 
-        target_scores_sum = max(fg_mask.sum(), 1) if self.soft_targets else max(cls_targets.sum(), 1)
+        target_scores_sum = (
+            max(fg_mask.sum(), 1) if (self.soft_targets or self.gaussian_soft_targets) else max(cls_targets.sum(), 1)
+        )
         loss[1] = loss_cls.sum() / target_scores_sum
 
         _cls_fg_sum = (loss_cls * cls_targets).sum().item() / max(target_scores_sum, 1)
@@ -715,6 +762,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
             self._fg_piou = fg_piou.detach()
             self._fg_mask = fg_mask
+            self._fg_quality = fg_quality.detach()
+            self._target_gt_idx = target_gt_idx
 
             # L_smooth: Curvature (2nd-order) regularisation on predicted rays
             smooth_loss = curvature_smoothness_loss_torch(fg_pred_rays)
@@ -724,6 +773,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         else:
             self._fg_piou = None
             self._fg_mask = None
+            self._fg_quality = None
+            self._target_gt_idx = None
             # DDP safety — touch all prediction tensors to avoid unused-gradient errors
             loss[0] += (pred_xy * 0).sum()
             loss[2] += (pred_rays * 0).sum()
@@ -897,6 +948,9 @@ class RayCastE2ELoss(E2ELoss):
         dn_centroid_noise: float = 0.0,
         dn_ray_noise: float = 0.0,
         quality_head_weight: float = 0.0,
+        pss_head_weight: float = 0.0,
+        gaussian_soft_targets: bool = False,
+        gaussian_sigma: float = 0.5,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -926,6 +980,8 @@ class RayCastE2ELoss(E2ELoss):
             bg_cls_decay=bg_cls_decay,
             fg_cls_boost=fg_cls_boost,
             soft_targets=soft_targets,
+            gaussian_soft_targets=gaussian_soft_targets,
+            gaussian_sigma=gaussian_sigma,
             class_weights=class_weights,
             lambda_cls=lambda_cls,
             lambda_xy=lambda_xy,
@@ -957,6 +1013,11 @@ class RayCastE2ELoss(E2ELoss):
             self.one2one.fg_cls_boost = fg_cls_boost_o2o
         if fg_cls_quality_scale_o2o is not None:
             self.one2one.fg_cls_quality_scale = fg_cls_quality_scale_o2o
+
+        # Per-branch Gaussian soft targets: o2o can use Gaussian independently
+        if gaussian_soft_targets:
+            self.one2one.gaussian_soft_targets = gaussian_soft_targets
+            self.one2one.gaussian_sigma = gaussian_sigma
 
         # DINO-style contrastive denoising — only for o2o branch
         # (o2m already has abundant fg signal from topk=15)
@@ -1109,6 +1170,9 @@ class RayCastE2ELoss(E2ELoss):
 
         # Quality head weight: L1 loss against actual piou for fg anchors (0 = disabled)
         self._quality_head_weight = quality_head_weight
+
+        # PSS head weight: BCE loss for learned per-pixel suppression (0 = disabled)
+        self._pss_head_weight = pss_head_weight
 
     def set_steps_per_epoch(self, steps_per_epoch: int) -> None:
         """Update steps_per_epoch after dataset size becomes known.
@@ -1350,6 +1414,64 @@ class RayCastE2ELoss(E2ELoss):
             total_loss = torch.cat([total_loss, quality_loss.unsqueeze(0)])
             loss_detach = torch.cat([loss_detach, quality_loss.detach().unsqueeze(0)])
         elif self._quality_head_weight > 0:
+            loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
+
+        # PSS head loss: BCE on sigmoid(pss_raw) vs binary target
+        # Target: 1.0 for the best anchor per GT (highest TAL quality), 0.0 for all others.
+        # Unlike quality head (predicts absolute piou), PSS learns competitive suppression —
+        # which position "wins" in each local neighborhood.
+        has_pss = (
+            self._pss_head_weight > 0
+            and 'pss_raw' in one2one_preds
+            and hasattr(self.one2one, '_fg_mask')
+            and self.one2one._fg_mask is not None
+        )
+        if has_pss:
+            pss_raw = one2one_preds['pss_raw'].permute(0, 2, 1).contiguous()
+            pss_pred = pss_raw.sigmoid().squeeze(-1)
+            fg_mask = self.one2one._fg_mask
+            fg_quality = self.one2one._fg_quality if hasattr(self.one2one, '_fg_quality') else None
+            n_fg = max(fg_mask.sum(), 1)
+
+            # Build binary PSS target: 1.0 for best anchor per GT, 0.0 for all others
+            pss_target = torch.zeros_like(pss_pred)
+            if fg_quality is not None and fg_mask.any():
+                # fg_quality contains per-anchor TAL alignment scores for fg anchors.
+                # The highest quality anchor per GT is the "winner" → target 1.0.
+                # We need to reconstruct per-GT best from the stored assignment info.
+                target_gt_idx = self.one2one._target_gt_idx
+                # For each GT, find the fg anchor with highest quality
+                fg_idx = fg_mask.nonzero(as_tuple=False)
+                batch_idx = fg_idx[:, 0]
+                anchor_idx = fg_idx[:, 1]
+                assigned_gt = target_gt_idx[batch_idx, anchor_idx]
+                fg_qual_vals = fg_quality  # [B, N_anchors] — already stored
+                fg_qual_per_anchor = fg_qual_vals[batch_idx, anchor_idx]
+
+                # Group by (batch, gt_idx), find argmax quality per group
+                # Composite key: batch * max_gt + gt_idx
+                max_gt = assigned_gt.max().item() + 1 if assigned_gt.numel() > 0 else 1
+                composite = batch_idx * max_gt + assigned_gt
+                unique_composites, inverse = composite.unique(return_inverse=True)
+                # For each unique (batch, gt), find best anchor
+                best_per_group = torch.zeros(unique_composites.shape[0], dtype=torch.long, device=pss_pred.device)
+                for i in range(unique_composites.shape[0]):
+                    mask_i = inverse == i
+                    if mask_i.any():
+                        best_per_group[i] = anchor_idx[mask_i][fg_qual_per_anchor[mask_i].argmax()]
+                # Set target=1.0 for best anchors
+                for i, comp in enumerate(unique_composites):
+                    b = comp.item() // max_gt
+                    a = best_per_group[i].item()
+                    pss_target[b, a] = 1.0
+
+            pss_loss = F.binary_cross_entropy_with_logits(pss_raw.squeeze(-1), pss_target, reduction='none')
+            # Only apply loss on fg anchors (bg anchors already have target 0.0,
+            # which BCE handles naturally, but focal/bg_fg_ratio already cover bg)
+            pss_loss = (pss_loss * fg_mask.float()).sum() / n_fg * self._pss_head_weight
+            total_loss = torch.cat([total_loss, pss_loss.unsqueeze(0)])
+            loss_detach = torch.cat([loss_detach, pss_loss.detach().unsqueeze(0)])
+        elif self._pss_head_weight > 0:
             loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
 
         return total_loss, loss_detach

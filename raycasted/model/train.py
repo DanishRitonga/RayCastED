@@ -241,6 +241,9 @@ class _RayCastCriterionWrapper:
             dn_centroid_noise=tcfg.get('dn_centroid_noise', 0.0),
             dn_ray_noise=tcfg.get('dn_ray_noise', 0.0),
             quality_head_weight=tcfg.get('quality_head_weight', 0.0),
+            pss_head_weight=tcfg.get('pss_head_weight', 0.0),
+            gaussian_soft_targets=tcfg.get('gaussian_soft_targets', False),
+            gaussian_sigma=tcfg.get('gaussian_sigma', 0.5),
         )
 
 
@@ -459,6 +462,7 @@ class RayCastTrainer(DetectionTrainer):
         tcfg = self.training_config
         aux_xy = bool(tcfg.get('aux_xy_weight', 0) > 0) if tcfg else False
         quality_head = bool(tcfg.get('quality_head_weight', 0) > 0) if tcfg else False
+        pss_head = bool(tcfg.get('pss_head_weight', 0) > 0) if tcfg else False
         self_attention = bool(tcfg.get('self_attention', False)) if tcfg else False
         cross_scale_attention = bool(tcfg.get('cross_scale_attention', False)) if tcfg else False
         cls_channel_scale = tcfg.get('cls_channel_scale', 1.0) if tcfg else 1.0
@@ -518,6 +522,19 @@ class RayCastTrainer(DetectionTrainer):
                     old_head.one2one_quality_head = copy.deepcopy(old_head.quality_head)
                     old_head.quality_head = None
 
+            # Attach PSS suppression head if configured
+            if pss_head and (not hasattr(old_head, 'pss_head') or getattr(old_head, 'pss_head', None) is None):
+                neck_ch = tuple(old_head.cv2[i][0].conv.in_channels for i in range(old_head.nl))
+                old_head.pss_head = nn.ModuleList(nn.Conv2d(c, 1, 1) for c in neck_ch)
+                for layer in old_head.pss_head:
+                    nn.init.zeros_(layer.bias)
+                    nn.init.zeros_(layer.weight)
+                if old_head._end2end_arg:
+                    import copy
+
+                    old_head.one2one_pss_head = copy.deepcopy(old_head.pss_head)
+                    old_head.pss_head = None
+
             # Attach self-attention on o2o cls features if configured
             if self_attention and (
                 not hasattr(old_head, 'cls_attention') or getattr(old_head, 'cls_attention', None) is None
@@ -567,6 +584,7 @@ class RayCastTrainer(DetectionTrainer):
                 refinement_kernel_size=refinement_kernel_size,
                 aux_xy=aux_xy,
                 quality_head=quality_head,
+                pss_head=pss_head,
                 self_attention=self_attention,
                 cross_scale_attention=cross_scale_attention,
             )
@@ -605,10 +623,7 @@ class RayCastTrainer(DetectionTrainer):
                 n_restored = sum(checkpoint_head_sd[k].numel() for k in restored_keys)
                 from ultralytics.utils import LOGGER
 
-                LOGGER.info(
-                    f'Restored {len(restored_keys)} head keys from checkpoint '
-                    f'({n_restored:,} params)'
-                )
+                LOGGER.info(f'Restored {len(restored_keys)} head keys from checkpoint ({n_restored:,} params)')
 
         # Load pretrained backbone weights if configured.
         # Only loads backbone layers (0-10), skipping neck/head so they

@@ -174,6 +174,21 @@ class TrainingSettings(BaseModel):
     self_attention: bool = False  # per-scale linear self-attention before final cls projection
     cross_scale_attention: bool = False  # cross-scale attention on concatenated features across P2/P3/P4
 
+    # PSS (Positional Suppression Structure) head — learned per-pixel suppression
+    # 1-channel conv on o2o cls features: final_conf = cls × sigmoid(pss).
+    # Trained with BCE: target=1 for best anchor per GT, 0 for all others.
+    # Unlike quality head (absolute piou), PSS learns relative competition — which
+    # position should "win" in each local neighborhood.
+    pss_head_weight: float = 0.0  # BCE loss weight (0 = disabled, 1.0 = recommended)
+
+    # Gaussian spatial soft targets — replace hard 0/1 cls targets with spatial Gaussian
+    # Best anchor per GT → target 1.0; other fg anchors → exp(-d²/2σ²) where d is
+    # distance to GT centroid in normalized space. Uses QFL for continuous targets.
+    # Fixes train25/26/27 failure: the problem was piou-based targets (quality spread),
+    # not the Gaussian concept. Spatial Gaussian creates natural "winner-take-most" gradient.
+    gaussian_soft_targets: bool = False  # enable Gaussian spatial soft targets for o2o cls
+    gaussian_sigma: float = 0.5  # spatial Gaussian sigma in normalized coords (0.5 ≈ 128px at 256)
+
     # Pretrained backbone
     pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
 

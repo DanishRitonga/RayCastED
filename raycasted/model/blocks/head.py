@@ -183,7 +183,7 @@ class AnchorSelfAttention(nn.Module):
         # Scale k and v by 1/sqrt(N) before accumulation to prevent
         # numerical overflow with many tokens (P2 has 4096 anchors).
         # The 1/N factor cancels in the final division.
-        scale = 1.0 / (n ** 0.5)
+        scale = 1.0 / (n**0.5)
         k = k * scale
         v = v * scale
 
@@ -229,6 +229,7 @@ class RayCastDetect(Detect):
         refinement_kernel_size: int = 3,
         aux_xy: bool = False,
         quality_head: bool = False,
+        pss_head: bool = False,
         self_attention: bool = False,
         cross_scale_attention: bool = False,
     ):
@@ -333,6 +334,19 @@ class RayCastDetect(Detect):
         else:
             self.quality_head = None
 
+        # PSS (Positional Suppression Structure) head — 1-channel learned
+        # suppression per scale. Unlike quality head (predicts absolute piou),
+        # PSS predicts competitive/relative suppression — which position wins.
+        # Zero-initialized: starts as identity (sigmoid(0)=0.5), learns to
+        # suppress non-best anchors.
+        if pss_head:
+            self.pss_head = nn.ModuleList(nn.Conv2d(c, 1, 1) for c in ch)
+            for layer in self.pss_head:
+                nn.init.zeros_(layer.bias)
+                nn.init.zeros_(layer.weight)
+        else:
+            self.pss_head = None
+
         # Self-attention on o2o cls features
         # c3 is the cls head intermediate dim (may have been scaled above)
         if self_attention:
@@ -357,6 +371,10 @@ class RayCastDetect(Detect):
                 self.one2one_quality_head = copy.deepcopy(self.quality_head)
                 self.quality_head = None  # o2m doesn't need quality head
 
+            if self.pss_head is not None:
+                self.one2one_pss_head = copy.deepcopy(self.pss_head)
+                self.pss_head = None  # o2m doesn't need PSS head
+
             if self.cls_attention is not None:
                 self.one2one_cls_attention = copy.deepcopy(self.cls_attention)
                 self.cls_attention = None  # o2m doesn't need attention
@@ -376,6 +394,8 @@ class RayCastDetect(Detect):
         result = dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
         if hasattr(self, 'one2one_quality_head') and self.one2one_quality_head is not None:
             result['quality_head'] = self.one2one_quality_head
+        if hasattr(self, 'one2one_pss_head') and self.one2one_pss_head is not None:
+            result['pss_head'] = self.one2one_pss_head
         if hasattr(self, 'one2one_cls_attention') and self.one2one_cls_attention is not None:
             result['cls_attention'] = self.one2one_cls_attention
         if hasattr(self, 'one2one_cross_scale_cls_attention') and self.one2one_cross_scale_cls_attention is not None:
@@ -388,6 +408,7 @@ class RayCastDetect(Detect):
         box_head: nn.Module | None = None,
         cls_head: nn.Module | None = None,
         quality_head: nn.Module | None = None,
+        pss_head: nn.Module | None = None,
         cls_attention: nn.Module | None = None,
         cross_scale_cls_attention: nn.Module | None = None,
     ) -> dict[str, torch.Tensor]:
@@ -457,6 +478,10 @@ class RayCastDetect(Detect):
             q_raw = torch.cat([quality_head[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
             result['quality_raw'] = q_raw
 
+        if pss_head is not None:
+            pss_raw = torch.cat([pss_head[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
+            result['pss_raw'] = pss_raw
+
         return result
 
     def fuse(self) -> None:
@@ -499,6 +524,9 @@ class RayCastDetect(Detect):
         if 'quality_raw' in x:
             quality = x['quality_raw'].sigmoid()
             scores = scores * quality
+        if 'pss_raw' in x:
+            pss = x['pss_raw'].sigmoid()
+            scores = scores * pss
         return torch.cat((dbox, scores), 1)
 
     def postprocess(self, preds: torch.Tensor) -> torch.Tensor:

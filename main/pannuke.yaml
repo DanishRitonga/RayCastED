@@ -1,7 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"        # YOLO26 variant: n, s, m, l, x
-  model: "raycasted/cfg/yolo26s-aifi-p234.yaml"
+  model: "raycasted/cfg/yolo26s-run28-p234.yaml"
   n_rays: 64
   max_size: 256
   crop_size: 256
@@ -119,6 +119,21 @@ training:
   # At inference: final_conf = cls × sigmoid(quality). Suppresses poorly-localized
   # predictions without any post-processing. Trained with L1 against actual piou.
   quality_head_weight: 0.0
+
+  # PSS (Positional Suppression Structure) head — 1-channel learned suppression
+  # per scale. At inference: final_conf = cls × sigmoid(pss) × sigmoid(quality).
+  # Unlike quality head (predicts absolute piou), PSS predicts competitive/relative
+  # suppression — which position "wins" in each local neighborhood.
+  # Trained with BCE: target=1 for best anchor per GT, 0 for all others.
+  pss_head_weight: 1.0
+
+  # Gaussian spatial soft targets — replace hard 0/1 cls targets with spatial Gaussian.
+  # Best anchor per GT → target 1.0; other fg anchors → exp(-d²/2σ²) where d is
+  # distance to GT centroid in normalized space. Uses QFL for continuous targets.
+  # Fixes train25/26/27 failure: the problem was piou-based targets (quality spread),
+  # not the Gaussian concept. Spatial Gaussian creates natural "winner-take-most" gradient.
+  gaussian_soft_targets: true
+  gaussian_sigma: 0.5    # spatial sigma in normalized coords (0.5 ≈ 128px at 256px)
 
   # Self-attention on o2o cls features — DEAD END (train31/32)
   # Linear attention averages sparse fg into bg noise, hurting fg/bg discrimination.
