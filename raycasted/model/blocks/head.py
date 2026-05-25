@@ -657,23 +657,26 @@ class RayCastDetect(Detect):
         topk_feats = torch.gather(cls_feats, 1, topk_idx.unsqueeze(-1).expand(-1, -1, cls_feats.shape[-1]))
 
         # Compute normalised centroid positions for sincos PE
-        # anchors: [2, N], strides: [1, N] or [2, N]
+        feats = one2one_preds['feats']
+        shape = feats[0].shape
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (a.transpose(0, 1) for a in make_anchors(feats, self.stride, 0.5))
+            self.shape = shape
         anchors = self.anchors  # [2, N]
         strides = self.strides  # [1, N] or [2, N]
         if strides.dim() == 2 and strides.shape[0] == 2:
-            strides = strides[:1, :]  # use first row only
+            strides = strides[:1, :]
         if strides.dim() == 3:
             strides = strides.squeeze(0)
         if anchors.dim() == 3:
             anchors = anchors.squeeze(0)
 
-        # Decode xy in pixel space, then normalise by image size
         xy_raw = one2one_preds['boxes'][:, :2, :].sigmoid()  # [B, 2, N]
-        xy_px = (xy_raw * 2.0 - 0.5 + anchors.unsqueeze(0)) * strides.unsqueeze(0)  # [B, 2, N]
-        imgsz = strides.max().item() * (x_shape if (x_shape := one2one_preds['feats'][0].shape[2]) else 64)
-        xy_norm = (xy_px / max(imgsz, 1)).clamp(0, 1)  # [B, 2, N]
-        topk_xy = torch.gather(xy_norm, 2, topk_idx.unsqueeze(1).expand(-1, 2, -1))  # [B, 2, K]
-        topk_pos = topk_xy.permute(0, 2, 1)  # [B, K, 2]
+        xy_px = (xy_raw * 2.0 - 0.5 + anchors.unsqueeze(0)) * strides.unsqueeze(0)
+        imgsz = strides.max().item() * feats[0].shape[2]
+        xy_norm = (xy_px / max(imgsz, 1)).clamp(0, 1)
+        topk_xy = torch.gather(xy_norm, 2, topk_idx.unsqueeze(1).expand(-1, 2, -1))
+        topk_pos = topk_xy.permute(0, 2, 1)
 
         suppress_logits = attn(topk_feats, topk_pos)  # [B, K, 1]
         suppress_weights = suppress_logits.sigmoid()  # [B, K, 1]
