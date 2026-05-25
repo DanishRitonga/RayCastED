@@ -956,6 +956,7 @@ class RayCastE2ELoss(E2ELoss):
         pss_head_weight: float = 0.0,
         gaussian_soft_targets: bool = False,
         gaussian_sigma: float = 0.5,
+        prediction_refinement_weight: float = 0.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -1178,6 +1179,9 @@ class RayCastE2ELoss(E2ELoss):
 
         # PSS head weight: BCE loss for learned per-pixel suppression (0 = disabled)
         self._pss_head_weight = pss_head_weight
+
+        # Prediction refinement weight: BCE loss for inter-prediction attention (0 = disabled)
+        self._prediction_refinement_weight = prediction_refinement_weight
 
     def set_steps_per_epoch(self, steps_per_epoch: int) -> None:
         """Update steps_per_epoch after dataset size becomes known.
@@ -1480,6 +1484,76 @@ class RayCastE2ELoss(E2ELoss):
             total_loss = torch.cat([total_loss, pss_loss.unsqueeze(0)])
             loss_detach = torch.cat([loss_detach, pss_loss.detach().unsqueeze(0)])
         elif self._pss_head_weight > 0:
+            loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
+
+        # Prediction refinement loss: BCE on attention output for top-K predictions
+        # Target: 1.0 for best anchor per GT among the top-K, 0.0 for duplicates.
+        # The attention module sees only top-K=100 predictions (mostly fg) so
+        # inter-prediction competition is meaningful — unlike feature-level attention
+        # (train31/32/34) which operated on 5376 bg-dominated anchor features.
+        has_refine = (
+            self._prediction_refinement_weight > 0
+            and 'refine_raw' in one2one_preds
+            and hasattr(self.one2one, '_fg_mask')
+            and self.one2one._fg_mask is not None
+        )
+        if has_refine:
+            refine_raw = one2one_preds['refine_raw']  # [B, K, 1]
+            topk_idx = one2one_preds['refine_topk_idx']  # [B, K]
+            fg_mask = self.one2one._fg_mask  # [B, N]
+            fg_quality = self.one2one._fg_quality if hasattr(self.one2one, '_fg_quality') else None
+            target_gt_idx = self.one2one._target_gt_idx  # [B, N]
+            bs, K, _ = refine_raw.shape
+            n_fg = max(fg_mask.sum(), 1)
+
+            refine_target = torch.zeros(bs, K, 1, device=refine_raw.device, dtype=refine_raw.dtype)
+            if fg_quality is not None and fg_mask.any():
+                fg_idx = fg_mask.nonzero(as_tuple=False)
+                batch_idx = fg_idx[:, 0]
+                anchor_idx = fg_idx[:, 1]
+                assigned_gt = target_gt_idx[batch_idx, anchor_idx].clamp(min=0)
+                fg_qual_max = fg_quality[batch_idx, anchor_idx].max(dim=-1).values
+
+                n_gt_max = target_gt_idx.shape[1]
+                composite = batch_idx * n_gt_max + assigned_gt
+                sort_order = fg_qual_max.argsort(descending=True)
+                sorted_composite = composite[sort_order]
+                sorted_anchor = anchor_idx[sort_order]
+
+                n_groups = fg_mask.shape[0] * n_gt_max
+                best_anchor = torch.full((n_groups,), -1, dtype=torch.long, device=refine_raw.device)
+                best_anchor.scatter_(0, sorted_composite, sorted_anchor)
+
+                valid = best_anchor >= 0
+                valid_groups = valid.nonzero(as_tuple=False).squeeze(-1)
+                valid_batch = valid_groups // n_gt_max
+                valid_anchors = best_anchor[valid_groups]
+
+                # Vectorized mapping: for each (batch, anchor), find if it appears in topk_idx
+                # Create a mask: for each batch, which topk positions correspond to best anchors
+                for b in range(bs):
+                    best_in_b = valid_anchors[valid_batch == b]
+                    if best_in_b.numel() == 0:
+                        continue
+                    # topk_idx[b] is [K], best_in_b is the set of best anchor indices
+                    is_best = (topk_idx[b].unsqueeze(0) == best_in_b.unsqueeze(1)).any(dim=0)  # [K]
+                    refine_target[b, is_best, 0] = 1.0
+
+            refine_loss = F.binary_cross_entropy_with_logits(refine_raw, refine_target, reduction='none')
+            topk_fg_mask = torch.zeros(bs, K, 1, device=refine_raw.device, dtype=torch.bool)
+            for b in range(bs):
+                fg_anchors_b = fg_mask[b].nonzero(as_tuple=False).squeeze(-1)
+                if fg_anchors_b.numel() == 0:
+                    continue
+                # topk_idx[b] is [K], check which topk positions are fg anchors
+                is_fg = (topk_idx[b].unsqueeze(0) == fg_anchors_b.unsqueeze(1)).any(dim=0)
+                topk_fg_mask[b, is_fg, 0] = True
+
+            n_topk_fg = max(topk_fg_mask.sum(), 1)
+            refine_loss = (refine_loss * topk_fg_mask.float()).sum() / n_topk_fg * self._prediction_refinement_weight
+            total_loss = torch.cat([total_loss, refine_loss.unsqueeze(0)])
+            loss_detach = torch.cat([loss_detach, refine_loss.detach().unsqueeze(0)])
+        elif self._prediction_refinement_weight > 0:
             loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
 
         return total_loss, loss_detach

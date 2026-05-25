@@ -148,6 +148,16 @@ When adding a new config parameter:
 
 35. **Larger o2o cls head is a wash (train33)**: `cls_channel_scale=2.0` doubles c3 from 128→256. mAP50=0.512 vs train23's 0.517. fg/bg gap narrowed in the wrong direction (2.0x vs 2.5x) — fg confidence dropped more than bg. More capacity without more gradient signal = more uncertainty, not more discrimination. Config: `cls_channel_scale` (default 1.0), `cls_channel_min` (default 0).
 
+36. **AIFI-Lite on P4 is dead end for FCN (train34)**: Single TransformerEncoderLayer on P4 backbone features (16x16=256 tokens, ~790K params). mAP50=0.459 vs train23's 0.517. Same pattern as train31/32 self-attention — feature-level enrichment broadcasts globally-smoothed features to ALL 5376 anchors (98.7% bg), washing out local cls discrimination (fg/bg gap 2.5x→1.6x). In RT-DETR, decoder cross-attention selectively queries enriched features; FCN lacks this mechanism. Implementation: `raycasted/model/blocks/aifi.py` (AIFIBlock), `raycasted/cfg/yolo26s-aifi-p234.yaml`. Code exists but model reverted to `yolo26s-run28-p234.yaml`.
+
+37. **Gaussian spatial soft targets collapse fg/bg gap (train35)**: `gaussian_soft_targets=true` with `gaussian_sigma=0.1` gives fg anchors targets exp(-d²/2σ²) instead of 1.0. Same fundamental problem as train25/26/27 piou-based soft targets — spreading fg confidence across 0.3-0.8 instead of sharp 1.0 peak collapses fg/bg gap (2.5x→1.5x). Config: `gaussian_soft_targets` (default false), `gaussian_sigma` (default 0.5). Code exists but should stay disabled.
+
+38. **PSS head bias must be 2.0, not 0 (train35)**: PSS (Positional Suppression Structure) head predicts per-pixel suppression weight. At inference: `final_conf = cls × sigmoid(pss)`. With bias=0, sigmoid(0)=0.5 halves ALL confidences from step 1, killing recall before the head learns. With bias=2.0, sigmoid(2)≈0.88 gives near-identity at start. Config: `pss_head_weight` (default 0.0, >0 enables). Implementation: `nn.Conv2d(c, 1, 1)` per scale, zero-init weight, bias=2.0, deepcopy for o2o. Loss: BCE on fg anchors (target=1.0 for best anchor per GT, 0.0 for others). **DEAD END**: train36 with stop-gradient showed PSS loss stuck at ~0.627 (barely below random). Stop-gradient prevents cls degradation but PSS head can't learn from frozen features — chicken-and-egg problem.
+
+39. **Root cause across ALL attention/feature-enrichment attempts**: FCN lacks selective access to enriched features. AIFI (train34), self-attention (train31/32), and all feature-level approaches broadcast globally-smoothed features to all 5376 anchors where 98.7% are bg. This washes out local cls discrimination. Only prediction-level interaction (after scoring, on top-K=300 mostly-fg predictions) can create useful competition.
+
+40. **PredictionRefinementAttention** — self-attention on top-K scored predictions (o2o branch only). After FCN scores all 5376 anchors, top-K=100 by confidence are selected. These K predictions (mostly fg) undergo 1-layer TransformerEncoder self-attention with sincos PE, producing per-prediction suppression weights. At inference: `final_conf = cls × sigmoid(refine)`. ~133K params. Trained with BCE: target=1 for best anchor per GT, 0 for duplicates. Fundamentally different from train31/32/34 because 5376→100 selection happens BEFORE interaction. Config: `prediction_refinement_weight` (0=disabled, 1.0=recommended), `prediction_refinement_topk` (default 100). Implementation: `PredictionRefinementAttention` in head.py, deepcopy for o2o as `one2one_prediction_refinement_attn`. Bias=2.0 (sigmoid(2)≈0.88 → near-identity at start).
+
 ### Eval Script
 
 26. **`main/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
@@ -238,8 +248,20 @@ Val: mAP50=0.512, mAP50-95=0.377, prec=0.553, recall=0.509
 O2O DIAG: fg=0.198, bg=0.099 (2.0x gap — worse than train23's 2.5x)
 **Diagnosis: Larger o2o cls head is a wash.** fg/bg gap narrowed in wrong direction (2.0x vs 2.5x) — fg confidence dropped more than bg. More capacity without more gradient signal = more uncertainty. Dead end.
 
+### Train34 Results (AIFI-Lite on P4, 600 epochs)
+Val: mAP50=0.459, mAP50-95=0.344, prec=0.477, recall=0.489
+O2O DIAG: fg=0.120, bg=0.076 (1.6x gap — worse than train23's 2.5x)
+**Diagnosis: AIFI-Lite is a dead end for FCN.** Same pattern as train31/32 — feature-level enrichment broadcasts globally-smoothed features to all 5376 anchors, washing out local cls discrimination (fg/bg gap 2.5x→1.6x). In RT-DETR, decoder cross-attention selectively queries enriched features; FCN lacks this mechanism.
+
+### Train35 Results (PSS head + Gaussian soft targets, early stopped epoch 195)
+Val: mAP50=0.424, mAP50-95=0.346, prec=0.801, recall=0.053
+**CATASTROPHIC**: Recall collapsed from 0.62 (train23) to 0.053. Gaussian soft targets spread fg confidence across 0.3-0.8 (collapsing fg/bg gap 2.5x→1.5x). PSS head with bias=0 (sigmoid(0)=0.5) halved all confidences from step 1. PSS head bias fixed to 2.0 for future runs; Gaussian soft targets are a dead end.
+
+### Train36 Results (PSS head + stop-gradient, still running)
+PSS loss stuck at ~0.627 (barely below random 0.693), mAP50 ~0.370. Stop-gradient prevents cls degradation but PSS head can't learn from frozen features — chicken-and-egg problem. PSS head is a dead end (both with and without stop-gradient).
+
 ### Pending Experiments
-- None — all tested approaches are dead ends
+- Prediction-level self-attention on top-K predictions — IMPLEMENTED, ready for train37
 
 ## Testing
 

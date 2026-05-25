@@ -125,7 +125,8 @@ training:
   # Unlike quality head (predicts absolute piou), PSS predicts competitive/relative
   # suppression — which position "wins" in each local neighborhood.
   # Trained with BCE: target=1 for best anchor per GT, 0 for all others.
-  pss_head_weight: 1.0
+  # DEAD END: train35 (bias=0, recall=0.053) + train36 (stop-gradient, PSS stuck at random)
+  pss_head_weight: 0.0
 
   # Gaussian spatial soft targets — replace hard 0/1 cls targets with spatial Gaussian.
   # Best anchor per GT → target 1.0; other fg anchors → exp(-d²/2σ²) where d is
@@ -134,6 +135,15 @@ training:
   # not the Gaussian concept. Spatial Gaussian creates natural "winner-take-most" gradient.
   gaussian_soft_targets: false  # Dead end — hurts fg/bg gap (train35 recall collapsed to 0.05)
   gaussian_sigma: 0.1    # spatial sigma in normalized coords (0.1 ≈ 25px at 256px)
+
+  # Prediction-level self-attention on top-K scored predictions (o2o branch only).
+  # After FCN scores all 5376 anchors, top-K=100 by confidence are selected.
+  # These K predictions (mostly fg) undergo TransformerEncoder self-attention,
+  # producing per-prediction suppression weights. Fundamentally different from
+  # feature-level attention (train31/32/34 dead ends) which operated on 5376
+  # bg-dominated anchor features.
+  prediction_refinement_weight: 1.0  # BCE loss weight (0 = disabled, 1.0 = recommended)
+  prediction_refinement_topk: 100    # number of top predictions to refine
 
   # Self-attention on o2o cls features — DEAD END (train31/32)
   # Linear attention averages sparse fg into bg noise, hurting fg/bg discrimination.

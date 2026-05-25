@@ -244,6 +244,7 @@ class _RayCastCriterionWrapper:
             pss_head_weight=tcfg.get('pss_head_weight', 0.0),
             gaussian_soft_targets=tcfg.get('gaussian_soft_targets', False),
             gaussian_sigma=tcfg.get('gaussian_sigma', 0.5),
+            prediction_refinement_weight=tcfg.get('prediction_refinement_weight', 0.0),
         )
 
 
@@ -465,6 +466,8 @@ class RayCastTrainer(DetectionTrainer):
         pss_head = bool(tcfg.get('pss_head_weight', 0) > 0) if tcfg else False
         self_attention = bool(tcfg.get('self_attention', False)) if tcfg else False
         cross_scale_attention = bool(tcfg.get('cross_scale_attention', False)) if tcfg else False
+        prediction_refinement = bool(tcfg.get('prediction_refinement_weight', 0) > 0) if tcfg else False
+        prediction_refinement_topk = tcfg.get('prediction_refinement_topk', 100) if tcfg else 100
         cls_channel_scale = tcfg.get('cls_channel_scale', 1.0) if tcfg else 1.0
         cls_channel_min = tcfg.get('cls_channel_min', 0) if tcfg else 0
 
@@ -563,6 +566,26 @@ class RayCastTrainer(DetectionTrainer):
 
                     old_head.one2one_cross_scale_cls_attention = copy.deepcopy(old_head.cross_scale_cls_attention)
                     old_head.cross_scale_cls_attention = None
+
+            # Attach prediction-level self-attention on top-K scored predictions
+            if prediction_refinement and (
+                not hasattr(old_head, 'prediction_refinement_attn')
+                or getattr(old_head, 'prediction_refinement_attn', None) is None
+            ):
+                from raycasted.model.blocks.head import PredictionRefinementAttention
+
+                c3 = max(old_head.cv3[0][-1].in_channels, old_head.nc)
+                old_head.prediction_refinement_attn = PredictionRefinementAttention(
+                    feat_dim=c3,
+                    num_heads=4,
+                    ff_dim=256,
+                )
+                old_head.prediction_refinement_topk = prediction_refinement_topk
+                if old_head._end2end_arg:
+                    import copy
+
+                    old_head.one2one_prediction_refinement_attn = copy.deepcopy(old_head.prediction_refinement_attn)
+                    old_head.prediction_refinement_attn = None
         else:
             ch = _extract_neck_channels(old_head)
             nc = old_head.nc
@@ -587,6 +610,8 @@ class RayCastTrainer(DetectionTrainer):
                 pss_head=pss_head,
                 self_attention=self_attention,
                 cross_scale_attention=cross_scale_attention,
+                prediction_refinement=prediction_refinement,
+                prediction_refinement_topk=prediction_refinement_topk,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):

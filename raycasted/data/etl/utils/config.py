@@ -189,6 +189,15 @@ class TrainingSettings(BaseModel):
     gaussian_soft_targets: bool = False  # enable Gaussian spatial soft targets for o2o cls
     gaussian_sigma: float = 0.5  # spatial Gaussian sigma in normalized coords (0.5 ≈ 128px at 256)
 
+    # Prediction-level self-attention on top-K scored predictions (o2o branch only).
+    # After FCN scores all 5376 anchors, top-K=100 by confidence are selected.
+    # These K predictions (mostly fg) undergo TransformerEncoder self-attention,
+    # producing per-prediction suppression weights. Fundamentally different from
+    # feature-level attention (train31/32/34 dead ends) which operated on 5376
+    # bg-dominated anchor features.
+    prediction_refinement_weight: float = 0.0  # BCE loss weight (0 = disabled, 1.0 = recommended)
+    prediction_refinement_topk: int = 100  # number of top predictions to refine
+
     # Pretrained backbone
     pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
 
