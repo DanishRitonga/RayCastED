@@ -33,9 +33,14 @@ from ultralytics.nn.modules import (
     C3k2,
     Concat,
     Conv,
+    DWConv,
     DWConvTranspose2d,
+    HGBlock,
+    HGStem,
+    RepC3,
 )
 from ultralytics.nn.modules.head import Detect
+from ultralytics.nn.modules.transformer import AIFI
 from ultralytics.utils.ops import make_divisible
 
 from raycasted.model.blocks.aifi import AIFIBlock
@@ -55,11 +60,13 @@ from raycasted.model.blocks.rtdetr_head import RayCastRTDETRDecoder
 BASE_MODULES = frozenset(
     {
         Conv,
+        DWConv,
         C3k2,
         SPPF,
         C2PSA,
         Bottleneck,
         DWConvTranspose2d,
+        RepC3,
         ResoConv,
         ResoConvDS,
         ResoConvDS_Hybrid,
@@ -73,6 +80,7 @@ REPEAT_MODULES = frozenset(
         C3k2,
         C2PSA,
         C3k2_LK,
+        RepC3,
     }
 )
 
@@ -144,8 +152,34 @@ def _handle_rtdetr_decoder(ch_list, f, args, layers):
     return m_, nc + m_.raycast_dim
 
 
+def _handle_hgstem(ch_list, f, args, layers):
+    c1 = _resolve_ch(ch_list, f)
+    cm = args[0]
+    c2 = args[1] if len(args) > 1 else cm
+    return HGStem(c1, cm, c2), c2
+
+
+def _handle_hgblock(ch_list, f, args, layers):
+    c1 = _resolve_ch(ch_list, f)
+    cm = args[0]
+    c2 = args[1] if len(args) > 1 else cm
+    k = args[2] if len(args) > 2 else 3
+    lightconv = args[3] if len(args) > 3 else False
+    shortcut = args[4] if len(args) > 4 else False
+    return HGBlock(c1, cm, c2, k, lightconv=lightconv, shortcut=shortcut), c2
+
+
+def _handle_aifi(ch_list, f, args, layers):
+    c1 = _resolve_ch(ch_list, f)
+    args = [c1, *args]
+    return AIFI(*args), c1
+
+
 _SPECIAL_HANDLERS = {
     AIFIBlock: _handle_aifi_block,
+    AIFI: _handle_aifi,
+    HGStem: _handle_hgstem,
+    HGBlock: _handle_hgblock,
     RayCastRTDETRDecoder: _handle_rtdetr_decoder,
     DWT_LL: _handle_dwt_ll,
     DWT_HF: _handle_dwt_hf,

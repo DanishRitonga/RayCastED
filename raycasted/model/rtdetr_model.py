@@ -16,37 +16,57 @@ from ultralytics.utils.torch_utils import initialize_weights
 from raycasted.model.builder import raycasted_parse_model
 
 
+def _yaml_has_custom_modules(cfg_dict):
+    """Check if YAML uses any RayCastED custom modules."""
+    custom_names = {
+        'ResoConv',
+        'ResoConvDS',
+        'ResoConvDS_Hybrid',
+        'ResoConvHybrid',
+        'C3k2_LK',
+        'DWT_LL',
+        'DWT_HF',
+        'HFResidual',
+        'AIFIBlock',
+        'RayCastRTDETRDecoder',
+        'RayCastDetect',
+    }
+    for section in ('backbone', 'head'):
+        for layer in cfg_dict.get(section, []):
+            if len(layer) > 2 and layer[2].__name__ if hasattr(layer[2], '__name__') else str(layer[2]) in custom_names:
+                return True
+    return False
+
+
 class RayCastRTDETRDetectionModel(RTDETRDetectionModel):
     """RT-DETR Detection Model with ray polygon output.
 
-    Uses raycasted_parse_model for model construction (supports ResoConv,
-    C3k2_LK, etc.) and RayCastRTDETRDetectionLoss for training.
+    Uses raycasted_parse_model for YAMLs with custom modules (ResoConv, etc.)
+    and standard ultralytics parse_model for stock RT-DETR YAMLs (HGNetV2, etc.).
     """
 
     def __init__(self, cfg='yolo26s-rtdetr-p234.yaml', ch=3, nc=None, verbose=True):
         from ultralytics.nn.tasks import yaml_model_load
         from ultralytics.utils import LOGGER
 
-        # BaseModel.__init__ only — skip DetectionModel.__init__ (uses
-        # ultralytics parse_model, not our custom builder)
+        yaml_dict = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
+        yaml_dict['channels'] = ch
+        if nc and nc != yaml_dict['nc']:
+            LOGGER.info(f'Overriding model.yaml nc={yaml_dict["nc"]} with nc={nc}')
+            yaml_dict['nc'] = nc
+
+        # BaseModel.__init__ only — skip DetectionModel.__init__
         super(DetectionModel, self).__init__()
 
-        self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
-        self.yaml['channels'] = ch
-        if nc and nc != self.yaml['nc']:
-            LOGGER.info(f'Overriding model.yaml nc={self.yaml["nc"]} with nc={nc}')
-            self.yaml['nc'] = nc
-
+        self.yaml = yaml_dict
         self.model, self.save = raycasted_parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)
         self.names = {i: f'{i}' for i in range(self.yaml['nc'])}
         self.inplace = self.yaml.get('inplace', True)
         self.nc = self.yaml['nc']
 
-        # Stride computation for RT-DETR — the decoder doesn't use strides
-        # the same way as Detect heads, but we need them for data pipeline.
+        # Stride — RT-DETR decoder doesn't use strides like Detect heads
         m = self.model[-1]
         if hasattr(m, 'stride'):
-            # RayCastRTDETRDecoder inherits stride from RTDETRDecoder
             s = 256
             self.model.eval()
             m.training = True

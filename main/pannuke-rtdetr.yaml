@@ -1,7 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"
-  model: "raycasted/cfg/yolo26s-rtdetr-p234.yaml"
+  model: "raycasted/cfg/rtdetr-l-raycast.yaml"
   n_rays: 64
   max_size: 256
   crop_size: 256
