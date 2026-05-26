@@ -52,4 +52,4 @@ head:
 
   # RayCast RT-DETR Decoder: P3, P4, P5
   # Args: [nc, hd, nq, ndp, nh, ndl, d_ffn, dropout, nd, n_rays]
-  - [[21, 24, 27], 1, RayCastRTDETRDecoder, [5, 256, 300, 4, 8, 6, 1024, 0.0, 0, 64]]
+  - [[21, 24, 27], 1, RayCastRTDETRDecoder, [5, 256, 100, 4, 8, 6, 1024, 0.0, 0, 64]]
