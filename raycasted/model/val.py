@@ -19,6 +19,7 @@ from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 # Backward compat constant (tests import this). At runtime, use self.raycast_dim.
 from raycasted.data.etl.utils import constants as _val_const
 from raycasted.model.blocks.head import RayCastDetect
+from raycasted.model.blocks.rtdetr_head import RayCastRTDETRDecoder
 
 RAYCAST_DIM = 2 + _val_const.N_RAYS
 
@@ -187,7 +188,7 @@ class RayCastValidator(DetectionValidator):
         # During training: model is DetectionModel, model.model is nn.Sequential
         # During final_eval: model.model may be DetectionModel again (unwrapped)
         head = model
-        while hasattr(head, 'model') and not isinstance(head, RayCastDetect):
+        while hasattr(head, 'model') and not isinstance(head, (RayCastDetect, RayCastRTDETRDecoder)):
             child = head.model
             if isinstance(child, (list, torch.nn.Sequential)):
                 head = child[-1]
@@ -200,27 +201,47 @@ class RayCastValidator(DetectionValidator):
         """Skip confusion matrix plotting — incompatible with raycast polygon data."""
 
     def postprocess(self, preds):
-        """Extract polygon predictions from end-to-end model output (no NMS).
+        """Extract polygon predictions from model output (no NMS).
 
-        Args:
-            preds: Raw model output. preds[0] is [B, max_det, 36] from head.postprocess.
+        Handles two output formats:
+          - Detect head: [B, max_det, raycast_dim+2] where col raycast_dim=max_conf, raycast_dim+1=cls
+          - RTDETRDecoder: [B, num_queries, raycast_dim+nc] where cols raycast_dim: are per-class scores
 
         Returns:
-            list[dict] with keys 'bboxes' [N,34], 'conf' [N], 'cls' [N].
+            list[dict] with keys 'bboxes' [N,raycast_dim], 'conf' [N], 'cls' [N].
         """
         pred_tensor = preds[0] if isinstance(preds, (list, tuple)) else preds
+        n_channels = pred_tensor.shape[-1]
 
-        outputs = []
-        for i in range(pred_tensor.shape[0]):
-            det = pred_tensor[i]  # [max_det, raycast_dim+2]
-            det = det[det[:, self.raycast_dim] > self.args.conf]
-            outputs.append(
-                {
-                    'bboxes': det[:, : self.raycast_dim],  # [N, raycast_dim] cx, cy, d_1..d_n
-                    'conf': det[:, self.raycast_dim],  # [N]
-                    'cls': det[:, self.raycast_dim + 1],  # [N]
-                }
-            )
+        if n_channels == self.raycast_dim + 2:
+            # Detect head format: max_conf + cls_idx
+            conf_idx = self.raycast_dim
+            cls_idx = self.raycast_dim + 1
+            outputs = []
+            for i in range(pred_tensor.shape[0]):
+                det = pred_tensor[i]
+                mask = det[:, conf_idx] > self.args.conf
+                outputs.append(
+                    {
+                        'bboxes': det[mask, : self.raycast_dim],
+                        'conf': det[mask, conf_idx],
+                        'cls': det[mask, cls_idx],
+                    }
+                )
+        else:
+            # RTDETRDecoder format: per-class scores
+            cls_scores = pred_tensor[..., self.raycast_dim :]
+            conf, cls = cls_scores.max(dim=-1)
+            outputs = []
+            for i in range(pred_tensor.shape[0]):
+                mask = conf[i] > self.args.conf
+                outputs.append(
+                    {
+                        'bboxes': pred_tensor[i, mask, : self.raycast_dim],
+                        'conf': conf[i, mask],
+                        'cls': cls[i, mask],
+                    }
+                )
         return outputs
 
     def _prepare_batch(self, si, batch):
