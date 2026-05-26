@@ -973,6 +973,7 @@ class RayCastE2ELoss(E2ELoss):
         hungarian_cost_class: float = 1.0,
         hungarian_cost_centroid: float = 1.0,
         hungarian_cost_ray: float = 1.0,
+        hungarian_cost_inner: float = 9999.0,
         hungarian_cls_only: bool = True,
         steps_per_epoch: int = 0,
         dn_num: int = 0,
@@ -1189,6 +1190,7 @@ class RayCastE2ELoss(E2ELoss):
                 cost_class=hungarian_cost_class,
                 cost_centroid=hungarian_cost_centroid,
                 cost_ray=hungarian_cost_ray,
+                cost_inner=hungarian_cost_inner,
             )
 
         # Smooth loss (curvature): reverse anneal — starts at 0, ramps up to peak, then holds.

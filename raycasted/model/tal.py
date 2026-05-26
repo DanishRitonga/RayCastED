@@ -307,8 +307,17 @@ class HungarianRayCastAssigner(RayCastAssigner):
     Solves with scipy.linear_sum_assignment for globally optimal 1:1 matching.
     Uses its own cost matrix (not shared with dual-TAL assigner).
 
-    Inherits select_candidates_in_gts from RayCastAssigner. Overrides _forward
-    to replace the TAL selection mechanism with Hungarian matching.
+    cost_inner (LSP-DETR-style): massively penalises anchors whose predicted
+    centroid falls outside the GT ray polygon.  This is the key innovation
+    from LSP-DETR (arxiv 2601.03163) — without it, Hungarian matches GTs to
+    spatially distant anchors because the cost function has no spatial prior.
+
+    Point-in-polygon is computed geometrically (no rasterisation):
+      1. Compute angle θ from GT centroid to anchor predicted centroid
+      2. Interpolate GT ray distance at θ
+      3. If dist(centroid→anchor) ≤ ray_dist(θ) → inside (cost=-1)
+      4. Otherwise → outside (cost=0)
+      5. Multiplied by cost_inner weight (default 9999)
     """
 
     def __init__(
@@ -316,6 +325,7 @@ class HungarianRayCastAssigner(RayCastAssigner):
         cost_class: float = 1.0,
         cost_centroid: float = 1.0,
         cost_ray: float = 1.0,
+        cost_inner: float = 9999.0,
         **kwargs,
     ):
         """Initialize HungarianRayCastAssigner.
@@ -324,6 +334,10 @@ class HungarianRayCastAssigner(RayCastAssigner):
             cost_class: Weight for focal classification cost.
             cost_centroid: Weight for L2 centroid distance cost.
             cost_ray: Weight for log-space L1 ray cost.
+            cost_inner: Weight for inside-polygon cost (LSP-DETR default 9999).
+                Anchors inside GT polygon get cost -1×cost_inner (preferred).
+                Anchors outside get cost 0 (no inner bonus, effectively
+                penalised by missing the -9999 benefit).
             **kwargs: Passed to parent RayCastAssigner (topk, num_classes
                 etc.).
         """
@@ -331,11 +345,66 @@ class HungarianRayCastAssigner(RayCastAssigner):
         self.cost_class = cost_class
         self.cost_centroid = cost_centroid
         self.cost_ray = cost_ray
+        self.cost_inner = cost_inner
+
+    def _compute_cost_inner(self, pd_xy, gt_xy, gt_rays):
+        """Compute inside-polygon cost using ray-based point-in-polygon test.
+
+        Memory-efficient: no rasterisation. For each (anchor, GT) pair:
+          1. Compute angle θ from GT centroid to anchor predicted centroid
+          2. Interpolate GT ray distance at θ
+          3. If dist ≤ ray_dist(θ) → inside (cost = -1)
+          4. Otherwise → outside (cost = 0)
+
+        Multiplied by cost_inner weight in _compute_cost_matrix.
+
+        Args:
+            pd_xy: (na, 2) predicted centroids in normalised coords.
+            gt_xy: (n_valid_gt, 2) GT centroids in normalised coords.
+            gt_rays: (n_valid_gt, N_RAYS) GT ray distances in normalised coords.
+
+        Returns:
+            cost_inner: (na, n_valid_gt) with -1.0 for inside, 0.0 for outside.
+        """
+        n_rays = gt_rays.shape[-1]
+        angular_spacing = 2.0 * np.pi / n_rays
+        device = pd_xy.device
+
+        # (na, n_valid_gt, 2) displacement vectors
+        dx = pd_xy[:, 0:1] - gt_xy[:, 0:1].T  # (na, n_gt)
+        dy = pd_xy[:, 1:2] - gt_xy[:, 1:2].T  # (na, n_gt)
+
+        # Distance from GT centroid to each predicted centroid
+        dist = (dx * dx + dy * dy).sqrt().clamp(min=1e-8)  # (na, n_gt)
+
+        # Angle from GT centroid to predicted centroid (our convention: θ=0 → +X)
+        angles = torch.atan2(dy, dx)  # (na, n_gt), range [-π, π]
+
+        # Convert angle to fractional ray index: index = angle / angular_spacing
+        # atan2 gives [-π, π], shift to [0, 2π] to match ray convention
+        frac_idx = (angles % (2.0 * np.pi)) / angular_spacing  # (na, n_gt)
+
+        # Bilinear interpolation of GT ray distances
+        idx_lo = frac_idx.floor().long() % n_rays  # (na, n_gt)
+        idx_hi = (idx_lo + 1) % n_rays  # (na, n_gt)
+        alpha = frac_idx - frac_idx.floor()  # (na, n_gt)
+
+        # gt_rays: (n_gt, N_RAYS) → gather ray values at lo/hi indices
+        ray_lo = gt_rays.T[idx_lo]  # (na, n_gt)
+        ray_hi = gt_rays.T[idx_hi]  # (na, n_gt)
+        ray_interp = ray_lo * (1.0 - alpha) + ray_hi * alpha  # (na, n_gt)
+
+        # Point-in-polygon: inside if dist ≤ interpolated ray distance
+        inside = dist <= ray_interp + 1e-6  # (na, n_gt), small eps for boundary
+
+        cost_inner = torch.where(inside, torch.tensor(-1.0, device=device), torch.tensor(0.0, device=device))
+        return cost_inner
 
     def _compute_cost_matrix(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt_bool):
         """Compute unified cost matrix for Hungarian assignment.
 
         cost = w_cls * focal_cls_cost + w_xy * L2_centroid + w_ray * log_l1_rays
+             + w_inner * cost_inner
         """
         bs = pd_scores.shape[0]
         n_max_boxes = pd_scores.shape[1]
@@ -372,6 +441,14 @@ class HungarianRayCastAssigner(RayCastAssigner):
             cost_ray = (log_pd - log_gt).abs().mean(dim=-1)
 
             total = self.cost_class * cost_cls + self.cost_centroid * cost_xy + self.cost_ray * cost_ray
+
+            # Inside-polygon cost (LSP-DETR-style): anchors inside GT polygon
+            # get -cost_inner, anchors outside get 0.  With cost_inner=9999,
+            # only spatially-valid anchors can win the Hungarian matching.
+            if self.cost_inner > 0:
+                cost_inner = self._compute_cost_inner(pd_xy, gt_xy, gt_rays)
+                total = total + self.cost_inner * cost_inner
+
             total = total.nan_to_num(nan=1e8, posinf=1e8, neginf=-1e8)
 
             cost[b, valid_gt_idx[:, None], cand_idx[None, :]] = total.T

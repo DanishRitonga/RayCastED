@@ -120,6 +120,7 @@ class TrainingSettings(BaseModel):
     hungarian_cost_class: float = 1.0
     hungarian_cost_centroid: float = 1.0
     hungarian_cost_ray: float = 1.0
+    hungarian_cost_inner: float = 9999.0  # LSP-DETR-style inside-polygon penalty (0=disabled)
     hungarian_cls_only: bool = True
 
     # Weighted sampling
