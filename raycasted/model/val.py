@@ -162,6 +162,11 @@ class RayCastValidator(DetectionValidator):
         self.n_centroid = len(self.centroid_thresholds)
         self.raycast_dim = 2 + _val_const.N_RAYS  # default; overwritten in init_metrics from model head
 
+    def get_desc(self):
+        """Return a formatted header string for polygon + centroid metrics."""
+        n = len(self.metrics.keys)
+        return ("%22s" + "%11s" * 2 + "%11s" * n) % ("Class", "Images", "Instances", *self.metrics.keys)
+
     def preprocess(self, batch):
         """Move batch to device without /255 — images already normalised by RayCastTileDataset.
 
