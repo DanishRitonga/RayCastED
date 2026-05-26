@@ -38,7 +38,6 @@ global_settings:
     "Uterus": 18
 
 training:
-  epochs: 400
   patience: 100
 
   # Learning rate
