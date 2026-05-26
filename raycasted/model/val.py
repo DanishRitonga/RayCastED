@@ -164,8 +164,11 @@ class RayCastValidator(DetectionValidator):
 
     def get_desc(self):
         """Return a formatted header string for polygon + centroid metrics."""
-        n = len(self.metrics.keys)
-        return ("%22s" + "%11s" * 2 + "%11s" * n) % ("Class", "Images", "Instances", *self.metrics.keys)
+        return ("%22s" + "%11s" * 10) % (
+            "Class", "Images", "Instances",
+            "Poly(P", "R", "mAP50", "mAP50-95)",
+            "Cent(P", "R", "mAP50", "mAP50-95)",
+        )
 
     def preprocess(self, batch):
         """Move batch to device without /255 — images already normalised by RayCastTileDataset.
