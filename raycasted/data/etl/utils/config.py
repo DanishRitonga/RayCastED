@@ -120,6 +120,7 @@ class TrainingSettings(BaseModel):
     hungarian_cost_class: float = 1.0
     hungarian_cost_centroid: float = 1.0
     hungarian_cost_ray: float = 1.0
+    hungarian_cls_only: bool = True
 
     # Weighted sampling
     weighted_sampling: bool = False

@@ -71,6 +71,7 @@ training:
   hungarian_cost_class: 1.0
   hungarian_cost_centroid: 1.0
   hungarian_cost_ray: 1.0
+  hungarian_cls_only: true          # blend only cls from Hungarian (regression from TAL)
 
   # Auxiliary XY head: bypasses 4-layer head stack to give backbone direct xy gradient
   # because the head attenuates xy gradients through 4 Conv layers.

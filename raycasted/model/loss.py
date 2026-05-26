@@ -973,6 +973,7 @@ class RayCastE2ELoss(E2ELoss):
         hungarian_cost_class: float = 1.0,
         hungarian_cost_centroid: float = 1.0,
         hungarian_cost_ray: float = 1.0,
+        hungarian_cls_only: bool = True,
         steps_per_epoch: int = 0,
         dn_num: int = 0,
         dn_centroid_noise: float = 0.0,
@@ -1130,6 +1131,7 @@ class RayCastE2ELoss(E2ELoss):
                 hungarian_phase2_start,
                 threshold,
             )
+        self._hungarian_cls_only = hungarian_cls_only
         self._hungarian_phase2_start = hungarian_phase2_start
         self._hungarian_max_weight = hungarian_max_weight
         self._hungarian_ramp_epochs = hungarian_ramp_epochs
@@ -1385,17 +1387,24 @@ class RayCastE2ELoss(E2ELoss):
         hw = self._hungarian_weight
         if self.hungarian_assigner is not None and hw > 0:
             loss_one2one_hun = self._compute_hungarian_o2o_loss(one2one_preds, batch)
-            tal_w = 1.0 - hw
-            loss_one2one = loss_one2one_tal * tal_w + loss_one2one_hun[0] * hw
-            loss_detach = loss_detach_o2o * tal_w + loss_one2one_hun[1] * hw
+            if self._hungarian_cls_only:
+                loss_one2one = loss_one2one_tal.clone()
+                loss_one2one[1] = loss_one2one_tal[1] * (1 - hw) + loss_one2one_hun[0][1] * hw
+                loss_detach = loss_detach_o2o.clone()
+                loss_detach[1] = loss_detach_o2o[1] * (1 - hw) + loss_one2one_hun[1][1] * hw
+            else:
+                tal_w = 1.0 - hw
+                loss_one2one = loss_one2one_tal * tal_w + loss_one2one_hun[0] * hw
+                loss_detach = loss_detach_o2o * tal_w + loss_one2one_hun[1] * hw
 
             _o2m_step = getattr(self.one2many, '_diag_step', 0)
             if _o2m_step % 100 == 0:
                 _hun_fg = loss_one2one_hun[2][0].sum().item() if loss_one2one_hun[2][0].sum() > 0 else 0
                 LOGGER.info(
-                    '\nDIAG o2o_hun step=%d | hw=%.3f | fg=%d | raw: %s',
+                    '\nDIAG o2o_hun step=%d | hw=%.3f | cls_only=%s | fg=%d | raw: %s',
                     _o2m_step,
                     hw,
+                    self._hungarian_cls_only,
                     _hun_fg,
                     ' '.join(f'{v:.4f}' for v in loss_one2one_hun[0].detach().tolist()),
                 )
