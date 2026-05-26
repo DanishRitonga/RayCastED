@@ -952,6 +952,7 @@ class RayCastE2ELoss(E2ELoss):
         class_weights: torch.Tensor | None = None,
         o2o_topk2_start: int = 1,
         o2o_topk2_anneal_epoch: int = 0,
+        o2o_topk2_anneal_end: float = 0.5,
         sigma_anneal_start: float = 0.0,
         sigma_anneal_end: float = 0.0,
         sigma_anneal_epoch: int = 0,
@@ -1097,6 +1098,7 @@ class RayCastE2ELoss(E2ELoss):
         # positives early in training.
         self._o2o_topk2_start = o2o_topk2_start
         self._o2o_topk2_anneal_epoch = o2o_topk2_anneal_epoch
+        self._o2o_topk2_anneal_end = o2o_topk2_anneal_end
 
         # Validate E2E architecture integrity
         assert self.one2one.assigner.topk2 >= 1, (
@@ -1281,7 +1283,8 @@ class RayCastE2ELoss(E2ELoss):
             if current_epoch < self._o2o_topk2_anneal_epoch:
                 new_topk2 = self._o2o_topk2_start
             else:
-                remaining = max(self._max_epochs - self._o2o_topk2_anneal_epoch, 1)
+                anneal_end_epoch = int(self._max_epochs * self._o2o_topk2_anneal_end)
+                remaining = max(anneal_end_epoch - self._o2o_topk2_anneal_epoch, 1)
                 progress = min((current_epoch - self._o2o_topk2_anneal_epoch) / remaining, 1.0)
                 new_topk2 = max(int(round(self._o2o_topk2_start - progress * (self._o2o_topk2_start - 1))), 1)
             self.one2one.assigner.topk2 = new_topk2

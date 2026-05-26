@@ -100,6 +100,7 @@ class TrainingSettings(BaseModel):
     # o2o topk2 annealing (one-to-few → strict 1:1)
     o2o_topk2_start: int = 1
     o2o_topk2_anneal_epoch: int = 0
+    o2o_topk2_anneal_end: float = 0.5  # fraction of max_epochs where topk2 reaches 1 (0.5 = 50%)
 
     # Sigma annealing: broad→tight assignment over training (DCFL, CVPR 2023)
     sigma_anneal_start: float = 0.0  # initial radius_scale (0 = use assigner_radius_scale)

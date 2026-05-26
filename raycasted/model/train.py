@@ -217,6 +217,7 @@ class _RayCastCriterionWrapper:
             class_weights=self._build_class_weights(tcfg),
             o2o_topk2_start=tcfg.get('o2o_topk2_start', 1),
             o2o_topk2_anneal_epoch=tcfg.get('o2o_topk2_anneal_epoch', 0),
+            o2o_topk2_anneal_end=tcfg.get('o2o_topk2_anneal_end', 0.5),
             sigma_anneal_start=tcfg.get('sigma_anneal_start', 0.0),
             sigma_anneal_end=tcfg.get('sigma_anneal_end', 0.0),
             sigma_anneal_epoch=tcfg.get('sigma_anneal_epoch', 0),
@@ -464,12 +465,14 @@ class RayCastTrainer(DetectionTrainer):
         # use the RT-DETR model class (different loss, no E2E head patching)
         is_rtdetr = _is_rtdetr_yaml(cfg)
 
+        _const.configure_rays(self.training_config.get('n_rays', 64) if self.training_config else 64)
+
         if is_rtdetr:
             from raycasted.model.rtdetr_model import RayCastRTDETRDetectionModel
 
             model = RayCastRTDETRDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
-            _const.configure_rays(self.training_config.get('n_rays', 64) if self.training_config else 64)
-            return model
+        else:
+            model = RayCastDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
 
         # On resume, `weights` is the checkpoint model object (from load_checkpoint).
         # RayCastDetectionModel.__init__ creates a fresh model from YAML, losing
