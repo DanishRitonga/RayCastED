@@ -64,14 +64,14 @@ training:
   # 2-phase Hungarian curriculum: TAL-only → Hungarian ramp
   # Phase 1 (0→400): standard dual-TAL with topk2=7→3 (rich gradient)
   # Phase 2 (400+): Hungarian o2o ramps 0→0.9 (topk2 already annealed to ~3)
-  hungarian_phase2_start: 1           # TESTING: start Hungarian from epoch 1 (normally 300)
+  hungarian_phase2_start: 300         # start after topk2 has mostly annealed (3→~1.5)
   hungarian_max_weight: 0.9
   hungarian_ramp_epochs: 0            # 0 = auto (ramp over remaining epochs)
   phase2_freeze_epochs: 0         # backbone freeze at phase2 start (0=disabled)
   hungarian_cost_class: 1.0
   hungarian_cost_centroid: 1.0
   hungarian_cost_ray: 1.0
-  hungarian_cost_inner: 9999.0     # LSP-DETR-style inside-polygon penalty: anchors outside GT polygon get +9999 cost
+  hungarian_cost_inner: 0.0        # LSP-DETR-style inside-polygon penalty (0=disabled, 9999=LSP-DETR default)
   hungarian_cls_only: true          # blend only cls from Hungarian (regression from TAL)
 
   # Auxiliary XY head: bypasses 4-layer head stack to give backbone direct xy gradient
