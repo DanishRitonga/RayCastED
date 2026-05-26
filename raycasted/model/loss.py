@@ -947,6 +947,7 @@ class RayCastE2ELoss(E2ELoss):
         focal_gamma_o2o: float | None = None,
         focal_alpha_o2o: float | None = None,
         bg_fg_ratio_o2o: int | None = None,
+        bg_fg_ratio_o2o_curriculum_epoch: int = 0,
         bg_cls_decay_o2o: float | None = None,
         fg_cls_boost_o2o: float | None = None,
         class_weights: torch.Tensor | None = None,
@@ -1044,6 +1045,8 @@ class RayCastE2ELoss(E2ELoss):
             self.one2one.focal_alpha = focal_alpha_o2o
         if bg_fg_ratio_o2o is not None:
             self.one2one.bg_fg_ratio = bg_fg_ratio_o2o
+        self._bg_fg_ratio_o2o_target = bg_fg_ratio_o2o if bg_fg_ratio_o2o is not None else 0
+        self._bg_fg_ratio_o2o_curriculum_epoch = bg_fg_ratio_o2o_curriculum_epoch
         if bg_cls_decay_o2o is not None:
             self.one2one.bg_cls_decay = bg_cls_decay_o2o
         if fg_cls_boost_o2o is not None:
@@ -1305,6 +1308,20 @@ class RayCastE2ELoss(E2ELoss):
                 )
             self.one2many.assigner.radius_scale = new_radius_scale
             self.one2one.assigner.radius_scale = new_radius_scale
+
+        # bg_fg_ratio_o2o curriculum: start at 0 (rich fg gradient), ramp to
+        # target after curriculum_epoch (add bg gradient to improve fg/bg
+        # discrimination). Addresses recall decline: bg_fg_ratio_o2o=0 gives
+        # rich fg signal early but cls head becomes too conservative later.
+        if self._bg_fg_ratio_o2o_target > 0 and self._bg_fg_ratio_o2o_curriculum_epoch > 0:
+            if current_epoch < self._bg_fg_ratio_o2o_curriculum_epoch:
+                self.one2one.bg_fg_ratio = 0
+            else:
+                remaining = max(self._max_epochs - self._bg_fg_ratio_o2o_curriculum_epoch, 1)
+                progress = min((current_epoch - self._bg_fg_ratio_o2o_curriculum_epoch) / remaining, 1.0)
+                self.one2one.bg_fg_ratio = int(
+                    round(progress * self._bg_fg_ratio_o2o_target)
+                )
 
         # Hungarian blending: 2-phase ramp
         # Phase 1 (0→p2): hungarian_weight = 0 (pure TAL)

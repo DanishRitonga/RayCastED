@@ -77,6 +77,7 @@ class TrainingSettings(BaseModel):
     focal_gamma_o2o: float | None = None
     focal_alpha_o2o: float | None = None
     bg_fg_ratio_o2o: int | None = None
+    bg_fg_ratio_o2o_curriculum_epoch: int = 0  # epoch to start ramping bg_fg_ratio_o2o from 0→bg_fg_ratio_o2o
     bg_cls_decay_o2o: float | None = None  # per-branch bg suppression for o2o
     fg_cls_boost_o2o: float | None = None  # per-branch quality re-weighting for o2o
     fg_cls_quality_scale_o2o: float | None = None  # per-branch multiplicative quality for o2o

@@ -212,6 +212,7 @@ class _RayCastCriterionWrapper:
             focal_gamma_o2o=tcfg.get('focal_gamma_o2o', None),
             focal_alpha_o2o=tcfg.get('focal_alpha_o2o', None),
             bg_fg_ratio_o2o=tcfg.get('bg_fg_ratio_o2o', None),
+            bg_fg_ratio_o2o_curriculum_epoch=tcfg.get('bg_fg_ratio_o2o_curriculum_epoch', 0),
             bg_cls_decay_o2o=tcfg.get('bg_cls_decay_o2o', None),
             fg_cls_boost_o2o=tcfg.get('fg_cls_boost_o2o', None),
             class_weights=self._build_class_weights(tcfg),

@@ -105,7 +105,8 @@ training:
   # for NMS-free inference. These override the base values above for o2o only.
   focal_gamma_o2o: 2.0        # Focal loss — suppresses easy bg, keeps hard negatives
   focal_alpha_o2o: 0.75       # Fg weight — match o2m (train13 proved 0.75 works)
-  bg_fg_ratio_o2o: 0          # No bg subsampling — focal loss handles imbalance, 98.7% exclusion was starving cls head
+  bg_fg_ratio_o2o: 3             # curriculum target: ramp from 0→3 after curriculum_epoch
+  bg_fg_ratio_o2o_curriculum_epoch: 220  # epoch to start ramping (recall peaks ~180, declines after)
   bg_cls_decay_o2o: 1.0       # Full bg weight — don't starve bg suppression (0.5 over-corrected)
   fg_cls_boost_o2o: null       # Additive boost disabled for o2o
   fg_cls_quality_scale_o2o: null  # Multiplicative disabled — was starving fg (TAL quality 0.2-0.5)
