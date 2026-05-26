@@ -776,8 +776,8 @@ class RayCastDetect(Detect):
                 adjusted = scale_spatial[si] * cw
             else:
                 cw_down = F.interpolate(
-                    cw.unsqueeze(2), size=spatial_shapes[si], mode='bilinear', align_corners=False
-                ).squeeze(2)
+                    cw, size=spatial_shapes[si], mode='bilinear', align_corners=False
+                )
                 adjusted = scale_spatial[si] * cw_down
 
             if si == 0:
