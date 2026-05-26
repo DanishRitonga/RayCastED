@@ -152,11 +152,13 @@ When adding a new config parameter:
 
 37. **Gaussian spatial soft targets collapse fg/bg gap (train35)**: `gaussian_soft_targets=true` with `gaussian_sigma=0.1` gives fg anchors targets exp(-d²/2σ²) instead of 1.0. Same fundamental problem as train25/26/27 piou-based soft targets — spreading fg confidence across 0.3-0.8 instead of sharp 1.0 peak collapses fg/bg gap (2.5x→1.5x). Config: `gaussian_soft_targets` (default false), `gaussian_sigma` (default 0.5). Code exists but should stay disabled.
 
-38. **PSS head bias must be 2.0, not 0 (train35)**: PSS (Positional Suppression Structure) head predicts per-pixel suppression weight. At inference: `final_conf = cls × sigmoid(pss)`. With bias=0, sigmoid(0)=0.5 halves ALL confidences from step 1, killing recall before the head learns. With bias=2.0, sigmoid(2)≈0.88 gives near-identity at start. Config: `pss_head_weight` (default 0.0, >0 enables). Implementation: `nn.Conv2d(c, 1, 1)` per scale, zero-init weight, bias=2.0, deepcopy for o2o. Loss: BCE on fg anchors (target=1.0 for best anchor per GT, 0.0 for others). **DEAD END**: train36 with stop-gradient showed PSS loss stuck at ~0.627 (barely below random). Stop-gradient prevents cls degradation but PSS head can't learn from frozen features — chicken-and-egg problem.
+38. **Higher o2o topk2 severely regresses (train38)**: `o2o_topk2_start=7` (was 3) gives mAP50=0.25 vs train23's 0.517. topk2=7 turns o2o into a weak o2m — diluting 1:1 exclusivity. More fg assignments = less discriminative cls head. topk2=3→1 is near optimal; FCN o2o assignment tuning is exhausted.
 
-39. **Root cause across ALL attention/feature-enrichment attempts**: FCN lacks selective access to enriched features. AIFI (train34), self-attention (train31/32), and all feature-level approaches broadcast globally-smoothed features to all 5376 anchors where 98.7% are bg. This washes out local cls discrimination. Only prediction-level interaction (after scoring, on top-K=300 mostly-fg predictions) can create useful competition.
+39. **PSS head bias must be 2.0, not 0 (train35)**: PSS (Positional Suppression Structure) head predicts per-pixel suppression weight. At inference: `final_conf = cls × sigmoid(pss)`. With bias=0, sigmoid(0)=0.5 halves ALL confidences from step 1, killing recall before the head learns. With bias=2.0, sigmoid(2)≈0.88 gives near-identity at start. Config: `pss_head_weight` (default 0.0, >0 enables). Implementation: `nn.Conv2d(c, 1, 1)` per scale, zero-init weight, bias=2.0, deepcopy for o2o. Loss: BCE on fg anchors (target=1.0 for best anchor per GT, 0.0 for others). **DEAD END**: train36 with stop-gradient showed PSS loss stuck at ~0.627 (barely below random). Stop-gradient prevents cls degradation but PSS head can't learn from frozen features — chicken-and-egg problem.
 
-40. **PredictionRefinementAttention** — self-attention on top-K scored predictions (o2o branch only). After FCN scores all 5376 anchors, top-K=100 by confidence are selected. These K predictions (mostly fg) undergo 1-layer TransformerEncoder self-attention with sincos PE, producing per-prediction suppression weights. At inference: `final_conf = cls × sigmoid(refine)`. ~133K params. Trained with BCE: target=1 for best anchor per GT, 0 for duplicates. Fundamentally different from train31/32/34 because 5376→100 selection happens BEFORE interaction. Config: `prediction_refinement_weight` (0=disabled, 1.0=recommended), `prediction_refinement_topk` (default 100). Implementation: `PredictionRefinementAttention` in head.py, deepcopy for o2o as `one2one_prediction_refinement_attn`. Bias=2.0 (sigmoid(2)≈0.88 → near-identity at start).
+40. **Root cause across ALL attention/feature-enrichment attempts**: FCN lacks selective access to enriched features. AIFI (train34), self-attention (train31/32), and all feature-level approaches broadcast globally-smoothed features to all 5376 anchors where 98.7% are bg. This washes out local cls discrimination. Only prediction-level interaction (after scoring, on top-K=300 mostly-fg predictions) can create useful competition.
+
+41. **PredictionRefinementAttention** — self-attention on top-K scored predictions (o2o branch only). After FCN scores all 5376 anchors, top-K=100 by confidence are selected. These K predictions (mostly fg) undergo 1-layer TransformerEncoder self-attention with sincos PE, producing per-prediction suppression weights. At inference: `final_conf = cls × sigmoid(refine)`. ~133K params. Trained with BCE: target=1 for best anchor per GT, 0 for duplicates. Fundamentally different from train31/32/34 because 5376→100 selection happens BEFORE interaction. Config: `prediction_refinement_weight` (0=disabled, 1.0=recommended), `prediction_refinement_topk` (default 100). Implementation: `PredictionRefinementAttention` in head.py, deepcopy for o2o as `one2one_prediction_refinement_attn`. Bias=2.0 (sigmoid(2)≈0.88 → near-identity at start).
 
 ### Eval Script
 
@@ -260,8 +262,12 @@ Val: mAP50=0.424, mAP50-95=0.346, prec=0.801, recall=0.053
 ### Train36 Results (PSS head + stop-gradient, still running)
 PSS loss stuck at ~0.627 (barely below random 0.693), mAP50 ~0.370. Stop-gradient prevents cls degradation but PSS head can't learn from frozen features — chicken-and-egg problem. PSS head is a dead end (both with and without stop-gradient).
 
+### Train38 Results (o2o_topk2_start=7, early stopped epoch 216)
+Val: mAP50=0.25
+**Diagnosis: Higher o2o topk2 severely regresses.** topk2=7 turns o2o into a weak o2m — diluting 1:1 exclusivity that makes o2o effective. More fg assignments = less discriminative cls head. topk2=3→1 is near optimal; FCN o2o assignment tuning is exhausted.
+
 ### Pending Experiments
-- Prediction-level self-attention on top-K predictions — IMPLEMENTED, ready for train37
+- RT-DETR + RayCast — IMPLEMENTED, smoke tested, NOT trained
 
 ## Testing
 

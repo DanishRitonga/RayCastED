@@ -198,6 +198,20 @@ class TrainingSettings(BaseModel):
     prediction_refinement_weight: float = 0.0  # BCE loss weight (0 = disabled, 1.0 = recommended)
     prediction_refinement_topk: int = 100  # number of top predictions to refine
 
+    # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band for overlaps.
+    # loss = max(r_gt*(1-eps) - r_pred, 0) + max(r_pred - r_gt*(1+eps), 0)
+    # Zero if prediction falls within [r_gt*(1-eps), r_gt*(1+eps)].
+    # r_max extends to infinity in overlap regions (natural overlap handling).
+    # Supplements pIoU (kept for assignment metric). 0 = disabled.
+    range_l1_weight: float = 0.0
+    range_l1_eps: float = 0.1  # tolerance fraction (0.1 = ±10% of r_gt)
+
+    # Inter-scale competition: softmax across scales to suppress cross-scale duplicates.
+    # Upsamples P3/P4 cls to P2 resolution, stacks, softmax across scale dim,
+    # gathers regression from winning scale. Addresses multi-scale duplicates.
+    inter_scale_competition: bool = False
+    inter_scale_temperature: float = 1.0  # softmax temperature (lower = sharper competition)
+
     # Pretrained backbone
     pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
 

@@ -145,6 +145,20 @@ training:
   prediction_refinement_weight: 0.0  # disabled for topk2 ablation (train38)
   prediction_refinement_topk: 100    # number of top predictions to refine
 
+  # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band for overlaps.
+  # loss = max(r_gt*(1-eps) - r_pred, 0) + max(r_pred - r_gt*(1+eps), 0)
+  # Zero if prediction falls within [r_gt*(1-eps), r_gt*(1+eps)].
+  # Supplements pIoU (kept for assignment metric). 0 = disabled.
+  range_l1_weight: 0.0              # weight for range-based L1 loss (0 = disabled)
+  range_l1_eps: 0.1                 # tolerance fraction (0.1 = ±10% of r_gt)
+
+  # Inter-scale competition: softmax across scales to suppress cross-scale duplicates.
+  # At inference: upsample P3/P4 cls to P2 resolution, stack, softmax across scale dim,
+  # multiply each scale's confidence by its competition weight.
+  # Lower temperature = sharper winner-take-more. No NMS needed.
+  inter_scale_competition: true      # enable inter-scale competition at inference
+  inter_scale_temperature: 0.5       # softmax temperature (1.0 = standard, 0.5 = sharper winner-take-more)
+
   # Self-attention on o2o cls features — DEAD END (train31/32)
   # Linear attention averages sparse fg into bg noise, hurting fg/bg discrimination.
   self_attention: false

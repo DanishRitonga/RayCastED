@@ -324,6 +324,8 @@ class RayCastDetect(Detect):
         cross_scale_attention: bool = False,
         prediction_refinement: bool = False,
         prediction_refinement_topk: int = 100,
+        inter_scale_competition: bool = False,
+        inter_scale_temperature: float = 1.0,
     ):
         """Initialize polygon detection head.
 
@@ -360,6 +362,12 @@ class RayCastDetect(Detect):
                 Fundamentally different from feature-level attention (train31/32/34)
                 which operated on 5376 bg-dominated anchor features.
             prediction_refinement_topk: Number of top predictions to refine (default 100).
+            inter_scale_competition: If True, softmax competition across scales at inference.
+                Upsamples P3/P4 cls to P2 resolution, stacks, softmax across scale dim,
+                multiplies each scale's confidence by its competition weight. Suppresses
+                cross-scale duplicates (same nucleus predicted at P2 AND P3).
+            inter_scale_temperature: Softmax temperature for inter-scale competition.
+                Lower = sharper (winner-take-more). 1.0 = standard softmax.
         """
         self.n_rays = n_rays if n_rays is not None else _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays  # xy + rays
@@ -368,6 +376,8 @@ class RayCastDetect(Detect):
         self._cross_scale_attention = cross_scale_attention
         self._prediction_refinement = prediction_refinement
         self.prediction_refinement_topk = prediction_refinement_topk
+        self.inter_scale_competition = inter_scale_competition
+        self.inter_scale_temperature = inter_scale_temperature
 
         super().__init__(nc, reg_max, end2end, ch)
 
@@ -712,6 +722,69 @@ class RayCastDetect(Detect):
             y = self.postprocess(y.permute(0, 2, 1))
         return y if self.export else (y, preds)
 
+    def _apply_inter_scale_competition(
+        self,
+        scores: torch.Tensor,
+        feats: list[torch.Tensor],
+    ) -> torch.Tensor:
+        """Softmax competition across scales to suppress cross-scale duplicates.
+
+        For each spatial position at P2 resolution, computes softmax across
+        the scale dimension. Each scale's confidence is multiplied by its
+        competition weight — the winning scale gets ~1.0, losers get ~0.
+
+        This is differentiable (for future training use) and inference-only
+        for now (no training loss changes).
+
+        Args:
+            scores: [B, nc, N_total] — sigmoid-activated cls scores (concatenated across scales).
+            feats: List of feature maps per scale [B, C, H_i, W_i].
+
+        Returns:
+            [B, nc, N_total] — competition-adjusted cls scores.
+        """
+        bs, nc, N_total = scores.shape
+
+        spatial_shapes = [(f.shape[2], f.shape[3]) for f in feats]
+        anchor_counts = [h * w for h, w in spatial_shapes]
+        H_p2, W_p2 = spatial_shapes[0]
+
+        scale_scores = scores.split(anchor_counts, dim=-1)
+
+        scale_spatial = []
+        for si, (ss, (h, w)) in enumerate(zip(scale_scores, spatial_shapes)):
+            scale_spatial.append(ss.view(bs, nc, h, w))
+
+        upsampled = []
+        for si, ss in enumerate(scale_spatial):
+            if si == 0:
+                upsampled.append(ss)
+            else:
+                upsampled.append(F.interpolate(ss, size=(H_p2, W_p2), mode='bilinear', align_corners=False))
+
+        stacked = torch.stack(upsampled, dim=2)
+
+        temp = self.inter_scale_temperature
+        if temp != 1.0:
+            stacked = stacked / temp
+
+        competition_weights = F.softmax(stacked, dim=2)
+
+        for si in range(len(scale_spatial)):
+            cw = competition_weights[:, :, si : si + 1, :, :]
+            if si == 0:
+                adjusted = scale_spatial[si] * cw
+            else:
+                cw_down = F.interpolate(cw, size=spatial_shapes[si], mode='bilinear', align_corners=False)
+                adjusted = scale_spatial[si] * cw_down
+
+            if si == 0:
+                result_parts = [adjusted.view(bs, nc, -1)]
+            else:
+                result_parts.append(adjusted.view(bs, nc, -1))
+
+        return torch.cat(result_parts, dim=-1)
+
     def _inference(self, x: dict[str, torch.Tensor]) -> torch.Tensor:
         """Decode polygon predictions for inference.
 
@@ -740,6 +813,17 @@ class RayCastDetect(Detect):
 
         dbox = torch.cat([xy_abs, rays_abs], dim=1)
         scores = x['scores'].sigmoid()
+
+        # Inter-scale competition: softmax across scales suppresses cross-scale duplicates.
+        # Same nucleus often predicted at both P2 and P3 with high confidence.
+        # Competition: upsample all scales to P2, softmax across scale dim,
+        # multiply each scale's confidence by its competition weight.
+        if self.inter_scale_competition and self.nl > 1:
+            scores = self._apply_inter_scale_competition(
+                scores,
+                x['feats'],
+            )
+
         if 'quality_raw' in x:
             quality = x['quality_raw'].sigmoid()
             scores = scores * quality

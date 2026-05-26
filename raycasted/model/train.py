@@ -246,6 +246,8 @@ class _RayCastCriterionWrapper:
             gaussian_soft_targets=tcfg.get('gaussian_soft_targets', False),
             gaussian_sigma=tcfg.get('gaussian_sigma', 0.5),
             prediction_refinement_weight=tcfg.get('prediction_refinement_weight', 0.0),
+            range_l1_weight=tcfg.get('range_l1_weight', 0.0),
+            range_l1_eps=tcfg.get('range_l1_eps', 0.1),
         )
 
 
@@ -392,10 +394,7 @@ def _is_rtdetr_yaml(cfg) -> bool:
     if cfg is None:
         return False
     yaml_dict = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
-    return any(
-        len(layer) >= 3 and layer[2] == 'RayCastRTDETRDecoder'
-        for layer in yaml_dict.get('head', [])
-    )
+    return any(len(layer) >= 3 and layer[2] == 'RayCastRTDETRDecoder' for layer in yaml_dict.get('head', []))
 
 
 class RayCastTrainer(DetectionTrainer):
@@ -496,6 +495,8 @@ class RayCastTrainer(DetectionTrainer):
         cross_scale_attention = bool(tcfg.get('cross_scale_attention', False)) if tcfg else False
         prediction_refinement = bool(tcfg.get('prediction_refinement_weight', 0) > 0) if tcfg else False
         prediction_refinement_topk = tcfg.get('prediction_refinement_topk', 100) if tcfg else 100
+        inter_scale_competition = bool(tcfg.get('inter_scale_competition', False)) if tcfg else False
+        inter_scale_temperature = tcfg.get('inter_scale_temperature', 1.0) if tcfg else 1.0
         cls_channel_scale = tcfg.get('cls_channel_scale', 1.0) if tcfg else 1.0
         cls_channel_min = tcfg.get('cls_channel_min', 0) if tcfg else 0
 
@@ -529,6 +530,11 @@ class RayCastTrainer(DetectionTrainer):
                     import copy
 
                     old_head.one2one_cv3 = copy.deepcopy(old_head.cv3)
+
+            # Set inter-scale competition flags on existing RayCastDetect head
+            if inter_scale_competition:
+                old_head.inter_scale_competition = True
+                old_head.inter_scale_temperature = inter_scale_temperature
 
             # Attach auxiliary xy head if configured
             if aux_xy and (not hasattr(old_head, 'aux_xy') or getattr(old_head, 'aux_xy', None) is None):
@@ -640,6 +646,8 @@ class RayCastTrainer(DetectionTrainer):
                 cross_scale_attention=cross_scale_attention,
                 prediction_refinement=prediction_refinement,
                 prediction_refinement_topk=prediction_refinement_topk,
+                inter_scale_competition=inter_scale_competition,
+                inter_scale_temperature=inter_scale_temperature,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):

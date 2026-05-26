@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 #  GradNorm — Gradient Normalisation for Multi-Task Loss Balancing
 # ──────────────────────────────────────────────────────────────────────
 
-_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth')
+_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth', 'range_l1')
 
 
 class GradNormManager:
@@ -346,6 +346,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         lambda_xy: float = 500.0,
         lambda_suppress: float = 0.0,
         suppress_radius: float = 0.05,
+        range_l1_weight: float = 0.0,
+        range_l1_eps: float = 0.1,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -418,6 +420,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.lambda_suppress = lambda_suppress
         self.suppress_radius = suppress_radius
         self.bg_fg_ratio = bg_fg_ratio
+
+        # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band
+        self.range_l1_weight = range_l1_weight
+        self.range_l1_eps = range_l1_eps
 
         # DINO-style contrastive denoising for o2o branch.
         # Injects corrupted GT copies into targets before assignment,
@@ -546,7 +552,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         Returns:
             (assignment_info, loss_5vec, loss_detach)
         """
-        loss = torch.zeros(6, device=self.device)  # [xy, cls, L1, piou, smooth, suppress]
+        loss = torch.zeros(7, device=self.device)  # [xy, cls, L1, piou, smooth, suppress, range_l1]
 
         # --- Prediction parsing ---
         pred_distri = preds['boxes'].permute(0, 2, 1).contiguous()  # [B, N, raycast_dim]
@@ -775,6 +781,23 @@ class RayCastDetectionLoss(v8DetectionLoss):
             if fg_plb is not None:
                 smooth_loss = smooth_loss * fg_plb
             loss[4] = smooth_loss.sum() / n_fg
+
+            # L_range_l1: Range-based L1 loss (LSP-DETR-inspired)
+            # Per-ray tolerance band: loss = max(r_gt*(1-eps) - r_pred, 0)
+            #                            + max(r_pred - r_gt*(1+eps), 0)
+            # Zero if prediction falls within [r_gt*(1-eps), r_gt*(1+eps)].
+            # Naturally handles overlapping nuclei — upper bound extends for
+            # rays that project into overlap regions (future: compute r_max
+            # from mask geometry; current: symmetric tolerance band).
+            if self.range_l1_weight > 0:
+                r_min = fg_target_rays * (1.0 - self.range_l1_eps)
+                r_max = fg_target_rays * (1.0 + self.range_l1_eps)
+                under_pred = F.relu(r_min - fg_pred_rays)
+                over_pred = F.relu(fg_pred_rays - r_max)
+                range_loss = (under_pred + over_pred).mean(-1)
+                if fg_plb is not None:
+                    range_loss = range_loss * fg_plb
+                loss[6] = range_loss.sum() / n_fg
         else:
             self._fg_piou = None
             self._fg_mask = None
@@ -856,8 +879,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # --- Apply loss weights ---
         # If GradNorm is active, use its dynamic weights; otherwise use static lambdas.
         if self.gradnorm_manager is not None and self.gradnorm_manager.enabled:
-            w = self.gradnorm_manager.get_weights()  # [5] or [6]
-            for i in range(min(len(w), 6)):
+            w = self.gradnorm_manager.get_weights()  # [5] or [6] or [7]
+            for i in range(min(len(w), 7)):
                 loss[i] *= w[i]
         else:
             loss[0] *= self.lambda_xy
@@ -866,6 +889,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[3] *= self.lambda_piou
             loss[4] *= self.lambda_smooth
             loss[5] *= self.lambda_suppress
+            loss[6] *= self.range_l1_weight
 
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
@@ -957,6 +981,8 @@ class RayCastE2ELoss(E2ELoss):
         gaussian_soft_targets: bool = False,
         gaussian_sigma: float = 0.5,
         prediction_refinement_weight: float = 0.0,
+        range_l1_weight: float = 0.0,
+        range_l1_eps: float = 0.1,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -994,6 +1020,8 @@ class RayCastE2ELoss(E2ELoss):
             fg_cls_quality_scale=fg_cls_quality_scale,
             lambda_suppress=lambda_suppress,
             suppress_radius=suppress_radius,
+            range_l1_weight=range_l1_weight,
+            range_l1_eps=range_l1_eps,
         )
         super().__init__(model, loss_fn=loss_fn)
 
