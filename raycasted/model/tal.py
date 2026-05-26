@@ -389,9 +389,11 @@ class HungarianRayCastAssigner(RayCastAssigner):
         idx_hi = (idx_lo + 1) % n_rays  # (na, n_gt)
         alpha = frac_idx - frac_idx.floor()  # (na, n_gt)
 
-        # gt_rays: (n_gt, N_RAYS) → gather ray values at lo/hi indices
-        ray_lo = gt_rays.T[idx_lo]  # (na, n_gt)
-        ray_hi = gt_rays.T[idx_hi]  # (na, n_gt)
+        # Advanced indexing: ray_lo[i,j] = gt_rays[j, idx_lo[i,j]]
+        n_valid_gt = gt_rays.shape[0]
+        gt_j = torch.arange(n_valid_gt, device=device)
+        ray_lo = gt_rays[gt_j[None, :], idx_lo]  # (na, n_gt)
+        ray_hi = gt_rays[gt_j[None, :], idx_hi]  # (na, n_gt)
         ray_interp = ray_lo * (1.0 - alpha) + ray_hi * alpha  # (na, n_gt)
 
         # Point-in-polygon: inside if dist ≤ interpolated ray distance
