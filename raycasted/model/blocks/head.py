@@ -771,11 +771,13 @@ class RayCastDetect(Detect):
         competition_weights = F.softmax(stacked, dim=2)
 
         for si in range(len(scale_spatial)):
-            cw = competition_weights[:, :, si : si + 1, :, :]
+            cw = competition_weights[:, :, si, :, :]  # [B, nc, H_p2, W_p2]
             if si == 0:
                 adjusted = scale_spatial[si] * cw
             else:
-                cw_down = F.interpolate(cw, size=spatial_shapes[si], mode='bilinear', align_corners=False)
+                cw_down = F.interpolate(
+                    cw.unsqueeze(2), size=spatial_shapes[si], mode='bilinear', align_corners=False
+                ).squeeze(2)
                 adjusted = scale_spatial[si] * cw_down
 
             if si == 0:
