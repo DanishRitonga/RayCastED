@@ -36,6 +36,7 @@ from ultralytics.utils.torch_utils import initialize_weights
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.data.etl.utils import constants as _const
 from raycasted.model.blocks.head import RayCastDetect
+from raycasted.model.blocks.rtdetr_head import RayCastRTDETRDecoder
 from raycasted.model.builder import raycasted_parse_model
 from raycasted.model.loss import RayCastE2ELoss
 from raycasted.model.register import register_raycast_head
@@ -384,6 +385,19 @@ def _lr_log_callback(trainer):
     LOGGER.info(f'Epoch {trainer.epoch + 1} LR: {lr_str}')
 
 
+def _is_rtdetr_yaml(cfg) -> bool:
+    """Check if a model YAML specifies RayCastRTDETRDecoder as the head."""
+    from ultralytics.nn.tasks import yaml_model_load
+
+    if cfg is None:
+        return False
+    yaml_dict = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
+    return any(
+        len(layer) >= 3 and layer[2] == 'RayCastRTDETRDecoder'
+        for layer in yaml_dict.get('head', [])
+    )
+
+
 class RayCastTrainer(DetectionTrainer):
     """Training pipeline for RayCastED polygon detection model.
 
@@ -432,17 +446,31 @@ class RayCastTrainer(DetectionTrainer):
         DetectionModel. Replaces the Detect head with RayCastDetect and
         patches init_criterion to return RayCastE2ELoss.
 
+        If the YAML contains RayCastRTDETRDecoder, creates
+        RayCastRTDETRDetectionModel instead (transformer decoder with
+        ray polygon regression).
+
         Args:
             cfg: Model config path or YAML name.
             weights: Pretrained weights path or checkpoint model object (on resume).
             verbose: Print model info.
 
         Returns:
-            RayCastDetectionModel with RayCastDetect head.
+            RayCastDetectionModel or RayCastRTDETRDetectionModel.
         """
         register_raycast_head()
         nc = self.data.get('nc') if hasattr(self, 'data') and self.data else None
-        model = RayCastDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
+
+        # Detect RT-DETR YAML — if head contains RayCastRTDETRDecoder,
+        # use the RT-DETR model class (different loss, no E2E head patching)
+        is_rtdetr = _is_rtdetr_yaml(cfg)
+
+        if is_rtdetr:
+            from raycasted.model.rtdetr_model import RayCastRTDETRDetectionModel
+
+            model = RayCastRTDETRDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
+            _const.configure_rays(self.training_config.get('n_rays', 64) if self.training_config else 64)
+            return model
 
         # On resume, `weights` is the checkpoint model object (from load_checkpoint).
         # RayCastDetectionModel.__init__ creates a fresh model from YAML, losing
@@ -662,16 +690,20 @@ class RayCastTrainer(DetectionTrainer):
 
     def get_validator(self):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
-        self.loss_names = (
-            'xy_loss',
-            'cls_loss',
-            'l1_loss',
-            'piou_loss',
-            'smooth_loss',
-            'suppress_loss',
-            'aux_xy_loss',
-            'quality_loss',
-        )
+        head = self.model.model[-1] if hasattr(self, 'model') and hasattr(self.model, 'model') else None
+        if isinstance(head, RayCastRTDETRDecoder):
+            self.loss_names = ('cls_loss', 'ray_loss', 'piou_loss')
+        else:
+            self.loss_names = (
+                'xy_loss',
+                'cls_loss',
+                'l1_loss',
+                'piou_loss',
+                'smooth_loss',
+                'suppress_loss',
+                'aux_xy_loss',
+                'quality_loss',
+            )
         args_copy = copy.copy(self.args)
         if self.training_config and 'inference_conf' in self.training_config:
             args_copy.conf = self.training_config['inference_conf']
@@ -835,18 +867,19 @@ class RayCastTrainer(DetectionTrainer):
         self.model.args = self.args
 
         # Training metadata for inference and export
-        strides = head.stride.tolist() if hasattr(head, 'stride') and head.stride.sum() > 0 else [8, 16, 32]
+        n_rays = head.n_rays if hasattr(head, 'n_rays') else _const.N_RAYS
+        strides = head.stride.tolist() if hasattr(head, 'stride') and head.stride.sum() > 0 else [4, 8, 16]
         self.model.training_args = {
             'crop_size': self.args.imgsz,
             'imgsz': self.args.imgsz,
             'nc': head.nc,
-            'n_rays': head.n_rays,
+            'n_rays': n_rays,
             'strides': strides,
         }
 
         # Re-initialise biases with correct crop_size (Ultralytics calls bias_init
         # during model construction with no access to training config)
-        if hasattr(head, 'bias_init'):
+        if hasattr(head, 'bias_init') and not isinstance(head, RayCastRTDETRDecoder):
             head.bias_init(crop_size=self.args.imgsz)
 
 

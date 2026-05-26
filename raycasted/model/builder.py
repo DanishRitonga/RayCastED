@@ -50,6 +50,7 @@ from raycasted.model.blocks.resoconv import (
     ResoConvDS_Hybrid,
     ResoConvHybrid,
 )
+from raycasted.model.blocks.rtdetr_head import RayCastRTDETRDecoder
 
 BASE_MODULES = frozenset(
     {
@@ -115,8 +116,37 @@ def _handle_aifi_block(ch_list, f, args, layers):
     return AIFIBlock(c1, aifi_dim, cm, num_heads, dropout), c1
 
 
+def _handle_rtdetr_decoder(ch_list, f, args, layers):
+    neck_ch = [ch_list[x] for x in f]
+    nc = args[0] if len(args) > 0 else 5
+    hd = args[1] if len(args) > 1 else 256
+    nq = args[2] if len(args) > 2 else 300
+    ndp = args[3] if len(args) > 3 else 4
+    nh = args[4] if len(args) > 4 else 8
+    ndl = args[5] if len(args) > 5 else 6
+    d_ffn = args[6] if len(args) > 6 else 1024
+    dropout = args[7] if len(args) > 7 else 0.0
+    nd = args[8] if len(args) > 8 else 0
+    n_rays = args[9] if len(args) > 9 else None
+    m_ = RayCastRTDETRDecoder(
+        nc=nc,
+        ch=tuple(neck_ch),
+        hd=hd,
+        nq=nq,
+        ndp=ndp,
+        nh=nh,
+        ndl=ndl,
+        d_ffn=d_ffn,
+        dropout=dropout,
+        nd=nd,
+        n_rays=n_rays,
+    )
+    return m_, nc + m_.raycast_dim
+
+
 _SPECIAL_HANDLERS = {
     AIFIBlock: _handle_aifi_block,
+    RayCastRTDETRDecoder: _handle_rtdetr_decoder,
     DWT_LL: _handle_dwt_ll,
     DWT_HF: _handle_dwt_hf,
     HFResidual: _handle_hf_residual,
