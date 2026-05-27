@@ -189,7 +189,7 @@ training:
   pretrained_backbone: null  # DISABLED for scratch training experiment 
 
   # DCNv2 (modulated deformable conv) in head
-  dcn_in_reg_head: true     # replace 2nd Conv in cv2 with DCNConv — better polygon geometry
+  dcn_in_reg_head: false    # disabled for clip_grad+bound_l1 isolation experiment (train39 has DCN)
   dcn_in_cls_head: false    # replace 2nd Conv in cv3 with DCNConv
 
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
