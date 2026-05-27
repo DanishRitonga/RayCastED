@@ -121,7 +121,9 @@ class TrainingSettings(BaseModel):
     hungarian_cost_class: float = 1.0
     hungarian_cost_centroid: float = 1.0
     hungarian_cost_ray: float = 1.0
-    hungarian_cost_inner: float = 9999.0  # LSP-DETR-style inside-polygon penalty (0=disabled)
+    hungarian_cost_inner: float = 9999.0  # Outside-polygon penalty (AND gate: 0=disabled, 9999=LSP-DETR default)
+    hungarian_cost_ray_quality: float = 1.0  # Extra ray weight for quality emphasis (soft, not hard piou gate)
+    hungarian_cost_inner_sigma: float = 0.1  # Soft boundary width for cost_inner (0→hard gate, 0.1→smooth)
     hungarian_cls_only: bool = True
 
     # Weighted sampling

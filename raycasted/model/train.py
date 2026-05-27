@@ -240,6 +240,8 @@ class _RayCastCriterionWrapper:
             hungarian_cost_centroid=tcfg.get('hungarian_cost_centroid', 1.0),
             hungarian_cost_ray=tcfg.get('hungarian_cost_ray', 1.0),
             hungarian_cost_inner=tcfg.get('hungarian_cost_inner', 9999.0),
+            hungarian_cost_ray_quality=tcfg.get('hungarian_cost_ray_quality', 1.0),
+            hungarian_cost_inner_sigma=tcfg.get('hungarian_cost_inner_sigma', 0.1),
             hungarian_cls_only=tcfg.get('hungarian_cls_only', True),
             steps_per_epoch=self._steps_per_epoch,
             dn_num=tcfg.get('dn_num', 0),

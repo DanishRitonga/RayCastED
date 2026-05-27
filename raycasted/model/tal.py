@@ -307,17 +307,30 @@ class HungarianRayCastAssigner(RayCastAssigner):
     Solves with scipy.linear_sum_assignment for globally optimal 1:1 matching.
     Uses its own cost matrix (not shared with dual-TAL assigner).
 
-    cost_inner (LSP-DETR-style): massively penalises anchors whose predicted
+    cost_inner (LSP-DETR-style): penalises anchors whose predicted
     centroid falls outside the GT ray polygon.  This is the key innovation
     from LSP-DETR (arxiv 2601.03163) — without it, Hungarian matches GTs to
     spatially distant anchors because the cost function has no spatial prior.
 
-    Point-in-polygon is computed geometrically (no rasterisation):
+    Uses soft penetration-based gating (not hard inside/outside):
       1. Compute angle θ from GT centroid to anchor predicted centroid
       2. Interpolate GT ray distance at θ
-      3. If dist(centroid→anchor) ≤ ray_dist(θ) → inside (cost=-1)
-      4. Otherwise → outside (cost=0)
+      3. penetration = ray_dist(θ) - dist(centroid→anchor)
+         (positive = inside, negative = outside)
+      4. cost_inner = sigmoid(-penetration / sigma)
+         → 0 deep inside, ~0.5 at boundary, ~1 far outside
       5. Multiplied by cost_inner weight (default 9999)
+
+    With sigma→0, this becomes a hard inside/outside gate.
+    With sigma=0.1, transition spans ~10% of ray distance (smooth).
+    Deep-inside anchors naturally rank lower cost than boundary anchors,
+    providing implicit quality weighting from spatial position.
+
+    cost_ray_quality: additional weight on ray cost in the Hungarian cost
+    matrix.  Default 1.0 (same as cost_ray).  Higher values (e.g. 10.0)
+    make Hungarian preferentially match anchors with better ray predictions
+    among inside-polygon candidates — soft quality emphasis without a hard
+    piou gate (piou is volatile; small ray errors compound).
     """
 
     def __init__(
@@ -326,6 +339,8 @@ class HungarianRayCastAssigner(RayCastAssigner):
         cost_centroid: float = 1.0,
         cost_ray: float = 1.0,
         cost_inner: float = 9999.0,
+        cost_ray_quality: float = 1.0,
+        cost_inner_sigma: float = 0.1,
         **kwargs,
     ):
         """Initialize HungarianRayCastAssigner.
@@ -334,10 +349,16 @@ class HungarianRayCastAssigner(RayCastAssigner):
             cost_class: Weight for focal classification cost.
             cost_centroid: Weight for L2 centroid distance cost.
             cost_ray: Weight for log-space L1 ray cost.
-            cost_inner: Weight for inside-polygon cost (LSP-DETR default 9999).
-                Anchors inside GT polygon get cost -1×cost_inner (preferred).
-                Anchors outside get cost 0 (no inner bonus, effectively
-                penalised by missing the -9999 benefit).
+            cost_inner: Weight for outside-polygon penalty (LSP-DETR default 9999).
+                Soft penalty: sigmoid(-penetration/sigma) * cost_inner.
+                Anchors deep inside get ~0 penalty, outside get ~cost_inner.
+            cost_ray_quality: Additional weight on ray cost for quality emphasis.
+                Higher values make Hungarian prefer better ray predictions among
+                inside-polygon candidates. Soft quality emphasis without hard
+                piou gate (piou is volatile). Default 1.0 (no extra weight).
+            cost_inner_sigma: Soft boundary width (in normalised coords).
+                sigma→0 = hard gate, sigma=0.1 = smooth transition over ~10%
+                of ray distance. Deep-inside anchors naturally get lower cost.
             **kwargs: Passed to parent RayCastAssigner (topk, num_classes
                 etc.).
         """
@@ -346,15 +367,19 @@ class HungarianRayCastAssigner(RayCastAssigner):
         self.cost_centroid = cost_centroid
         self.cost_ray = cost_ray
         self.cost_inner = cost_inner
+        self.cost_ray_quality = cost_ray_quality
+        self.cost_inner_sigma = cost_inner_sigma
 
     def _compute_cost_inner(self, pd_xy, gt_xy, gt_rays):
-        """Compute inside-polygon cost using ray-based point-in-polygon test.
+        """Compute soft inside-polygon cost using ray-based penetration depth.
 
         Memory-efficient: no rasterisation. For each (anchor, GT) pair:
           1. Compute angle θ from GT centroid to anchor predicted centroid
           2. Interpolate GT ray distance at θ
-          3. If dist ≤ ray_dist(θ) → inside (cost = -1)
-          4. Otherwise → outside (cost = 0)
+          3. penetration = ray_dist(θ) - dist(centroid→anchor)
+             (positive = inside, negative = outside)
+          4. cost = sigmoid(-penetration / sigma)
+             → 0 deep inside, ~0.5 at boundary, ~1 far outside
 
         Multiplied by cost_inner weight in _compute_cost_matrix.
 
@@ -364,7 +389,7 @@ class HungarianRayCastAssigner(RayCastAssigner):
             gt_rays: (n_valid_gt, N_RAYS) GT ray distances in normalised coords.
 
         Returns:
-            cost_inner: (na, n_valid_gt) with -1.0 for inside, 0.0 for outside.
+            cost_inner: (na, n_valid_gt) soft penalty [0, 1].
         """
         n_rays = gt_rays.shape[-1]
         angular_spacing = 2.0 * np.pi / n_rays
@@ -396,17 +421,23 @@ class HungarianRayCastAssigner(RayCastAssigner):
         ray_hi = gt_rays[gt_j[None, :], idx_hi]  # (na, n_gt)
         ray_interp = ray_lo * (1.0 - alpha) + ray_hi * alpha  # (na, n_gt)
 
-        # Point-in-polygon: inside if dist ≤ interpolated ray distance
-        inside = dist <= ray_interp + 1e-6  # (na, n_gt), small eps for boundary
+        # Soft penetration: positive = inside, negative = outside
+        penetration = ray_interp - dist  # (na, n_gt)
 
-        cost_inner = torch.where(inside, torch.tensor(-1.0, device=device), torch.tensor(0.0, device=device))
+        # Sigmoid soft gate: 0 deep inside, ~0.5 at boundary, ~1 far outside
+        cost_inner = torch.sigmoid(-penetration / self.cost_inner_sigma)
         return cost_inner
 
     def _compute_cost_matrix(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt_bool):
         """Compute unified cost matrix for Hungarian assignment.
 
-        cost = w_cls * focal_cls_cost + w_xy * L2_centroid + w_ray * log_l1_rays
+        cost = w_cls * focal_cls_cost + w_xy * L2_centroid
+             + (w_ray + w_ray_quality) * log_l1_rays
              + w_inner * cost_inner
+
+        cost_inner is AND-logic (penalty gate): inside=0, outside=+w_inner.
+        Among inside-polygon anchors, ray quality is emphasised via
+        w_ray_quality to preferentially match anchors with better predictions.
         """
         bs = pd_scores.shape[0]
         n_max_boxes = pd_scores.shape[1]
@@ -442,14 +473,21 @@ class HungarianRayCastAssigner(RayCastAssigner):
             log_gt = gt_rays[None, :, :].clamp(min=1e-4).log()
             cost_ray = (log_pd - log_gt).abs().mean(dim=-1)
 
-            total = self.cost_class * cost_cls + self.cost_centroid * cost_xy + self.cost_ray * cost_ray
+            total = (
+                self.cost_class * cost_cls
+                + self.cost_centroid * cost_xy
+                + (self.cost_ray + self.cost_ray_quality) * cost_ray
+            )
 
-            # Inside-polygon cost (LSP-DETR-style): anchors inside GT polygon
-            # get -cost_inner, anchors outside get 0.  With cost_inner=9999,
-            # only spatially-valid anchors can win the Hungarian matching.
+            # Soft outside-polygon penalty modulated by cls certainty.
+            # cost_inner is [0,1] soft spatial gate (0 deep inside, ~1 far outside).
+            # cls_scale gates the penalty: ≈0 for correct class, ≈1 for wrong class.
+            # AND logic: outside + wrong class → +9999 (rejected),
+            #   outside + correct class → small penalty (still matchable).
             if self.cost_inner > 0:
                 cost_inner = self._compute_cost_inner(pd_xy, gt_xy, gt_rays)
-                total = total + self.cost_inner * cost_inner
+                cls_scale = cost_cls.sigmoid()
+                total = total + self.cost_inner * cost_inner * cls_scale
 
             total = total.nan_to_num(nan=1e8, posinf=1e8, neginf=-1e8)
 
