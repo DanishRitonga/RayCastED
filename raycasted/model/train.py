@@ -549,8 +549,6 @@ class RayCastTrainer(DetectionTrainer):
                     for x in neck_ch
                 )
                 if old_head._end2end_arg:
-                    import copy
-
                     old_head.one2one_cv3 = copy.deepcopy(old_head.cv3)
 
             # Set inter-scale competition flags on existing RayCastDetect head
@@ -581,8 +579,6 @@ class RayCastTrainer(DetectionTrainer):
                 )
                 old_head.prediction_refinement_topk = prediction_refinement_topk
                 if old_head._end2end_arg:
-                    import copy
-
                     old_head.one2one_prediction_refinement_attn = copy.deepcopy(old_head.prediction_refinement_attn)
                     old_head.prediction_refinement_attn = None
 
