@@ -127,23 +127,22 @@ def test_e2e_default_parameters_match_baseline():
 
 
 def test_e2e_decay_schedule_spans_full_training():
-    """Verify o2m/o2o decay schedule spans full training, not ~1.5 epochs."""
+    """Verify o2m/o2o decay schedule spans full training using epoch units."""
     model = _make_mock_model()
     spe = 133
     max_epochs = 200
-    total_steps = spe * max_epochs
     e2e = RayCastE2ELoss(model, max_epochs=max_epochs, tal_topk=13, steps_per_epoch=spe)
 
-    assert e2e.one2one.hyp.epochs == total_steps
+    assert e2e.one2one.hyp.epochs == max_epochs
 
     e2e.update()
-    assert e2e.o2m > 0.79, f'After 1 step o2m should be ~0.8, got {e2e.o2m}'
+    assert e2e.o2m > 0.79, f'After 1 epoch o2m should be ~0.8, got {e2e.o2m}'
 
-    for _ in range(total_steps - 2):
+    for _ in range(max_epochs - 2):
         e2e.update()
-    assert e2e.o2m < 0.11, f'After {total_steps} steps o2m should be ~0.1, got {e2e.o2m}'
+    assert e2e.o2m < 0.11, f'After {max_epochs} epochs o2m should be ~0.1, got {e2e.o2m}'
 
-    print(f'PASS: O2M decay spans full {total_steps} steps (not ~200)')
+    print(f'PASS: O2M decay spans full {max_epochs} epochs')
 
 
 if __name__ == '__main__':

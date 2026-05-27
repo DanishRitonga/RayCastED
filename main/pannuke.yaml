@@ -64,7 +64,7 @@ training:
   # 2-phase Hungarian curriculum: TAL-only → Hungarian ramp
   # Phase 1 (0→400): standard dual-TAL with topk2=7→3 (rich gradient)
   # Phase 2 (400+): Hungarian o2o ramps 0→0.9 (topk2 already annealed to ~3)
-  hungarian_phase2_start: 300         # start after topk2 has mostly annealed (3→~1.5)
+  hungarian_phase2_start: 9999        # DISABLED for bg_fg sweep — isolate bg_fg effect
   hungarian_max_weight: 0.9
   hungarian_ramp_epochs: 0            # 0 = auto (ramp over remaining epochs)
   phase2_freeze_epochs: 0         # backbone freeze at phase2 start (0=disabled)
@@ -105,7 +105,7 @@ training:
   # for NMS-free inference. These override the base values above for o2o only.
   focal_gamma_o2o: 2.0        # Focal loss — suppresses easy bg, keeps hard negatives
   focal_alpha_o2o: 0.75       # Fg weight — match o2m (train13 proved 0.75 works)
-  bg_fg_ratio_o2o: 3             # curriculum target: ramp from 0→3 after curriculum_epoch
+  bg_fg_ratio_o2o: 1             # curriculum target: ramp from 0→1 after curriculum_epoch (was 3, too aggressive)
   bg_fg_ratio_o2o_curriculum_epoch: 220  # epoch to start ramping (recall peaks ~180, declines after)
   bg_cls_decay_o2o: 1.0       # Full bg weight — don't starve bg suppression (0.5 over-corrected)
   fg_cls_boost_o2o: null       # Additive boost disabled for o2o
