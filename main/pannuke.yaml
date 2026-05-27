@@ -192,6 +192,15 @@ training:
   dcn_in_reg_head: true     # replace 2nd Conv in cv2 with DCNConv — better polygon geometry
   dcn_in_cls_head: false    # replace 2nd Conv in cv3 with DCNConv
 
+  # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
+  clip_grad: 0.1
+
+  # Asymmetric max() bound loss (LSP-DETR criterion.py:16-27):
+  # loss = max(relu(r_gt*(1-eps) - r_pred), relu(r_pred - r_gt*(1+eps)))
+  # Takes worst violation per ray. Zero inside tolerance band.
+  bound_l1_weight: 5.0     # weight for asymmetric bound loss (0 = disabled)
+  bound_l1_eps: 0.1         # tolerance fraction (0.1 = ±10% of r_gt)
+
 datasets:
   PanNuke:
     root_dir: "PanNuke/data"

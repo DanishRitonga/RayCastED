@@ -170,6 +170,12 @@ class TrainingSettings(BaseModel):
     range_l1_weight: float = 0.0
     range_l1_eps: float = 0.1  # tolerance fraction (0.1 = ±10% of r_gt)
 
+    # Asymmetric max() bound loss (LSP-DETR criterion.py:16-27):
+    # loss = max(relu(r_gt*(1-eps) - r_pred), relu(r_pred - r_gt*(1+eps)))
+    # Takes worst violation per ray instead of summing. 0 = disabled.
+    bound_l1_weight: float = 0.0
+    bound_l1_eps: float = 0.1  # tolerance fraction (0.1 = ±10% of r_gt)
+
     # Inter-scale competition: softmax across scales to suppress cross-scale duplicates.
     # Upsamples P3/P4 cls to P2 resolution, stacks, softmax across scale dim,
     # gathers regression from winning scale. Addresses multi-scale duplicates.
@@ -182,6 +188,9 @@ class TrainingSettings(BaseModel):
     # DCNv2 in head
     dcn_in_reg_head: bool = False  # replace 2nd Conv in cv2 with modulated deformable conv
     dcn_in_cls_head: bool = False  # replace 2nd Conv in cv3 with modulated deformable conv
+
+    # Gradient clipping (LSP-DETR uses 0.1). Ultralytics defaults to 10.0.
+    clip_grad: float = 10.0
 
     model_config = ConfigDict(extra='forbid')
 

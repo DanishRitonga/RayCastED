@@ -237,6 +237,8 @@ class _RayCastCriterionWrapper:
             prediction_refinement_weight=tcfg.get('prediction_refinement_weight', 0.0),
             range_l1_weight=tcfg.get('range_l1_weight', 0.0),
             range_l1_eps=tcfg.get('range_l1_eps', 0.1),
+            bound_l1_weight=tcfg.get('bound_l1_weight', 0.0),
+            bound_l1_eps=tcfg.get('bound_l1_eps', 0.1),
         )
 
 
@@ -426,6 +428,22 @@ class RayCastTrainer(DetectionTrainer):
 
     def plot_training_labels(self):
         """Skip standard bbox label plotting — incompatible with raycast polygon data."""
+
+    def optimizer_step(self):
+        """Override gradient clipping to use configurable max_norm (LSP-DETR uses 0.1).
+
+        Base class hardcodes max_norm=10.0 which is too loose for piou loss
+        gradients that can explode to ~10^7 in early training (AGENTS.md #23).
+        """
+        self.scaler.unscale_(self.optimizer)
+        tcfg = self.training_config or {}
+        max_norm = tcfg.get('clip_grad', 10.0)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_norm)
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        self.optimizer.zero_grad()
+        if self.ema:
+            self.ema.update(self.model)
 
     def _setup_scheduler(self):
         """Override scheduler setup for CosineAnnealingWarmRestarts (SGDR).

@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 #  GradNorm — Gradient Normalisation for Multi-Task Loss Balancing
 # ──────────────────────────────────────────────────────────────────────
 
-_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth', 'range_l1')
+_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth', 'suppress', 'range_l1', 'bound_l1')
 
 
 class GradNormManager:
@@ -348,6 +348,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         suppress_radius: float = 0.05,
         range_l1_weight: float = 0.0,
         range_l1_eps: float = 0.1,
+        bound_l1_weight: float = 0.0,
+        bound_l1_eps: float = 0.1,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -425,6 +427,14 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.range_l1_weight = range_l1_weight
         self.range_l1_eps = range_l1_eps
 
+        # Asymmetric max() bound loss (LSP-DETR criterion.py:16-27): per-ray
+        # tolerance band where loss = max(relu(min-pred), relu(pred-max)).
+        # Unlike range_l1 which sums violations, this takes the WORST violation
+        # per ray — one badly-predicted ray produces full penalty regardless of
+        # how good the others are. Zero inside [r_gt*(1-eps), r_gt*(1+eps)].
+        self.bound_l1_weight = bound_l1_weight
+        self.bound_l1_eps = bound_l1_eps
+
     def preprocess(self, targets, batch_size, scale_tensor=None):
         """Preprocess polygon targets.
 
@@ -477,7 +487,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         Returns:
             (assignment_info, loss_5vec, loss_detach)
         """
-        loss = torch.zeros(7, device=self.device)  # [xy, cls, L1, piou, smooth, suppress, range_l1]
+        loss = torch.zeros(8, device=self.device)  # [xy, cls, L1, piou, smooth, suppress, range_l1, bound_l1]
 
         # --- Prediction parsing ---
         pred_distri = preds['boxes'].permute(0, 2, 1).contiguous()  # [B, N, raycast_dim]
@@ -717,6 +727,22 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 if fg_plb is not None:
                     range_loss = range_loss * fg_plb
                 loss[6] = range_loss.sum() / n_fg
+
+            # L_bound_l1: Asymmetric max() bound loss (LSP-DETR criterion.py:16-27)
+            # Per-ray tolerance band with max() instead of sum():
+            #   loss = max(relu(r_gt*(1-eps) - r_pred), relu(r_pred - r_gt*(1+eps)))
+            # Takes worst violation per ray — one badly-predicted ray produces
+            # full penalty regardless of how good the other rays are.
+            # Zero inside [r_gt*(1-eps), r_gt*(1+eps)].
+            if self.bound_l1_weight > 0:
+                r_min = fg_target_rays * (1.0 - self.bound_l1_eps)
+                r_max = fg_target_rays * (1.0 + self.bound_l1_eps)
+                under_pred = F.relu(r_min - fg_pred_rays)
+                over_pred = F.relu(fg_pred_rays - r_max)
+                bound_loss = torch.max(under_pred, over_pred).mean(-1)
+                if fg_plb is not None:
+                    bound_loss = bound_loss * fg_plb
+                loss[7] = bound_loss.sum() / n_fg
         else:
             self._fg_piou = None
             self._fg_mask = None
@@ -728,6 +754,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[3] += (pred_rays * 0).sum()
             loss[4] += (pred_rays * 0).sum()
             loss[5] += (pred_xy * 0).sum()
+            loss[7] += (pred_rays * 0).sum()
 
         # --- L_suppress: Unified suppression loss (quality ranking + spatial repulsion) ---
         # Penalises fg anchors that predict higher confidence than they "deserve".
@@ -808,6 +835,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[4] *= self.lambda_smooth
             loss[5] *= self.lambda_suppress
             loss[6] *= self.range_l1_weight
+            loss[7] *= self.bound_l1_weight
 
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
@@ -885,6 +913,8 @@ class RayCastE2ELoss(E2ELoss):
         prediction_refinement_weight: float = 0.0,
         range_l1_weight: float = 0.0,
         range_l1_eps: float = 0.1,
+        bound_l1_weight: float = 0.0,
+        bound_l1_eps: float = 0.1,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -924,6 +954,8 @@ class RayCastE2ELoss(E2ELoss):
             suppress_radius=suppress_radius,
             range_l1_weight=range_l1_weight,
             range_l1_eps=range_l1_eps,
+            bound_l1_weight=bound_l1_weight,
+            bound_l1_eps=bound_l1_eps,
         )
         super().__init__(model, loss_fn=loss_fn)
 
