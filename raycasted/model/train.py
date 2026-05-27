@@ -26,6 +26,7 @@ from copy import deepcopy
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 from ultralytics.data.build import InfiniteDataLoader
 from ultralytics.models.yolo.detect.train import DetectionTrainer
 from ultralytics.nn.modules.head import Detect
@@ -443,6 +444,39 @@ class RayCastTrainer(DetectionTrainer):
 
     def plot_training_labels(self):
         """Skip standard bbox label plotting — incompatible with raycast polygon data."""
+
+    def _setup_scheduler(self):
+        """Override scheduler setup for CosineAnnealingWarmRestarts (SGDR).
+
+        When warm_restarts=True, uses PyTorch's CosineAnnealingWarmRestarts
+        which resets LR to lr0 at each period boundary (T_0, T_0+T_0*T_mult, ...).
+        This prevents the recall collapse seen with single-cosine decay where
+        LR drops to <17% of peak by epoch 220 (60% of training wasted).
+
+        Schedule with T_0=200, T_mult=2, 600 epochs:
+          Cycle 1: epochs 0-199 (LR: lr0 → eta_min)
+          Cycle 2: epochs 200-599 (LR: lr0 → eta_min, longer second cycle)
+          Total: 2 restarts, each allowing model to recover exploration.
+
+        When warm_restarts=False, falls back to base class (single cosine).
+        """
+        tcfg = self.training_config or {}
+        if tcfg.get('warm_restarts', False):
+            t0 = tcfg.get('warm_restarts_T0', 200)
+            t_mult = tcfg.get('warm_restarts_T_mult', 2)
+            eta_min = tcfg.get('warm_restarts_eta_min', 0.0001)
+            self.scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                self.optimizer,
+                T_0=t0,
+                T_mult=t_mult,
+                eta_min=eta_min,
+            )
+            self.lf = lambda epoch: max(
+                (1 + math.cos(math.pi * epoch / t0)) / 2,
+                eta_min / self.args.lr0,
+            )
+        else:
+            super()._setup_scheduler()
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Create YOLO model with RayCastDetect head and RayCastE2ELoss.

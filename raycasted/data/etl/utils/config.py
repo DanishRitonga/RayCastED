@@ -49,6 +49,10 @@ class TrainingSettings(BaseModel):
 
     # Learning rate
     cos_lr: bool = True  # cosine LR schedule. Was False
+    warm_restarts: bool = False  # CosineAnnealingWarmRestarts instead of single cosine
+    warm_restarts_T0: int = 200  # noqa: N815 — matches PyTorch API. First restart period (epochs)
+    warm_restarts_T_mult: int = 2  # noqa: N815 — matches PyTorch API. Period multiplier after each restart
+    warm_restarts_eta_min: float = 0.0001  # minimum LR at cycle bottom
 
     # Assigner
     assigner_radius_scale: float = 2.0  # containment radius multiplier. Was 1.5
