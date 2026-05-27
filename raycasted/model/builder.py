@@ -43,7 +43,6 @@ from ultralytics.nn.modules.head import Detect
 from ultralytics.nn.modules.transformer import AIFI
 from ultralytics.utils.ops import make_divisible
 
-from raycasted.model.blocks.aifi import AIFIBlock
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.blocks.lk_block import C3k2_LK
 from raycasted.model.blocks.resoconv import (
@@ -115,15 +114,6 @@ def _handle_hf_residual(ch_list, f, args, layers):
     return m_, c2
 
 
-def _handle_aifi_block(ch_list, f, args, layers):
-    c1 = _resolve_ch(ch_list, f)
-    aifi_dim = args[0] if len(args) > 0 else 256
-    cm = args[1] if len(args) > 1 else 1024
-    num_heads = args[2] if len(args) > 2 else 8
-    dropout = args[3] if len(args) > 3 else 0.0
-    return AIFIBlock(c1, aifi_dim, cm, num_heads, dropout), c1
-
-
 def _handle_rtdetr_decoder(ch_list, f, args, layers):
     neck_ch = [ch_list[x] for x in f]
     nc = args[0] if len(args) > 0 else 5
@@ -176,7 +166,6 @@ def _handle_aifi(ch_list, f, args, layers):
 
 
 _SPECIAL_HANDLERS = {
-    AIFIBlock: _handle_aifi_block,
     AIFI: _handle_aifi,
     HGStem: _handle_hgstem,
     HGBlock: _handle_hgblock,

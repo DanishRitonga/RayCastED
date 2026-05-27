@@ -81,7 +81,6 @@ class TrainingSettings(BaseModel):
     focal_gamma_o2o: float | None = None
     focal_alpha_o2o: float | None = None
     bg_fg_ratio_o2o: int | None = None
-    bg_fg_ratio_o2o_curriculum_epoch: int = 0  # epoch to start ramping bg_fg_ratio_o2o from 0→bg_fg_ratio_o2o
     bg_cls_decay_o2o: float | None = None  # per-branch bg suppression for o2o
     fg_cls_boost_o2o: float | None = None  # per-branch quality re-weighting for o2o
     fg_cls_quality_scale_o2o: float | None = None  # per-branch multiplicative quality for o2o
@@ -114,21 +113,6 @@ class TrainingSettings(BaseModel):
 
     # STAL: Small-Target-Aware Label Assignment (YOLO26)
     stal_min_positives: int = 0  # minimum positive anchors per GT (0 = disabled)
-
-    # 2-phase Hungarian curriculum: TAL-only → Hungarian ramp
-    # Phase 1 (0 → phase2_start): standard dual-TAL, o2m > o2o
-    # Phase 2 (phase2_start → end): Hungarian o2o ramps 0→hungarian_max_weight
-    hungarian_phase2_start: int = 100
-    hungarian_max_weight: float = 0.9
-    hungarian_ramp_epochs: int = 0
-    phase2_freeze_epochs: int = 0
-    hungarian_cost_class: float = 1.0
-    hungarian_cost_centroid: float = 1.0
-    hungarian_cost_ray: float = 1.0
-    hungarian_cost_inner: float = 9999.0  # Outside-polygon penalty (AND gate: 0=disabled, 9999=LSP-DETR default)
-    hungarian_cost_ray_quality: float = 1.0  # Extra ray weight for quality emphasis (soft, not hard piou gate)
-    hungarian_cost_inner_sigma: float = 0.1  # Soft boundary width for cost_inner (0→hard gate, 0.1→smooth)
-    hungarian_cls_only: bool = True
 
     # Weighted sampling
     weighted_sampling: bool = False
@@ -165,39 +149,9 @@ class TrainingSettings(BaseModel):
     assigner_alpha: float = 0.5  # cls^alpha in alignment metric
     assigner_beta: float = 6.0  # iou^beta in alignment metric
 
-    # DINO-style contrastive denoising (o2o branch only)
-    # Injects corrupted GT copies before TAL assignment, providing more
-    # fg training signal for the o2o cls head. With QFL soft targets,
-    # corrupted copies get lower quality scores → contrastive learning.
-    dn_num: int = 0  # number of corrupted copies per GT (0 = disabled)
-    dn_centroid_noise: float = 0.0  # max centroid shift in normalised coords
-    dn_ray_noise: float = 0.0  # multiplicative Gaussian ray jitter std
-
     # Auxiliary xy head — bypass backbone→head bottleneck
     aux_xy_weight: float = 0.0  # Huber loss weight (0 = disabled, 10.0 = recommended)
     aux_xy_ramp_epochs: int = 100  # epochs over which aux weight decays
-
-    # Quality head — IoU-aware inference scoring
-    quality_head_weight: float = 0.0  # L1 loss weight for piou prediction (0 = disabled, 1.0 = recommended)
-
-    # Self-attention on o2o cls features — spatial context for duplicate suppression
-    self_attention: bool = False  # per-scale linear self-attention before final cls projection
-    cross_scale_attention: bool = False  # cross-scale attention on concatenated features across P2/P3/P4
-
-    # PSS (Positional Suppression Structure) head — learned per-pixel suppression
-    # 1-channel conv on o2o cls features: final_conf = cls × sigmoid(pss).
-    # Trained with BCE: target=1 for best anchor per GT, 0 for all others.
-    # Unlike quality head (absolute piou), PSS learns relative competition — which
-    # position should "win" in each local neighborhood.
-    pss_head_weight: float = 0.0  # BCE loss weight (0 = disabled, 1.0 = recommended)
-
-    # Gaussian spatial soft targets — replace hard 0/1 cls targets with spatial Gaussian
-    # Best anchor per GT → target 1.0; other fg anchors → exp(-d²/2σ²) where d is
-    # distance to GT centroid in normalized space. Uses QFL for continuous targets.
-    # Fixes train25/26/27 failure: the problem was piou-based targets (quality spread),
-    # not the Gaussian concept. Spatial Gaussian creates natural "winner-take-most" gradient.
-    gaussian_soft_targets: bool = False  # enable Gaussian spatial soft targets for o2o cls
-    gaussian_sigma: float = 0.5  # spatial Gaussian sigma in normalized coords (0.5 ≈ 128px at 256)
 
     # Prediction-level self-attention on top-K scored predictions (o2o branch only).
     # After FCN scores all 5376 anchors, top-K=100 by confidence are selected.
@@ -224,6 +178,10 @@ class TrainingSettings(BaseModel):
 
     # Pretrained backbone
     pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
+
+    # DCNv2 in head
+    dcn_in_reg_head: bool = False  # replace 2nd Conv in cv2 with modulated deformable conv
+    dcn_in_cls_head: bool = False  # replace 2nd Conv in cv3 with modulated deformable conv
 
     model_config = ConfigDict(extra='forbid')
 

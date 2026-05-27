@@ -23,6 +23,7 @@ from ultralytics.utils.tal import make_anchors
 # Default raycast dimension for backward compat (tests, export).
 # At runtime, use head.raycast_dim which reflects the actual n_rays parameter.
 from raycasted.data.etl.utils import constants as _const
+from raycasted.model.blocks.dcn import DCNConv
 
 RAYCAST_DIM = 2 + _const.N_RAYS
 
@@ -102,104 +103,6 @@ class LargeKernelRefinementBlock(nn.Module):
 
         self.lk_conv.weight.data.copy_(lk_weight + sk_padded)
         self.lk_conv.bias.data.copy_(lk_bias + sk_bias)
-
-
-class AnchorSelfAttention(nn.Module):
-    """Linear self-attention over anchor tokens for duplicate suppression.
-
-    Applies multi-head linear attention (Katharopoulos et al., 2020) on
-    per-scale cls feature maps before the final nc-projection. This gives
-    each anchor visibility of all other anchors on the same scale, enabling
-    the o2o cls head to learn "I'm the 2nd-best anchor for this GT, suppress
-    myself" — the spatial context that pure FCN lacks.
-
-    Complexity: O(N × C × d) instead of O(N² × d) for standard attention,
-    making P2's 4096 anchors feasible. Uses elu+1 feature map for linear
-    decomposition: V' = φ(Q) · (φ(K)ᵀ · V).
-
-    Args:
-        channels: Input feature dimension (c3 from cls head).
-        num_heads: Number of attention heads (default 4).
-        head_dim: Dimension per head (default 32). Total proj dim = num_heads * head_dim.
-        dropout: Dropout rate on attention output (default 0.0).
-    """
-
-    def __init__(self, channels: int, num_heads: int = 4, head_dim: int = 32, dropout: float = 0.0):
-        super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = head_dim
-        self.inner_dim = num_heads * head_dim
-
-        self.qkv = nn.Linear(channels, self.inner_dim * 3, bias=False)
-        self.proj = nn.Linear(self.inner_dim, channels)
-        self.norm = nn.LayerNorm(channels)
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        nn.init.xavier_uniform_(self.qkv.weight)
-        nn.init.xavier_uniform_(self.proj.weight)
-        if self.proj.bias is not None:
-            nn.init.zeros_(self.proj.bias)
-
-    @staticmethod
-    def _phi(x: torch.Tensor) -> torch.Tensor:
-        return F.elu(x) + 1.0
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply linear self-attention with residual + LayerNorm.
-
-        Args:
-            x: [B, N, C] anchor token features.
-
-        Returns:
-            [B, N, C] updated features with global context.
-        """
-        b, n, c = x.shape
-        residual = x
-
-        # Force full float32 path — LayerNorm + elu+1 + einsum accumulation
-        # is numerically unstable in float16 (produces NaN cls loss).
-        # Must cast BOTH input AND module parameters to float32 because
-        # the outer AMP autocast may have already cast params to float16.
-        x = x.float()
-        norm_w = self.norm.weight.float()
-        norm_b = self.norm.bias.float()
-        x = F.layer_norm(x, self.norm.normalized_shape, norm_w, norm_b, self.norm.eps)
-
-        qkv_w = self.qkv.weight.float()
-        qkv_b = self.qkv.bias.float() if self.qkv.bias is not None else None
-        qkv = F.linear(x, qkv_w, qkv_b)
-        q, k, v = qkv.chunk(3, dim=-1)
-
-        q = q.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(b, n, self.num_heads, self.head_dim).transpose(1, 2)
-
-        q = self._phi(q)
-        k = self._phi(k)
-
-        # Scale k and v by 1/sqrt(N) before accumulation to prevent
-        # numerical overflow with many tokens (P2 has 4096 anchors).
-        # The 1/N factor cancels in the final division.
-        scale = 1.0 / (n**0.5)
-        k = k * scale
-        v = v * scale
-
-        kv = torch.einsum('bhnd,bhne->bhde', k, v)
-        k_sum = torch.einsum('bhnd->bhd', k).unsqueeze(-1)
-        attn_denom = torch.einsum('bhnd,bhde->bhne', q, k_sum).clamp(min=1e-6)
-        out = torch.einsum('bhnd,bhde->bhne', q, kv) / attn_denom
-
-        out = out.transpose(1, 2).contiguous().view(b, n, self.inner_dim)
-
-        proj_w = self.proj.weight.float()
-        proj_b = self.proj.bias.float() if self.proj.bias is not None else None
-        out = F.linear(self.dropout(out), proj_w, proj_b)
-
-        out = residual.float() + out
-        return out.to(residual.dtype)
 
 
 class PredictionRefinementAttention(nn.Module):
@@ -318,14 +221,12 @@ class RayCastDetect(Detect):
         cls_channel_min: int = 0,
         refinement_kernel_size: int = 3,
         aux_xy: bool = False,
-        quality_head: bool = False,
-        pss_head: bool = False,
-        self_attention: bool = False,
-        cross_scale_attention: bool = False,
         prediction_refinement: bool = False,
         prediction_refinement_topk: int = 100,
         inter_scale_competition: bool = False,
         inter_scale_temperature: float = 1.0,
+        dcn_in_reg_head: bool = False,
+        dcn_in_cls_head: bool = False,
     ):
         """Initialize polygon detection head.
 
@@ -347,15 +248,6 @@ class RayCastDetect(Detect):
                 7 or 13 = LargeKernelRefinementBlock (LKCell-style, wider receptive field).
             aux_xy: If True, attach a lightweight 1x1 conv head for auxiliary xy regression
                 directly on neck features, bypassing the 4-layer head stack.
-            quality_head: If True, attach a 1-channel conv per scale predicting
-                expected PolarIoU. Used at inference as cls × sigmoid(quality) for
-                IoU-aware confidence scoring.
-            self_attention: If True, apply linear self-attention on o2o cls features
-                per-scale before the final nc-projection, giving anchors spatial context
-                to suppress duplicate predictions within the same scale.
-            cross_scale_attention: If True, apply linear self-attention on concatenated
-                o2o cls features across all scales, enabling cross-scale duplicate
-                suppression (e.g., same nucleus predicted at both P2 and P3).
             prediction_refinement: If True, apply self-attention on top-K scored
                 predictions AFTER the FCN head. Each prediction sees all other top-K
                 predictions, enabling inter-prediction competition (learned NMS).
@@ -368,12 +260,13 @@ class RayCastDetect(Detect):
                 cross-scale duplicates (same nucleus predicted at P2 AND P3).
             inter_scale_temperature: Softmax temperature for inter-scale competition.
                 Lower = sharper (winner-take-more). 1.0 = standard softmax.
+            dcn_in_reg_head: If True, replace 2nd Conv in cv2 with DCNConv (modulated
+                deformable conv). Zero-init offsets/mask so it starts as standard conv.
+            dcn_in_cls_head: If True, replace 2nd Conv in cv3 with DCNConv.
         """
         self.n_rays = n_rays if n_rays is not None else _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays  # xy + rays
         self._end2end_arg = end2end  # store before parent __init__ (end2end is a property)
-        self._self_attention = self_attention
-        self._cross_scale_attention = cross_scale_attention
         self._prediction_refinement = prediction_refinement
         self.prediction_refinement_topk = prediction_refinement_topk
         self.inter_scale_competition = inter_scale_competition
@@ -394,15 +287,26 @@ class RayCastDetect(Detect):
 
         # Replace cv2 (box regression) with polygon regression stack
         c2 = max(head_channel_min, int(ch[0] * head_channel_scale))
-        self.cv2 = nn.ModuleList(
-            nn.Sequential(
-                Conv(x, c2, 3),
-                Conv(c2, c2, 3),
-                block_cls(c2, **block_kwargs),
-                nn.Conv2d(c2, self.raycast_dim, 1),
+        if dcn_in_reg_head:
+            self.cv2 = nn.ModuleList(
+                nn.Sequential(
+                    Conv(x, c2, 3),
+                    DCNConv(c2, c2, 3),
+                    block_cls(c2, **block_kwargs),
+                    nn.Conv2d(c2, self.raycast_dim, 1),
+                )
+                for x in ch
             )
-            for x in ch
-        )
+        else:
+            self.cv2 = nn.ModuleList(
+                nn.Sequential(
+                    Conv(x, c2, 3),
+                    Conv(c2, c2, 3),
+                    block_cls(c2, **block_kwargs),
+                    nn.Conv2d(c2, self.raycast_dim, 1),
+                )
+                for x in ch
+            )
 
         # Replace cv3 (cls head) with scaled intermediate channels
         # Parent Detect.__init__ builds cv3 with c3 = max(ch[0], min(nc, 100)).
@@ -411,13 +315,16 @@ class RayCastDetect(Detect):
         c3_original = max(ch[0], min(nc, 100))
         _scale_c3 = cls_channel_scale != 1.0 or cls_channel_min > 0
         c3 = max(cls_channel_min, int(ch[0] * cls_channel_scale)) if _scale_c3 else c3_original
-        if c3 != c3_original:
+        if c3 != c3_original or dcn_in_cls_head:
             from ultralytics.nn.modules.conv import DWConv
 
             self.cv3 = nn.ModuleList(
                 nn.Sequential(
                     nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
-                    nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+                    nn.Sequential(
+                        DWConv(c3, c3, 3),
+                        DCNConv(c3, c3, 3) if dcn_in_cls_head else Conv(c3, c3, 1),
+                    ),
                     nn.Conv2d(c3, self.nc, 1),
                 )
                 for x in ch
@@ -435,39 +342,6 @@ class RayCastDetect(Detect):
                 nn.init.zeros_(layer.weight)
         else:
             self.aux_xy = None
-
-        if quality_head:
-            self.quality_head = nn.ModuleList(nn.Conv2d(c, 1, 1) for c in ch)
-            for layer in self.quality_head:
-                nn.init.zeros_(layer.bias)
-                nn.init.zeros_(layer.weight)
-        else:
-            self.quality_head = None
-
-        # PSS (Positional Suppression Structure) head — 1-channel learned
-        # suppression per scale. Unlike quality head (predicts absolute piou),
-        # PSS predicts competitive/relative suppression — which position wins.
-        # Zero-initialized: starts as identity (sigmoid(0)=0.5), learns to
-        # suppress non-best anchors.
-        if pss_head:
-            self.pss_head = nn.ModuleList(nn.Conv2d(c, 1, 1) for c in ch)
-            for layer in self.pss_head:
-                nn.init.zeros_(layer.weight)
-                nn.init.constant_(layer.bias, 2.0)  # sigmoid(2)≈0.88 → near-identity at start
-        else:
-            self.pss_head = None
-
-        # Self-attention on o2o cls features
-        # c3 is the cls head intermediate dim (may have been scaled above)
-        if self_attention:
-            self.cls_attention = AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)
-        else:
-            self.cls_attention = None
-
-        if cross_scale_attention:
-            self.cross_scale_cls_attention = AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)
-        else:
-            self.cross_scale_cls_attention = None
 
         if prediction_refinement:
             self.prediction_refinement_attn = PredictionRefinementAttention(
@@ -487,22 +361,6 @@ class RayCastDetect(Detect):
             self.one2one_cv2 = copy.deepcopy(self.cv2)
             self.one2one_cv3 = copy.deepcopy(self.cv3)  # deepcopy scaled cv3 for o2o
 
-            if self.quality_head is not None:
-                self.one2one_quality_head = copy.deepcopy(self.quality_head)
-                self.quality_head = None  # o2m doesn't need quality head
-
-            if self.pss_head is not None:
-                self.one2one_pss_head = copy.deepcopy(self.pss_head)
-                self.pss_head = None  # o2m doesn't need PSS head
-
-            if self.cls_attention is not None:
-                self.one2one_cls_attention = copy.deepcopy(self.cls_attention)
-                self.cls_attention = None  # o2m doesn't need attention
-
-            if self.cross_scale_cls_attention is not None:
-                self.one2one_cross_scale_cls_attention = copy.deepcopy(self.cross_scale_cls_attention)
-                self.cross_scale_cls_attention = None
-
             if self.prediction_refinement_attn is not None:
                 self.one2one_prediction_refinement_attn = copy.deepcopy(self.prediction_refinement_attn)
                 self.prediction_refinement_attn = None
@@ -516,14 +374,6 @@ class RayCastDetect(Detect):
     def one2one(self):
         """Return one2one head components — separate cls head for NMS-free inference."""
         result = dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
-        if hasattr(self, 'one2one_quality_head') and self.one2one_quality_head is not None:
-            result['quality_head'] = self.one2one_quality_head
-        if hasattr(self, 'one2one_pss_head') and self.one2one_pss_head is not None:
-            result['pss_head'] = self.one2one_pss_head
-        if hasattr(self, 'one2one_cls_attention') and self.one2one_cls_attention is not None:
-            result['cls_attention'] = self.one2one_cls_attention
-        if hasattr(self, 'one2one_cross_scale_cls_attention') and self.one2one_cross_scale_cls_attention is not None:
-            result['cross_scale_cls_attention'] = self.one2one_cross_scale_cls_attention
         if hasattr(self, 'one2one_prediction_refinement_attn') and self.one2one_prediction_refinement_attn is not None:
             result['prediction_refinement_attn'] = self.one2one_prediction_refinement_attn
         return result
@@ -533,81 +383,25 @@ class RayCastDetect(Detect):
         x: list[torch.Tensor],
         box_head: nn.Module | None = None,
         cls_head: nn.Module | None = None,
-        quality_head: nn.Module | None = None,
-        pss_head: nn.Module | None = None,
-        cls_attention: nn.Module | None = None,
-        cross_scale_cls_attention: nn.Module | None = None,
         prediction_refinement_attn: nn.Module | None = None,
     ) -> dict[str, torch.Tensor]:
         """Concatenate polygon predictions and class scores across scales.
 
         Returns dict with 'boxes' key containing raycast_dim polygon logits,
         'scores' key containing class logits, and 'feats' key with feature maps.
-
-        Attention modes (can be combined):
-          - cls_attention: Per-scale attention on c3 features before nc-projection.
-            Each anchor sees all others on the same scale. Suppresses same-scale duplicates.
-          - cross_scale_cls_attention: Cross-scale attention on concatenated c3 features.
-            Each anchor sees all anchors across all scales. Suppresses cross-scale duplicates.
         """
         if box_head is None or cls_head is None:
             return {}
         bs = x[0].shape[0]
         poly = torch.cat([box_head[i](x[i]).view(bs, self.raycast_dim, -1) for i in range(self.nl)], dim=-1)
 
-        has_attention = cls_attention is not None or cross_scale_cls_attention is not None
-
-        if has_attention:
-            # Extract c3 features per scale (all cls head layers except final Conv2d)
-            cls_feats = []
-            spatial_shapes = []
-            for i in range(self.nl):
-                feat = cls_head[i][:-1](x[i])  # [B, c3, H, W]
-                h, w = feat.shape[2], feat.shape[3]
-                spatial_shapes.append((h, w))
-                feat = feat.permute(0, 2, 3, 1).reshape(bs, h * w, -1)  # [B, N_i, c3]
-                cls_feats.append(feat)
-
-            # Per-scale attention: each scale independently
-            if cls_attention is not None:
-                cls_feats = [cls_attention(f) for f in cls_feats]
-
-            # Cross-scale attention: concatenate all scales, attend, split back
-            if cross_scale_cls_attention is not None:
-                all_feats = torch.cat(cls_feats, dim=1)  # [B, sum(N_i), c3]
-                all_feats = cross_scale_cls_attention(all_feats)
-                # Split back per scale
-                split_sizes = [h * w for h, w in spatial_shapes]
-                cls_feats = list(all_feats.split(split_sizes, dim=1))
-
-            # Project each scale through the final Conv2d → nc logits
-            scores_per_scale = []
-            for i, feat in enumerate(cls_feats):
-                h, w = spatial_shapes[i]
-                feat = feat.reshape(bs, h, w, -1).permute(0, 3, 1, 2)  # [B, c3, H, W]
-                scores_i = cls_head[i][-1](feat)  # [B, nc, H, W]
-                scores_per_scale.append(scores_i)
-            scores = torch.cat([s.view(bs, self.nc, -1) for s in scores_per_scale], dim=-1)
-        else:
-            scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+        scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
 
         result = dict(boxes=poly, scores=scores, feats=x)
 
         if hasattr(self, 'aux_xy') and self.aux_xy is not None:
             aux_raw = torch.cat([self.aux_xy[i](x[i]).view(bs, 2, -1) for i in range(self.nl)], dim=-1)
             result['aux_xy_raw'] = aux_raw
-
-        if hasattr(self, 'quality_head') and self.quality_head is not None:
-            q_raw = torch.cat([self.quality_head[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
-            result['quality_raw'] = q_raw
-
-        if quality_head is not None:
-            q_raw = torch.cat([quality_head[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
-            result['quality_raw'] = q_raw
-
-        if pss_head is not None:
-            pss_raw = torch.cat([pss_head[i](x[i].detach()).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
-            result['pss_raw'] = pss_raw
 
         if prediction_refinement_attn is not None:
             c3_feats = []
@@ -623,8 +417,8 @@ class RayCastDetect(Detect):
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization.
 
-        Removes cv2 and cv3 (one2many heads), keeping only one2one_cv2,
-        one2one_cv3, and one2one_quality_head for NMS-free inference.
+        Removes cv2 and cv3 (one2many heads), keeping only one2one_cv2
+        and one2one_cv3 for NMS-free inference.
         """
         self.cv2 = None
         self.cv3 = None
@@ -775,9 +569,7 @@ class RayCastDetect(Detect):
             if si == 0:
                 adjusted = scale_spatial[si] * cw
             else:
-                cw_down = F.interpolate(
-                    cw, size=spatial_shapes[si], mode='bilinear', align_corners=False
-                )
+                cw_down = F.interpolate(cw, size=spatial_shapes[si], mode='bilinear', align_corners=False)
                 adjusted = scale_spatial[si] * cw_down
 
             if si == 0:
@@ -826,12 +618,6 @@ class RayCastDetect(Detect):
                 x['feats'],
             )
 
-        if 'quality_raw' in x:
-            quality = x['quality_raw'].sigmoid()
-            scores = scores * quality
-        if 'pss_raw' in x:
-            pss = x['pss_raw'].sigmoid()
-            scores = scores * pss
         if 'refine_suppress' in x:
             scores = scores * x['refine_suppress']
         return torch.cat((dbox, scores), 1)

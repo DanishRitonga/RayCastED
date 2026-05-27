@@ -31,7 +31,7 @@ from ultralytics.utils.tal import make_anchors
 
 from raycasted.data.etl.ops.iou import polar_iou_torch
 from raycasted.data.etl.ops.loss import curvature_smoothness_loss_torch
-from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
+from raycasted.model.tal import RayCastAssigner
 
 logger = logging.getLogger(__name__)
 
@@ -425,16 +425,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.range_l1_weight = range_l1_weight
         self.range_l1_eps = range_l1_eps
 
-        # DINO-style contrastive denoising for o2o branch.
-        # Injects corrupted GT copies into targets before assignment,
-        # giving the TAL assigner more positive anchors to assign.
-        # With QFL soft targets, corrupted copies get lower quality
-        # scores → model learns to predict lower confidence for
-        # approximate matches (contrastive signal).
-        self.dn_num = 0
-        self.dn_centroid_noise = 0.0
-        self.dn_ray_noise = 0.0
-
     def preprocess(self, targets, batch_size, scale_tensor=None):
         """Preprocess polygon targets.
 
@@ -460,71 +450,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         out[batch_idx, within_idx] = targets[:, 1:]  # drop batch_idx
         # NO xywh2xyxy, NO scaling — data is already normalised
         return out
-
-    def _inject_denoising_targets(self, gt_labels, gt_bboxes, mask_gt):
-        """Inject corrupted GT copies for DINO-style contrastive denoising.
-
-        For each real GT object, creates ``dn_num`` noisy copies with:
-        - Centroid shifted by uniform noise in [−dn_centroid_noise, +dn_centroid_noise]
-        - Ray distances scaled by multiplicative Gaussian noise
-
-        The TAL assigner treats these as additional GT objects, assigning
-        nearby anchors as positive. With QFL soft targets, the lower-quality
-        matches on corrupted copies get lower cls targets, providing a
-        contrastive signal: the model must predict high confidence for clean
-        matches and lower confidence for approximate/noisy ones.
-
-        This directly addresses the "too few o2o positives" problem (28 fg
-        anchors/image with topk2=1 vs 420 for o2m).
-
-        Args:
-            gt_labels: [B, N_gt, 1] class labels.
-            gt_bboxes: [B, N_gt, raycast_dim] normalised polygons (cx, cy, rays).
-            mask_gt:   [B, N_gt, 1] boolean mask for real GT objects.
-
-        Returns:
-            (gt_labels, gt_bboxes, mask_gt) with corrupted copies appended.
-        """
-        if self.dn_num <= 0 or self.dn_centroid_noise <= 0:
-            return gt_labels, gt_bboxes, mask_gt
-
-        B, N_gt, _ = gt_labels.shape
-
-        dn_labels = []
-        dn_bboxes = []
-        dn_masks = []
-
-        for _ in range(self.dn_num):
-            # Copy labels and bboxes, only for real GT objects
-            labels_copy = gt_labels.clone()
-            bboxes_copy = gt_bboxes.clone()
-            mask_copy = mask_gt.clone()
-
-            real_gt = mask_gt.squeeze(-1)  # [B, N_gt]
-            noise_scale = real_gt.float().unsqueeze(-1)  # [B, N_gt, 1]
-
-            # Centroid noise: uniform shift in normalised coords
-            centroid_noise = (torch.rand_like(bboxes_copy[:, :, :2]) * 2 - 1) * self.dn_centroid_noise
-            bboxes_copy[:, :, :2] = bboxes_copy[:, :, :2] + centroid_noise * noise_scale
-            # Clamp centroids to [0, 1]
-            bboxes_copy[:, :, :2] = bboxes_copy[:, :, :2].clamp(0.0, 1.0)
-
-            # Ray noise: multiplicative Gaussian jitter
-            if self.dn_ray_noise > 0:
-                ray_noise = torch.randn_like(bboxes_copy[:, :, 2:]) * self.dn_ray_noise
-                ray_scale = (1.0 + ray_noise).clamp(0.5, 2.0)  # prevent collapse or explosion
-                bboxes_copy[:, :, 2:] = bboxes_copy[:, :, 2:] * ray_scale * noise_scale
-                # Zero out rays for padding GTs (noise_scale handles this)
-
-            dn_labels.append(labels_copy)
-            dn_bboxes.append(bboxes_copy)
-            dn_masks.append(mask_copy)
-
-        gt_labels = torch.cat([gt_labels] + dn_labels, dim=1)
-        gt_bboxes = torch.cat([gt_bboxes] + dn_bboxes, dim=1)
-        mask_gt = torch.cat([mask_gt] + dn_masks, dim=1)
-
-        return gt_labels, gt_bboxes, mask_gt
 
     @staticmethod
     def decode_pred_xy(xy_raw, anchor_points, stride_tensor, imgsz):
@@ -570,12 +495,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         targets = self.preprocess(targets.to(self.device), batch_size)
         gt_labels, gt_bboxes = targets.split((1, self.raycast_dim), 2)  # cls:(B,N,1), poly:(B,N,raycast_dim)
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
-
-        # --- DINO-style contrastive denoising ---
-        # Inject corrupted GT copies to provide more o2o fg training signal.
-        # The TAL assigner treats them as additional GT objects; with QFL soft
-        # targets, corrupted copies get lower quality → contrastive learning.
-        gt_labels, gt_bboxes, mask_gt = self._inject_denoising_targets(gt_labels, gt_bboxes, mask_gt)
 
         # --- Decode predictions ---
         xy_raw = pred_distri[..., :2]  # [B, N, 2]
@@ -848,12 +767,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # --- Diagnostic: log raw (unweighted) losses + fg count every 100 steps ---
         _branch = getattr(self, 'branch_name', '???')
-        _skip_diag = _branch == 'o2o_hun'
-        if hasattr(self, '_diag_step') and not _skip_diag:
+        if hasattr(self, '_diag_step'):
             self._diag_step += 1
-        elif not hasattr(self, '_diag_step') and not _skip_diag:
+        elif not hasattr(self, '_diag_step'):
             self._diag_step = 0
-        if self._diag_step % 100 == 0 and not _skip_diag:
+        if self._diag_step % 100 == 0:
             _raw = loss.detach().clone()
             n_fg_actual = fg_mask.sum().item() if fg_mask.sum() > 0 else 0
             _branch = getattr(self, 'branch_name', '???')
@@ -911,10 +829,6 @@ class RayCastE2ELoss(E2ELoss):
     Smoothness lambda anneals from smooth_start to smooth_end over
     smooth_anneal_epochs. Inherits o2m/o2o weight decay from parent.
 
-    2-phase Hungarian curriculum:
-      Phase 1 (0 → phase2_start): pure dual-TAL, o2m > o2o
-      Phase 2 (phase2_start → end): Hungarian o2o ramps 0→max_weight
-
     When ``gradnorm=True``, replaces static λ weights with GradNorm
     (Chen et al., 2018) dynamic weights that equalise gradient norms
     across all 5 tasks, preventing cls_loss from dominating the shared
@@ -947,7 +861,6 @@ class RayCastE2ELoss(E2ELoss):
         focal_gamma_o2o: float | None = None,
         focal_alpha_o2o: float | None = None,
         bg_fg_ratio_o2o: int | None = None,
-        bg_fg_ratio_o2o_curriculum_epoch: int = 0,
         bg_cls_decay_o2o: float | None = None,
         fg_cls_boost_o2o: float | None = None,
         class_weights: torch.Tensor | None = None,
@@ -966,24 +879,7 @@ class RayCastE2ELoss(E2ELoss):
         fg_cls_quality_scale_o2o: float | None = None,
         lambda_suppress: float = 0.0,
         suppress_radius: float = 0.05,
-        hungarian_phase2_start: int = 0,
-        hungarian_phase3_start: int | None = None,
-        hungarian_max_weight: float = 0.9,
-        hungarian_ramp_epochs: int = 0,
-        phase2_freeze_epochs: int = 0,
-        hungarian_cost_class: float = 1.0,
-        hungarian_cost_centroid: float = 1.0,
-        hungarian_cost_ray: float = 1.0,
-        hungarian_cost_inner: float = 9999.0,
-        hungarian_cost_ray_quality: float = 1.0,
-        hungarian_cost_inner_sigma: float = 0.1,
-        hungarian_cls_only: bool = True,
         steps_per_epoch: int = 0,
-        dn_num: int = 0,
-        dn_centroid_noise: float = 0.0,
-        dn_ray_noise: float = 0.0,
-        quality_head_weight: float = 0.0,
-        pss_head_weight: float = 0.0,
         gaussian_soft_targets: bool = False,
         gaussian_sigma: float = 0.5,
         prediction_refinement_weight: float = 0.0,
@@ -1048,7 +944,6 @@ class RayCastE2ELoss(E2ELoss):
         if bg_fg_ratio_o2o is not None:
             self.one2one.bg_fg_ratio = bg_fg_ratio_o2o
         self._bg_fg_ratio_o2o_target = bg_fg_ratio_o2o if bg_fg_ratio_o2o is not None else 0
-        self._bg_fg_ratio_o2o_curriculum_epoch = bg_fg_ratio_o2o_curriculum_epoch
         if bg_cls_decay_o2o is not None:
             self.one2one.bg_cls_decay = bg_cls_decay_o2o
         if fg_cls_boost_o2o is not None:
@@ -1060,13 +955,6 @@ class RayCastE2ELoss(E2ELoss):
         if gaussian_soft_targets:
             self.one2one.gaussian_soft_targets = gaussian_soft_targets
             self.one2one.gaussian_sigma = gaussian_sigma
-
-        # DINO-style contrastive denoising — only for o2o branch
-        # (o2m already has abundant fg signal from topk=15)
-        if dn_num > 0:
-            self.one2one.dn_num = dn_num
-            self.one2one.dn_centroid_noise = dn_centroid_noise
-            self.one2one.dn_ray_noise = dn_ray_noise
 
         # Fix: parent E2ELoss.decay() uses self.updates (epoch counter) as
         # numerator and one2one.hyp.epochs as denominator.  To make the
@@ -1122,46 +1010,6 @@ class RayCastE2ELoss(E2ELoss):
         # Can be set dynamically via set_steps_per_epoch() once dataset is known.
         self.steps_per_epoch = self._steps_per_epoch
 
-        # Hungarian 2-phase curriculum
-        # Auto-compute phase2 start from decay schedule if not specified:
-        # o2m(x) = (1 - x/(T-1))*(0.8-0.1) + 0.1, o2o dominates when o2m < 0.5
-        # Solving: x/(T-1) > 0.571 → epoch > 0.571 * max_epochs
-        if hungarian_phase2_start < 0:
-            o2m_start = self.o2m_copy
-            o2m_final = self.final_o2m
-            threshold = (o2m_start + o2m_final) / 2.0
-            crossing = (o2m_start - threshold) / max(o2m_start - o2m_final, 1e-9) * max(max_epochs - 1, 1)
-            hungarian_phase2_start = int(crossing)
-            logger.info(
-                'Hungarian phase2 auto-computed: epoch %d (o2m<%.2f)',
-                hungarian_phase2_start,
-                threshold,
-            )
-        self._hungarian_cls_only = hungarian_cls_only
-        self._hungarian_phase2_start = hungarian_phase2_start
-        self._hungarian_max_weight = hungarian_max_weight
-        self._hungarian_ramp_epochs = hungarian_ramp_epochs
-        self._phase2_freeze_epochs = phase2_freeze_epochs
-        self._hungarian_weight = 0.0
-        self._max_epochs = max_epochs
-        self._backbone_frozen = False
-        self._phase2_entered = False
-
-        if hungarian_phase3_start is not None:
-            logger.warning(
-                'hungarian_phase3_start is deprecated (2-phase curriculum). '
-                'Ignoring value=%s. Use hungarian_ramp_epochs instead.',
-                hungarian_phase3_start,
-            )
-
-        if phase2_freeze_epochs > 0:
-            logger.info(
-                'phase2_freeze_epochs=%d: backbone will freeze at epoch %d for %d epochs.',
-                phase2_freeze_epochs,
-                self._hungarian_phase2_start,
-                phase2_freeze_epochs,
-            )
-
         # Sigma annealing: broad→tight radius_scale (DCFL, CVPR 2023)
         self._sigma_anneal_start = sigma_anneal_start if sigma_anneal_start > 0 else assigner_radius_scale
         self._sigma_anneal_end = sigma_anneal_end if sigma_anneal_end > 0 else assigner_radius_scale
@@ -1179,27 +1027,6 @@ class RayCastE2ELoss(E2ELoss):
         self._lambda_cls = lambda_cls
         self._lambda_xy = lambda_xy
 
-        # Create Hungarian assigner for o2o branch (initially inactive)
-        self.hungarian_assigner = None
-        if hungarian_phase2_start > 0:
-            one2one_pool = max(tal_topk // 2, 7)
-            self.hungarian_assigner = HungarianRayCastAssigner(
-                topk=one2one_pool,
-                num_classes=self.one2one.nc,
-                alpha=assigner_alpha,
-                beta=assigner_beta,
-                stride=self.one2one.stride.tolist(),
-                topk2=1,
-                radius_scale=assigner_radius_scale,
-                align_threshold=align_threshold,
-                cost_class=hungarian_cost_class,
-                cost_centroid=hungarian_cost_centroid,
-                cost_ray=hungarian_cost_ray,
-                cost_inner=hungarian_cost_inner,
-                cost_ray_quality=hungarian_cost_ray_quality,
-                cost_inner_sigma=hungarian_cost_inner_sigma,
-            )
-
         # Smooth loss (curvature): reverse anneal — starts at 0, ramps up to peak, then holds.
         # 2nd-order difference penalises sharp kinks while allowing smooth irregular shapes.
         # Early training: model focuses on detection (xy, cls, L1, piou).
@@ -1214,12 +1041,6 @@ class RayCastE2ELoss(E2ELoss):
         self.aux_xy_lambda = lambda_aux_xy
         self._max_epochs = max_epochs
         self.aux_xy_decay_epoch = max(1, aux_xy_ramp_epochs)
-
-        # Quality head weight: L1 loss against actual piou for fg anchors (0 = disabled)
-        self._quality_head_weight = quality_head_weight
-
-        # PSS head weight: BCE loss for learned per-pixel suppression (0 = disabled)
-        self._pss_head_weight = pss_head_weight
 
         # Prediction refinement weight: BCE loss for inter-prediction attention (0 = disabled)
         self._prediction_refinement_weight = prediction_refinement_weight
@@ -1261,18 +1082,6 @@ class RayCastE2ELoss(E2ELoss):
             if self._aux_xy_base > 0:
                 print(f'  Auxiliary XY head: weight={self._aux_xy_base}, decay_epoch={self.aux_xy_decay_epoch}')
 
-            if self.hungarian_assigner is not None:
-                print(
-                    f'  2-phase Hungarian: phase2@epoch {self._hungarian_phase2_start}, '
-                    f'max_weight={self._hungarian_max_weight}, '
-                    f'ramp_epochs={self._hungarian_ramp_epochs or "auto"}'
-                )
-                if self._phase2_freeze_epochs > 0:
-                    print(
-                        f'  Backbone freeze: {self._phase2_freeze_epochs} epochs '
-                        f'at phase2 start (epoch {self._hungarian_phase2_start})'
-                    )
-
         # Loss weight annealing
         current_epoch = float(self.updates)
 
@@ -1313,46 +1122,6 @@ class RayCastE2ELoss(E2ELoss):
             self.one2many.assigner.radius_scale = new_radius_scale
             self.one2one.assigner.radius_scale = new_radius_scale
 
-        # bg_fg_ratio_o2o curriculum: start at 0 (rich fg gradient), ramp to
-        # target after curriculum_epoch (add bg gradient to improve fg/bg
-        # discrimination). Addresses recall decline: bg_fg_ratio_o2o=0 gives
-        # rich fg signal early but cls head becomes too conservative later.
-        if self._bg_fg_ratio_o2o_target > 0 and self._bg_fg_ratio_o2o_curriculum_epoch > 0:
-            if current_epoch < self._bg_fg_ratio_o2o_curriculum_epoch:
-                self.one2one.bg_fg_ratio = 0
-            else:
-                remaining = max(self._max_epochs - self._bg_fg_ratio_o2o_curriculum_epoch, 1)
-                progress = min((current_epoch - self._bg_fg_ratio_o2o_curriculum_epoch) / remaining, 1.0)
-                self.one2one.bg_fg_ratio = int(
-                    round(progress * self._bg_fg_ratio_o2o_target)
-                )
-
-        # Hungarian blending: 2-phase ramp
-        # Phase 1 (0→p2): hungarian_weight = 0 (pure TAL)
-        # Phase 2 (p2→end): hungarian_weight ramps 0→max_weight
-        if self.hungarian_assigner is not None:
-            p2 = self._hungarian_phase2_start
-            if current_epoch < p2:
-                self._hungarian_weight = 0.0
-            else:
-                ramp = self._hungarian_ramp_epochs
-                if ramp > 0:
-                    progress = min((current_epoch - p2) / ramp, 1.0)
-                else:
-                    remaining = max(self._max_epochs - p2, 1)
-                    progress = min((current_epoch - p2) / remaining, 1.0)
-                self._hungarian_weight = progress * self._hungarian_max_weight
-
-        # Backbone freeze at phase 2 start (prevents transient mAP dip)
-        if self._phase2_freeze_epochs > 0 and self.hungarian_assigner is not None:
-            p2 = self._hungarian_phase2_start
-            if current_epoch >= p2 and not self._phase2_entered:
-                self._phase2_entered = True
-                self._freeze_backbone()
-                self._freeze_end_epoch = current_epoch + self._phase2_freeze_epochs
-            if self._backbone_frozen and current_epoch >= self._freeze_end_epoch:
-                self._unfreeze_backbone()
-
         # Auxiliary XY: decay after aux_xy_decay_epoch
         if self._aux_xy_base > 0 and current_epoch >= self.aux_xy_decay_epoch:
             decay_progress = (current_epoch - self.aux_xy_decay_epoch) / max(
@@ -1362,42 +1131,6 @@ class RayCastE2ELoss(E2ELoss):
         elif self._aux_xy_base > 0:
             self.aux_xy_lambda = self._aux_xy_base
 
-    def _freeze_backbone(self):
-        """Freeze backbone parameters to stabilize Hungarian transition."""
-        model = self.model
-        if hasattr(model, 'model'):
-            # Backbone = all layers except the last (detection head)
-            backbone = list(model.model.children())[:-1]
-            for module in backbone:
-                for param in module.parameters():
-                    param.requires_grad_(False)
-            self._backbone_frozen = True
-            logger.info('Backbone FROZEN at epoch %.1f (phase2 start)', self.updates / max(self.steps_per_epoch, 1))
-
-    def _unfreeze_backbone(self):
-        """Unfreeze backbone parameters after Hungarian transition stabilizes."""
-        model = self.model
-        if hasattr(model, 'model'):
-            backbone = list(model.model.children())[:-1]
-            for module in backbone:
-                for param in module.parameters():
-                    param.requires_grad_(True)
-            self._backbone_frozen = False
-            logger.info('Backbone UNFROZEN at epoch %.1f', self.updates / max(self.steps_per_epoch, 1))
-
-    def _compute_hungarian_o2o_loss(self, one2one_preds, batch):
-        """Compute o2o loss using Hungarian assigner (temporary assigner swap)."""
-        tal_assigner = self.one2one.assigner
-        tal_branch_name = getattr(self.one2one, 'branch_name', 'o2o')
-        self.one2one.assigner = self.hungarian_assigner
-        self.one2one.branch_name = 'o2o_hun'
-        try:
-            loss = self.one2one.loss(one2one_preds, batch)
-        finally:
-            self.one2one.assigner = tal_assigner
-            self.one2one.branch_name = tal_branch_name
-        return loss
-
     def __call__(self, preds, batch):
         """Compute E2E losses with optional Hungarian blending + auxiliary xy loss."""
         parsed = self.one2many.parse_output(preds)
@@ -1405,35 +1138,7 @@ class RayCastE2ELoss(E2ELoss):
         one2one_preds = parsed['one2one']
 
         loss_one2many, _, o2m_assign = self.one2many.loss(one2many_preds, batch)
-        loss_one2one_tal, loss_detach_o2o, _ = self.one2one.loss(one2one_preds, batch)
-
-        hw = self._hungarian_weight
-        if self.hungarian_assigner is not None and hw > 0:
-            loss_one2one_hun = self._compute_hungarian_o2o_loss(one2one_preds, batch)
-            if self._hungarian_cls_only:
-                loss_one2one = loss_one2one_tal.clone()
-                loss_one2one[1] = loss_one2one_tal[1] * (1 - hw) + loss_one2one_hun[0][1] * hw
-                loss_detach = loss_detach_o2o.clone()
-                loss_detach[1] = loss_detach_o2o[1] * (1 - hw) + loss_one2one_hun[1][1] * hw
-            else:
-                tal_w = 1.0 - hw
-                loss_one2one = loss_one2one_tal * tal_w + loss_one2one_hun[0] * hw
-                loss_detach = loss_detach_o2o * tal_w + loss_one2one_hun[1] * hw
-
-            _o2m_step = getattr(self.one2many, '_diag_step', 0)
-            if _o2m_step % 100 == 0:
-                _hun_fg = loss_one2one_hun[2][0].sum().item() if loss_one2one_hun[2][0].sum() > 0 else 0
-                LOGGER.info(
-                    '\nDIAG o2o_hun step=%d | hw=%.3f | cls_only=%s | fg=%d | raw: %s',
-                    _o2m_step,
-                    hw,
-                    self._hungarian_cls_only,
-                    _hun_fg,
-                    ' '.join(f'{v:.4f}' for v in loss_one2one_hun[0].detach().tolist()),
-                )
-        else:
-            loss_one2one = loss_one2one_tal
-            loss_detach = loss_detach_o2o
+        loss_one2one, loss_detach, _ = self.one2one.loss(one2one_preds, batch)
 
         total_loss = loss_one2many * self.o2m + loss_one2one * self.o2o
 
@@ -1466,87 +1171,6 @@ class RayCastE2ELoss(E2ELoss):
             else:
                 loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
         else:
-            loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
-
-        # Quality head loss: L1 between predicted piou and actual piou (o2o fg anchors only)
-        has_quality = (
-            self._quality_head_weight > 0
-            and 'quality_raw' in one2one_preds
-            and hasattr(self.one2one, '_fg_piou')
-            and self.one2one._fg_piou is not None
-        )
-        if has_quality:
-            quality_raw = one2one_preds['quality_raw'].permute(0, 2, 1).contiguous()
-            quality_pred = quality_raw.sigmoid().squeeze(-1)
-            fg_mask = self.one2one._fg_mask
-            fg_piou = self.one2one._fg_piou
-            n_fg = max(fg_mask.sum(), 1)
-            fg_quality_pred = quality_pred[fg_mask]
-            quality_loss = (fg_quality_pred - fg_piou).abs().sum() / n_fg * self._quality_head_weight
-            total_loss = torch.cat([total_loss, quality_loss.unsqueeze(0)])
-            loss_detach = torch.cat([loss_detach, quality_loss.detach().unsqueeze(0)])
-        elif self._quality_head_weight > 0:
-            loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
-
-        # PSS head loss: BCE on sigmoid(pss_raw) vs binary target
-        # Target: 1.0 for the best anchor per GT (highest TAL quality), 0.0 for all others.
-        # Unlike quality head (predicts absolute piou), PSS learns competitive suppression —
-        # which position "wins" in each local neighborhood.
-        has_pss = (
-            self._pss_head_weight > 0
-            and 'pss_raw' in one2one_preds
-            and hasattr(self.one2one, '_fg_mask')
-            and self.one2one._fg_mask is not None
-        )
-        if has_pss:
-            pss_raw = one2one_preds['pss_raw'].permute(0, 2, 1).contiguous()
-            pss_pred = pss_raw.sigmoid().squeeze(-1)
-            fg_mask = self.one2one._fg_mask
-            fg_quality = self.one2one._fg_quality if hasattr(self.one2one, '_fg_quality') else None
-            n_fg = max(fg_mask.sum(), 1)
-
-            # Build binary PSS target: 1.0 for best anchor per GT, 0.0 for all others
-            pss_target = torch.zeros_like(pss_pred)
-            if fg_quality is not None and fg_mask.any():
-                target_gt_idx = self.one2one._target_gt_idx  # [B, N]
-                fg_idx = fg_mask.nonzero(as_tuple=False)  # [K, 2]
-                batch_idx = fg_idx[:, 0]
-                anchor_idx = fg_idx[:, 1]
-                assigned_gt = target_gt_idx[batch_idx, anchor_idx].clamp(min=0)  # [K]
-                # Quality per anchor (max across classes for fg anchors)
-                fg_qual_max = fg_quality[batch_idx, anchor_idx].max(dim=-1).values  # [K]
-
-                # Vectorized per-group argmax using scatter_reduce
-                # Composite key: batch * N_gt_max + gt_idx
-                n_gt_max = target_gt_idx.shape[1]
-                composite = batch_idx * n_gt_max + assigned_gt  # [K]
-
-                # Sort by quality descending so highest quality per group
-                # overwrites in scatter (last write wins)
-                sort_order = fg_qual_max.argsort(descending=True)
-                sorted_composite = composite[sort_order]
-                sorted_anchor = anchor_idx[sort_order]
-
-                # scatter_ with last-write-wins: iterate in descending quality order
-                # so the best anchor per group is the last one written
-                n_groups = fg_mask.shape[0] * n_gt_max
-                best_anchor = torch.full((n_groups,), -1, dtype=torch.long, device=pss_pred.device)
-                best_anchor.scatter_(0, sorted_composite, sorted_anchor)
-
-                # Set target=1.0 for best anchors
-                valid = best_anchor >= 0
-                valid_groups = valid.nonzero(as_tuple=False).squeeze(-1)
-                valid_batch = valid_groups // n_gt_max
-                valid_anchors = best_anchor[valid_groups]
-                pss_target[valid_batch, valid_anchors] = 1.0
-
-            pss_loss = F.binary_cross_entropy_with_logits(pss_raw.squeeze(-1), pss_target, reduction='none')
-            # Only apply loss on fg anchors (bg anchors already have target 0.0,
-            # which BCE handles naturally, but focal/bg_fg_ratio already cover bg)
-            pss_loss = (pss_loss * fg_mask.float()).sum() / n_fg * self._pss_head_weight
-            total_loss = torch.cat([total_loss, pss_loss.unsqueeze(0)])
-            loss_detach = torch.cat([loss_detach, pss_loss.detach().unsqueeze(0)])
-        elif self._pss_head_weight > 0:
             loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
 
         # Prediction refinement loss: BCE on attention output for top-K predictions

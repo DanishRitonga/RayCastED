@@ -213,7 +213,6 @@ class _RayCastCriterionWrapper:
             focal_gamma_o2o=tcfg.get('focal_gamma_o2o', None),
             focal_alpha_o2o=tcfg.get('focal_alpha_o2o', None),
             bg_fg_ratio_o2o=tcfg.get('bg_fg_ratio_o2o', None),
-            bg_fg_ratio_o2o_curriculum_epoch=tcfg.get('bg_fg_ratio_o2o_curriculum_epoch', 0),
             bg_cls_decay_o2o=tcfg.get('bg_cls_decay_o2o', None),
             fg_cls_boost_o2o=tcfg.get('fg_cls_boost_o2o', None),
             class_weights=self._build_class_weights(tcfg),
@@ -232,24 +231,7 @@ class _RayCastCriterionWrapper:
             fg_cls_quality_scale_o2o=tcfg.get('fg_cls_quality_scale_o2o', None),
             lambda_suppress=tcfg.get('lambda_suppress', 0.0),
             suppress_radius=tcfg.get('suppress_radius', 0.05),
-            hungarian_phase2_start=tcfg.get('hungarian_phase2_start', 0),
-            hungarian_phase3_start=tcfg.get('hungarian_phase3_start', None),
-            hungarian_max_weight=tcfg.get('hungarian_max_weight', 0.9),
-            hungarian_ramp_epochs=tcfg.get('hungarian_ramp_epochs', 0),
-            phase2_freeze_epochs=tcfg.get('phase2_freeze_epochs', 0),
-            hungarian_cost_class=tcfg.get('hungarian_cost_class', 1.0),
-            hungarian_cost_centroid=tcfg.get('hungarian_cost_centroid', 1.0),
-            hungarian_cost_ray=tcfg.get('hungarian_cost_ray', 1.0),
-            hungarian_cost_inner=tcfg.get('hungarian_cost_inner', 9999.0),
-            hungarian_cost_ray_quality=tcfg.get('hungarian_cost_ray_quality', 1.0),
-            hungarian_cost_inner_sigma=tcfg.get('hungarian_cost_inner_sigma', 0.1),
-            hungarian_cls_only=tcfg.get('hungarian_cls_only', True),
             steps_per_epoch=self._steps_per_epoch,
-            dn_num=tcfg.get('dn_num', 0),
-            dn_centroid_noise=tcfg.get('dn_centroid_noise', 0.0),
-            dn_ray_noise=tcfg.get('dn_ray_noise', 0.0),
-            quality_head_weight=tcfg.get('quality_head_weight', 0.0),
-            pss_head_weight=tcfg.get('pss_head_weight', 0.0),
             gaussian_soft_targets=tcfg.get('gaussian_soft_targets', False),
             gaussian_sigma=tcfg.get('gaussian_sigma', 0.5),
             prediction_refinement_weight=tcfg.get('prediction_refinement_weight', 0.0),
@@ -531,16 +513,14 @@ class RayCastTrainer(DetectionTrainer):
         old_head = model.model[-1]
         tcfg = self.training_config
         aux_xy = bool(tcfg.get('aux_xy_weight', 0) > 0) if tcfg else False
-        quality_head = bool(tcfg.get('quality_head_weight', 0) > 0) if tcfg else False
-        pss_head = bool(tcfg.get('pss_head_weight', 0) > 0) if tcfg else False
-        self_attention = bool(tcfg.get('self_attention', False)) if tcfg else False
-        cross_scale_attention = bool(tcfg.get('cross_scale_attention', False)) if tcfg else False
         prediction_refinement = bool(tcfg.get('prediction_refinement_weight', 0) > 0) if tcfg else False
         prediction_refinement_topk = tcfg.get('prediction_refinement_topk', 100) if tcfg else 100
         inter_scale_competition = bool(tcfg.get('inter_scale_competition', False)) if tcfg else False
         inter_scale_temperature = tcfg.get('inter_scale_temperature', 1.0) if tcfg else 1.0
         cls_channel_scale = tcfg.get('cls_channel_scale', 1.0) if tcfg else 1.0
         cls_channel_min = tcfg.get('cls_channel_min', 0) if tcfg else 0
+        dcn_in_reg_head = bool(tcfg.get('dcn_in_reg_head', False)) if tcfg else False
+        dcn_in_cls_head = bool(tcfg.get('dcn_in_cls_head', False)) if tcfg else False
 
         if isinstance(old_head, RayCastDetect):
             # YAML already specifies RayCastDetect — ensure n_rays matches
@@ -586,63 +566,6 @@ class RayCastTrainer(DetectionTrainer):
                     nn.init.zeros_(layer.bias)
                     nn.init.zeros_(layer.weight)
 
-            # Attach quality head if configured
-            if quality_head and (
-                not hasattr(old_head, 'quality_head') or getattr(old_head, 'quality_head', None) is None
-            ):
-                neck_ch = tuple(old_head.cv2[i][0].conv.in_channels for i in range(old_head.nl))
-                old_head.quality_head = nn.ModuleList(nn.Conv2d(c, 1, 1) for c in neck_ch)
-                for layer in old_head.quality_head:
-                    nn.init.zeros_(layer.bias)
-                    nn.init.zeros_(layer.weight)
-                if old_head._end2end_arg:
-                    import copy
-
-                    old_head.one2one_quality_head = copy.deepcopy(old_head.quality_head)
-                    old_head.quality_head = None
-
-            # Attach PSS suppression head if configured
-            if pss_head and (not hasattr(old_head, 'pss_head') or getattr(old_head, 'pss_head', None) is None):
-                neck_ch = tuple(old_head.cv2[i][0].conv.in_channels for i in range(old_head.nl))
-                old_head.pss_head = nn.ModuleList(nn.Conv2d(c, 1, 1) for c in neck_ch)
-                for layer in old_head.pss_head:
-                    nn.init.zeros_(layer.weight)
-                    nn.init.constant_(layer.bias, 2.0)  # sigmoid(2)≈0.88 → near-identity
-                if old_head._end2end_arg:
-                    import copy
-
-                    old_head.one2one_pss_head = copy.deepcopy(old_head.pss_head)
-                    old_head.pss_head = None
-
-            # Attach self-attention on o2o cls features if configured
-            if self_attention and (
-                not hasattr(old_head, 'cls_attention') or getattr(old_head, 'cls_attention', None) is None
-            ):
-                from raycasted.model.blocks.head import AnchorSelfAttention
-
-                c3 = max(old_head.cv3[0][-1].in_channels, old_head.nc)
-                old_head.cls_attention = AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)
-                if old_head._end2end_arg:
-                    import copy
-
-                    old_head.one2one_cls_attention = copy.deepcopy(old_head.cls_attention)
-                    old_head.cls_attention = None
-
-            # Attach cross-scale attention on o2o cls features if configured
-            if cross_scale_attention and (
-                not hasattr(old_head, 'cross_scale_cls_attention')
-                or getattr(old_head, 'cross_scale_cls_attention', None) is None
-            ):
-                from raycasted.model.blocks.head import AnchorSelfAttention
-
-                c3 = max(old_head.cv3[0][-1].in_channels, old_head.nc)
-                old_head.cross_scale_cls_attention = AnchorSelfAttention(channels=c3, num_heads=4, head_dim=32)
-                if old_head._end2end_arg:
-                    import copy
-
-                    old_head.one2one_cross_scale_cls_attention = copy.deepcopy(old_head.cross_scale_cls_attention)
-                    old_head.cross_scale_cls_attention = None
-
             # Attach prediction-level self-attention on top-K scored predictions
             if prediction_refinement and (
                 not hasattr(old_head, 'prediction_refinement_attn')
@@ -662,6 +585,57 @@ class RayCastTrainer(DetectionTrainer):
 
                     old_head.one2one_prediction_refinement_attn = copy.deepcopy(old_head.prediction_refinement_attn)
                     old_head.prediction_refinement_attn = None
+
+            # Rebuild cv2 with DCN if configured and not already present
+            if dcn_in_reg_head:
+                from ultralytics.nn.modules.conv import Conv as _Conv
+
+                from raycasted.model.blocks.dcn import DCNConv
+
+                has_dcn = any(isinstance(m, DCNConv) for m in old_head.cv2.modules())
+                if not has_dcn:
+                    c2 = old_head.cv2[0][1].conv.out_channels
+                    neck_ch = tuple(old_head.cv2[i][0].conv.in_channels for i in range(old_head.nl))
+                    from raycasted.model.blocks.head import RayRefinementBlock
+
+                    block_cls = (
+                        type(old_head.cv2[0][-2])
+                        if not isinstance(old_head.cv2[0][-2], nn.Conv2d)
+                        else RayRefinementBlock
+                    )
+                    old_head.cv2 = nn.ModuleList(
+                        nn.Sequential(
+                            _Conv(x, c2, 3),
+                            DCNConv(c2, c2, 3),
+                            block_cls(c2),
+                            nn.Conv2d(c2, old_head.raycast_dim, 1),
+                        )
+                        for x in neck_ch
+                    )
+                    if old_head._end2end_arg:
+                        old_head.one2one_cv2 = copy.deepcopy(old_head.cv2)
+
+            # Rebuild cv3 with DCN if configured and not already present
+            if dcn_in_cls_head:
+                from ultralytics.nn.modules.conv import Conv as _Conv
+                from ultralytics.nn.modules.conv import DWConv
+
+                from raycasted.model.blocks.dcn import DCNConv
+
+                has_dcn = any(isinstance(m, DCNConv) for m in old_head.cv3.modules())
+                if not has_dcn:
+                    c3 = old_head.cv3[0][-1].in_channels
+                    neck_ch = tuple(old_head.cv2[i][0].conv.in_channels for i in range(old_head.nl))
+                    old_head.cv3 = nn.ModuleList(
+                        nn.Sequential(
+                            nn.Sequential(DWConv(x, x, 3), _Conv(x, c3, 1)),
+                            nn.Sequential(DWConv(c3, c3, 3), DCNConv(c3, c3, 3)),
+                            nn.Conv2d(c3, old_head.nc, 1),
+                        )
+                        for x in neck_ch
+                    )
+                    if old_head._end2end_arg:
+                        old_head.one2one_cv3 = copy.deepcopy(old_head.cv3)
         else:
             ch = _extract_neck_channels(old_head)
             nc = old_head.nc
@@ -682,14 +656,12 @@ class RayCastTrainer(DetectionTrainer):
                 cls_channel_min=cls_channel_min,
                 refinement_kernel_size=refinement_kernel_size,
                 aux_xy=aux_xy,
-                quality_head=quality_head,
-                pss_head=pss_head,
-                self_attention=self_attention,
-                cross_scale_attention=cross_scale_attention,
                 prediction_refinement=prediction_refinement,
                 prediction_refinement_topk=prediction_refinement_topk,
                 inter_scale_competition=inter_scale_competition,
                 inter_scale_temperature=inter_scale_temperature,
+                dcn_in_reg_head=dcn_in_reg_head,
+                dcn_in_cls_head=dcn_in_cls_head,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):

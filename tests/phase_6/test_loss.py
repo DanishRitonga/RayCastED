@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 import torch
 
 from raycasted.model.loss import RayCastDetectionLoss, RayCastE2ELoss
-from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
+from raycasted.model.tal import RayCastAssigner
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -320,7 +320,7 @@ def test_e2e_constructor():
     assert isinstance(e2e.one2one.assigner, RayCastAssigner), (
         f'one2one should use RayCastAssigner, got {type(e2e.one2one.assigner).__name__}'
     )
-    assert e2e.hungarian_assigner is None
+    assert not hasattr(e2e, 'hungarian_assigner') or e2e.hungarian_assigner is None
 
     assert e2e.one2many.assigner.topk == 13, f'one2many.topk should be 13, got {e2e.one2many.assigner.topk}'
     assert e2e.one2many.assigner.topk2 == 13, f'one2many.topk2 should be 13, got {e2e.one2many.assigner.topk2}'

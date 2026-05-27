@@ -164,10 +164,18 @@ class RayCastValidator(DetectionValidator):
 
     def get_desc(self):
         """Return a formatted header string for polygon + centroid metrics."""
-        return ("%22s" + "%11s" * 10) % (
-            "Class", "Images", "Instances",
-            "Poly(P", "R", "mAP50", "mAP50-95)",
-            "Cent(P", "R", "mAP50", "mAP50-95)",
+        return ('%22s' + '%11s' * 10) % (
+            'Class',
+            'Images',
+            'Instances',
+            'Poly(P',
+            'R',
+            'mAP50',
+            'mAP50-95)',
+            'Cent(P',
+            'R',
+            'mAP50',
+            'mAP50-95)',
         )
 
     def preprocess(self, batch):

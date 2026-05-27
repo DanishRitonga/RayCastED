@@ -3,7 +3,7 @@
 Tests that the critical bugs are fixed:
 - one2many branch uses configurable topk (default 13)
 - one2one branch uses TAL with topk=max(topk//2,7), topk2=1 (or annealed)
-- Hungarian assigner created only when hungarian_phase2_start > 0
+- Hungarian assigner is not created (removed — dead end for FCN)
 - Both branches use RayCastAssigner by default
 - O2M/O2O decay schedule spans full training (not ~1.5 epochs)
 
@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import torch
 
 from raycasted.model.loss import RayCastDetectionLoss, RayCastE2ELoss
-from raycasted.model.tal import HungarianRayCastAssigner, RayCastAssigner
+from raycasted.model.tal import RayCastAssigner
 
 
 def _make_mock_model(nc=4, reg_max=1):
@@ -55,20 +55,18 @@ def test_e2e_dual_tal_default():
     assert e2e.one2one.assigner.topk == 7
     assert e2e.one2one.assigner.topk2 == 1
 
-    assert e2e.hungarian_assigner is None
+    assert not hasattr(e2e, 'hungarian_assigner') or e2e.hungarian_assigner is None
     print('PASS: E2E dual-TAL — o2m.topk=13, o2o.topk=7, o2o.topk2=1')
 
 
-def test_e2e_hungarian_created_when_configured():
-    """Verify Hungarian assigner is created when hungarian_phase2_start > 0."""
+def test_e2e_hungarian_not_created():
+    """Verify Hungarian assigner is not created (removed — dead end for FCN)."""
     model = _make_mock_model()
-    e2e = RayCastE2ELoss(model, max_epochs=200, tal_topk=13, hungarian_phase2_start=100)
+    e2e = RayCastE2ELoss(model, max_epochs=200, tal_topk=13)
 
-    assert e2e.hungarian_assigner is not None
-    assert isinstance(e2e.hungarian_assigner, HungarianRayCastAssigner)
-
+    assert not hasattr(e2e, 'hungarian_assigner') or e2e.hungarian_assigner is None
     assert isinstance(e2e.one2one.assigner, RayCastAssigner)
-    print('PASS: Hungarian assigner created when phase2_start=100')
+    print('PASS: Hungarian assigner not created (removed — dead end for FCN)')
 
 
 def test_e2e_custom_tal_topk():
@@ -147,7 +145,7 @@ def test_e2e_decay_schedule_spans_full_training():
 
 if __name__ == '__main__':
     test_e2e_dual_tal_default()
-    test_e2e_hungarian_created_when_configured()
+    test_e2e_hungarian_not_created()
     test_e2e_custom_tal_topk()
     test_e2e_assertions_trigger_on_bad_config()
     test_e2e_alpha_beta_configurable()

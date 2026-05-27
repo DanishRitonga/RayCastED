@@ -27,7 +27,6 @@ def _yaml_has_custom_modules(cfg_dict):
         'DWT_LL',
         'DWT_HF',
         'HFResidual',
-        'AIFIBlock',
         'RayCastRTDETRDecoder',
         'RayCastDetect',
     }
