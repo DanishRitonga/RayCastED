@@ -502,6 +502,9 @@ class RayCastTrainer(DetectionTrainer):
         """
         register_raycast_head()
         nc = self.data.get('nc') if hasattr(self, 'data') and self.data else None
+        nc_override = self.training_config.get('nc_override') if self.training_config else None
+        if nc_override is not None:
+            nc = nc_override
 
         # Detect RT-DETR YAML — if head contains RayCastRTDETRDecoder,
         # use the RT-DETR model class (different loss, no E2E head patching)
@@ -913,7 +916,13 @@ class RayCastTrainer(DetectionTrainer):
         dict needed by RayCastPredictor and ONNX export.
         """
         head = self.model.model[-1]
-        self.model.nc = self.data.get('nc', getattr(self.model, 'nc', head.nc))
+        nc_override = self.training_config.get('nc_override') if self.training_config else None
+        data_nc = self.data.get('nc', getattr(self.model, 'nc', head.nc))
+        if nc_override is not None:
+            self.model.nc = nc_override
+            self.data['nc'] = nc_override
+        else:
+            self.model.nc = data_nc
         assert head.nc == self.model.nc, (
             f'Head nc ({head.nc}) != data nc ({self.model.nc}). '
             f'Model YAML likely has wrong nc. Fix the YAML or pass nc to get_model().'

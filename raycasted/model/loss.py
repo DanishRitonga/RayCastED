@@ -516,6 +516,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         )  # [N, 4+n_rays]
         targets = self.preprocess(targets.to(self.device), batch_size)
         gt_labels, gt_bboxes = targets.split((1, self.raycast_dim), 2)  # cls:(B,N,1), poly:(B,N,raycast_dim)
+        if self.nc == 1:
+            gt_labels = torch.zeros_like(gt_labels)  # binary: all fg are class 0
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
 
         # --- Decode predictions ---
