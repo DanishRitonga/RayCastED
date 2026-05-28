@@ -123,6 +123,13 @@ training:
   inter_scale_competition: true      # enable inter-scale competition at inference
   inter_scale_temperature: 0.5       # softmax temperature (1.0 = standard, 0.5 = sharper winner-take-more)
 
+  # Local (intra-scale) competition: per-scale 3×3 neighborhood softmax.
+  # Each anchor competes with its 8 neighbors — local winner-take-more.
+  # Suppresses same-scale duplicates where one nucleus fires adjacent anchors.
+  local_competition: true             # enable local competition at inference
+  local_competition_kernel: 3         # neighborhood size (3 = 3×3)
+  local_competition_temperature: 0.5  # softmax temperature (lower = sharper)
+
   # class_weights disabled — caused mode collapse. fg-only amplification with
   # weak bg gradient pushed model to always predict the least-penalized class.
   # Re-add with conservative values (cap at 2.0) once bg suppression is stable.
@@ -193,12 +200,12 @@ training:
   dcn_in_cls_head: false    # replace 2nd Conv in cv3 with DCNConv
 
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
-  clip_grad: 0.1
+  clip_grad: 10.0
 
   # Asymmetric max() bound loss (LSP-DETR criterion.py:16-27):
   # loss = max(relu(r_gt*(1-eps) - r_pred), relu(r_pred - r_gt*(1+eps)))
   # Takes worst violation per ray. Zero inside tolerance band.
-  bound_l1_weight: 5.0     # weight for asymmetric bound loss (0 = disabled)
+  bound_l1_weight: 0.0     # weight for asymmetric bound loss (0 = disabled)
   bound_l1_eps: 0.1         # tolerance fraction (0.1 = ±10% of r_gt)
 
 datasets:

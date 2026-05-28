@@ -182,6 +182,13 @@ class TrainingSettings(BaseModel):
     inter_scale_competition: bool = False
     inter_scale_temperature: float = 1.0  # softmax temperature (lower = sharper competition)
 
+    # Local (intra-scale) competition: per-scale 3×3 neighborhood softmax.
+    # Each anchor competes with its 8 neighbors — local winner-take-more.
+    # Suppresses same-scale duplicates where one nucleus fires adjacent anchors.
+    local_competition: bool = False
+    local_competition_kernel: int = 3  # neighborhood size (3 = 3×3 = 8 neighbors)
+    local_competition_temperature: float = 1.0  # softmax temperature (lower = sharper)
+
     # Pretrained backbone
     pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
 
