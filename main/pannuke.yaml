@@ -126,7 +126,7 @@ training:
   # Local (intra-scale) competition: per-scale 3×3 neighborhood softmax.
   # Each anchor competes with its 8 neighbors — local winner-take-more.
   # Suppresses same-scale duplicates where one nucleus fires adjacent anchors.
-  local_competition: true             # enable local competition at inference
+  local_competition: false            # disabled — softmax with 9 entries crushes all scores (temp too low for k=3)
   local_competition_kernel: 3         # neighborhood size (3 = 3×3)
   local_competition_temperature: 0.5  # softmax temperature (lower = sharper)
 

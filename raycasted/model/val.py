@@ -1,8 +1,10 @@
 """RayCastED — Polygon Validation Metrics (Phase 8).
 
 RayCastValidator subclasses DetectionValidator, replacing bounding-box IoU
-with GPU-accelerated Polar IoU. Reports both shapely_f1 (primary) and
-centroid_f1 (LSP-DETR comparison).
+with GPU-accelerated Polar IoU. Reports polar mAP, centroid F1, and bPQ
+(Shapely polygon IoU, no rasterization).
+
+bPQ is used as the primary model selection metric (fitness).
 
 Spec reference: docs/project.md section 15
 """
@@ -15,11 +17,11 @@ from ultralytics.models.yolo.detect.val import DetectionValidator
 from ultralytics.utils.metrics import DetMetrics, Metric, ap_per_class
 
 from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
-
-# Backward compat constant (tests import this). At runtime, use self.raycast_dim.
 from raycasted.data.etl.utils import constants as _val_const
+from raycasted.data.etl.utils.constants import configure_rays
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.blocks.rtdetr_head import RayCastRTDETRDecoder
+from raycasted.model.metrics import compute_bpq_shapely, raycast_batch_to_shapely
 
 RAYCAST_DIM = 2 + _val_const.N_RAYS
 
@@ -30,16 +32,19 @@ RAYCAST_DIM = 2 + _val_const.N_RAYS
 
 
 class RayCastDetMetrics(DetMetrics):
-    """Polygon detection metrics: polar mAP + centroid F1.
+    """Polygon detection metrics: polar mAP + centroid F1 + bPQ (Shapely).
 
-    Extends DetMetrics with two additional metric tracks:
-      - shapely: mAP computed using Polar IoU (primary, same metric as training loss)
+    Extends DetMetrics with three metric tracks:
+      - shapely: mAP computed using Polar IoU
       - centroid: F1 computed using centroid Euclidean distance (LSP-DETR comparison)
+      - bpq: binary Panoptic Quality via Shapely polygon IoU (primary fitness)
 
     Stats dict keys:
       - tp_shapely: Polar IoU true-positive matrix
       - tp_centroid: centroid distance matching true-positive matrix
       - conf, pred_cls, target_cls, target_img: shared across all tracks
+
+    bPQ is accumulated per-image in bpq_sum / bpq_count (not via ap_per_class).
     """
 
     def __init__(self, names=None):
@@ -48,6 +53,10 @@ class RayCastDetMetrics(DetMetrics):
         self.centroid = Metric()
         self.stats = dict(tp_shapely=[], tp_centroid=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
         self.box = Metric()  # kept for DetMetrics compatibility but unused
+        self.bpq_sum = 0.0
+        self.bpq_count = 0
+        self.bsq_sum = 0.0
+        self.bdq_sum = 0.0
 
     def process(self, save_dir=Path('.'), plot=False, on_plot=None):
         """Compute mAP from shapely and centroid true-positive stats."""
@@ -98,7 +107,7 @@ class RayCastDetMetrics(DetMetrics):
 
     @property
     def keys(self):
-        """Return metric key names for both shapely and centroid tracks."""
+        """Return metric key names for shapely, centroid, and bPQ tracks."""
         return [
             'metrics/precision(P)',
             'metrics/recall(P)',
@@ -108,11 +117,17 @@ class RayCastDetMetrics(DetMetrics):
             'metrics/recall(C)',
             'metrics/mAP50(C)',
             'metrics/mAP50-95(C)',
+            'metrics/bPQ',
+            'metrics/bSQ',
+            'metrics/bDQ',
         ]
 
     def mean_results(self):
-        """Return mean results for shapely and centroid tracks."""
-        return self.shapely.mean_results() + self.centroid.mean_results()
+        """Return mean results for shapely, centroid, and bPQ tracks."""
+        bpq = self.bpq_sum / max(self.bpq_count, 1)
+        bsq = self.bsq_sum / max(self.bpq_count, 1)
+        bdq = self.bdq_sum / max(self.bpq_count, 1)
+        return self.shapely.mean_results() + self.centroid.mean_results() + [bpq, bsq, bdq]
 
     def class_result(self, i):
         """Return per-class results for shapely and centroid tracks."""
@@ -125,8 +140,8 @@ class RayCastDetMetrics(DetMetrics):
 
     @property
     def fitness(self):
-        """Fitness based on shapely mAP50-95 (primary metric)."""
-        return self.shapely.fitness()
+        """Fitness based on bPQ (primary model selection metric)."""
+        return self.bpq_sum / max(self.bpq_count, 1)
 
     @property
     def results_dict(self):
@@ -134,6 +149,13 @@ class RayCastDetMetrics(DetMetrics):
         keys = [*self.keys, 'fitness']
         values = [*self.mean_results(), self.fitness]
         return dict(zip(keys, values))
+
+    def update_bpq(self, bpq: float, bsq: float, bdq: float):
+        """Accumulate per-image bPQ components."""
+        self.bpq_sum += bpq
+        self.bsq_sum += bsq
+        self.bdq_sum += bdq
+        self.bpq_count += 1
 
 
 # ---------------------------------------------------------------------------
@@ -163,8 +185,8 @@ class RayCastValidator(DetectionValidator):
         self.raycast_dim = 2 + _val_const.N_RAYS  # default; overwritten in init_metrics from model head
 
     def get_desc(self):
-        """Return a formatted header string for polygon + centroid metrics."""
-        return ('%22s' + '%11s' * 10) % (
+        """Return a formatted header string for polygon + centroid + bPQ metrics."""
+        return ('%22s' + '%11s' * 13) % (
             'Class',
             'Images',
             'Instances',
@@ -176,6 +198,9 @@ class RayCastValidator(DetectionValidator):
             'R',
             'mAP50',
             'mAP50-95)',
+            'bPQ',
+            'bSQ',
+            'bDQ',
         )
 
     def preprocess(self, batch):
@@ -212,6 +237,7 @@ class RayCastValidator(DetectionValidator):
             head = child
         self.raycast_dim = getattr(head, 'raycast_dim', 2 + _val_const.N_RAYS)
         self.n_rays = getattr(head, 'n_rays', _val_const.N_RAYS)
+        configure_rays(self.n_rays)
 
     def finalize_metrics(self, *args, **kwargs):
         """Skip confusion matrix plotting — incompatible with raycast polygon data."""
@@ -388,7 +414,7 @@ class RayCastValidator(DetectionValidator):
     def update_metrics(self, preds, batch):
         """Update metrics with polygon predictions and ground truth.
 
-        Overridden to pass tp_shapely/tp_centroid and skip confusion matrix.
+        Overridden to pass tp_shapely/tp_centroid, compute bPQ, and skip confusion matrix.
         """
         for si, pred in enumerate(preds):
             self.seen += 1
@@ -406,6 +432,18 @@ class RayCastValidator(DetectionValidator):
                     'pred_cls': np.zeros(0) if no_pred else predn['cls'].cpu().numpy(),
                 }
             )
+
+            # bPQ via Shapely polygon IoU (no rasterization)
+            pred_bboxes = (
+                predn['bboxes'].cpu().numpy() if predn['bboxes'].numel() > 0 else np.zeros((0, self.raycast_dim))
+            )
+            gt_bboxes = (
+                pbatch['bboxes'].cpu().numpy() if pbatch['bboxes'].numel() > 0 else np.zeros((0, self.raycast_dim))
+            )
+            pred_polys = raycast_batch_to_shapely(pred_bboxes, n_rays=self.n_rays)
+            gt_polys = raycast_batch_to_shapely(gt_bboxes, n_rays=self.n_rays)
+            bpq, bsq, bdq = compute_bpq_shapely(pred_polys, gt_polys)
+            self.metrics.update_bpq(bpq, bsq, bdq)
 
     def get_stats(self):
         """Compute and return validation metrics."""

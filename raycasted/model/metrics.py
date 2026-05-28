@@ -1,16 +1,20 @@
 """RayCastED — Instance Segmentation Metrics.
 
 Pixel-level metrics for evaluating polygon detection as instance segmentation:
-  AJI, PQ, SQ, DQ.
+  AJI, PQ, SQ, DQ, bPQ (Shapely).
 
 Uses polygon rasterization via Shapely + PIL, and Hungarian matching via scipy.
+bPQ uses Shapely polygon IoU directly — no rasterization.
 """
 
 import numpy as np
 from PIL import Image, ImageDraw
 from scipy.optimize import linear_sum_assignment
+from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.validation import make_valid
 
 from raycasted.data.etl.ops.convert import raycast_to_polygon
+from raycasted.data.etl.utils import constants as _const
 
 
 def polygon_to_mask(cx: float, cy: float, rays: np.ndarray, img_h: int, img_w: int) -> np.ndarray:
@@ -230,3 +234,107 @@ def polygons_to_masks(
         rays = det[2:]  # all remaining columns are ray distances
         masks.append(polygon_to_mask(cx, cy, rays, img_h, img_w))
     return masks
+
+
+def raycast_batch_to_shapely(
+    bboxes: np.ndarray,
+    n_rays: int | None = None,
+) -> list[ShapelyPolygon]:
+    """Convert batch of raycast bboxes to Shapely Polygons.
+
+    Args:
+        bboxes: [N, 2+n_rays] array where each row is [cx, cy, d_1..d_n].
+        n_rays: Override ray count (default: use _const.N_RAYS).
+
+    Returns:
+        List of Shapely Polygon objects (empty list if no bboxes).
+    """
+    if bboxes.shape[0] == 0:
+        return []
+    nr = n_rays or _const.N_RAYS
+    polys = []
+    for i in range(bboxes.shape[0]):
+        cx, cy = float(bboxes[i, 0]), float(bboxes[i, 1])
+        rays = bboxes[i, 2 : 2 + nr]
+        poly = raycast_to_polygon(rays, cx, cy)
+        if not poly.is_valid:
+            poly = make_valid(poly)
+        if isinstance(poly, ShapelyPolygon) and not poly.is_empty:
+            polys.append(poly)
+        else:
+            polys.append(ShapelyPolygon())
+    return polys
+
+
+def compute_bpq_shapely(
+    pred_polys: list[ShapelyPolygon],
+    gt_polys: list[ShapelyPolygon],
+    iou_threshold: float = 0.5,
+    eps: float = 1e-6,
+) -> tuple[float, float, float]:
+    """Compute binary Panoptic Quality using Shapely polygon IoU (no rasterization).
+
+    bPQ = DQ * SQ where:
+      DQ = TP / (TP + 0.5*FP + 0.5*FN)   (detection quality, equivalent to F1)
+      SQ = mean IoU of matched pairs       (segmentation quality)
+
+    Uses Hungarian matching (scipy) on -IoU, then filters by iou_threshold.
+
+    Args:
+        pred_polys: List of Shapely Polygon predictions.
+        gt_polys: List of Shapely Polygon ground truths.
+        iou_threshold: Minimum IoU for valid match (default 0.5).
+        eps: Small value to prevent division by zero.
+
+    Returns:
+        (bPQ, bSQ, bDQ) tuple. Returns (0.0, 0.0, 0.0) if no GT.
+    """
+    n_pred = len(pred_polys)
+    n_gt = len(gt_polys)
+
+    if n_gt == 0:
+        return 0.0, 0.0, 0.0
+    if n_pred == 0:
+        return 0.0, 0.0, 0.0
+
+    # Filter out empty polygons
+    pred_valid = [(i, p) for i, p in enumerate(pred_polys) if not p.is_empty and p.area > eps]
+    gt_valid = [(i, p) for i, p in enumerate(gt_polys) if not p.is_empty and p.area > eps]
+
+    if len(gt_valid) == 0 or len(pred_valid) == 0:
+        dq = 0.0
+        sq = 0.0
+        return dq * sq, sq, dq
+
+    # Compute pairwise IoU matrix [n_pred_valid, n_gt_valid]
+    n_p = len(pred_valid)
+    n_g = len(gt_valid)
+    iou_matrix = np.zeros((n_p, n_g), dtype=np.float64)
+
+    for pi, (p_idx, p_poly) in enumerate(pred_valid):
+        for gi, (g_idx, g_poly) in enumerate(gt_valid):
+            try:
+                inter = p_poly.intersection(g_poly)
+                if inter.is_empty:
+                    continue
+                union = p_poly.area + g_poly.area - inter.area
+                if union > eps:
+                    iou_matrix[pi, gi] = inter.area / union
+            except Exception:
+                continue
+
+    # Hungarian matching (maximize IoU → minimize -IoU)
+    row_ind, col_ind = linear_sum_assignment(-iou_matrix)
+    matched_ious = iou_matrix[row_ind, col_ind]
+
+    # Filter by threshold
+    valid = matched_ious > iou_threshold
+    tp = int(valid.sum())
+    fp = n_p - tp
+    fn = n_g - tp
+
+    dq = tp / (tp + 0.5 * fp + 0.5 * fn + eps)
+    sq = float(matched_ious[valid].mean()) if tp > 0 else 0.0
+    pq = dq * sq
+
+    return float(pq), float(sq), float(dq)
