@@ -92,7 +92,7 @@ training:
   # for NMS-free inference. These override the base values above for o2o only.
   focal_gamma_o2o: 2.0        # Focal loss — suppresses easy bg, keeps hard negatives
   focal_alpha_o2o: 0.75       # Fg weight — match o2m (train13 proved 0.75 works)
-  bg_fg_ratio_o2o: 3             # OHEM needs bg budget > 0 (was 0 = no bg gradient)
+  bg_fg_ratio_o2o: 0              # No bg subsampling for o2o (train49 setting)
   ohem_bg_ratio_o2o: 0.0         # OHEM disabled for hierarchical_cls experiment
   bg_cls_decay_o2o: 1.0       # Full bg weight — don't starve bg suppression (0.5 over-corrected)
   fg_cls_boost_o2o: null       # Additive boost disabled for o2o

@@ -706,7 +706,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 )
             else:
                 loss_binary = self.bce(pred_binary.float(), binary_target)
-            loss[1] = loss_binary.sum() / max(batch_size * pred_binary.shape[1], 1)
+            loss[1] = loss_binary.sum() / max(fg_mask.sum(), 1)
 
             # Class loss: CE on fg anchors only — inter-class discrimination
             n_fg = max(fg_mask.sum(), 1)
