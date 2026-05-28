@@ -117,8 +117,8 @@ class RayCastDetMetrics(DetMetrics):
 
     @property
     def fitness(self):
-        """Fitness based on bPQ (primary model selection metric)."""
-        return self.bpq_sum / max(self.bpq_count, 1)
+        """Fitness based on mAP50-95 (stable for early stopping)."""
+        return self.shapely.fitness()
 
     @property
     def results_dict(self):
