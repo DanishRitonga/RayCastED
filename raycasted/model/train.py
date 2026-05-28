@@ -241,6 +241,7 @@ class _RayCastCriterionWrapper:
             range_l1_eps=tcfg.get('range_l1_eps', 0.1),
             bound_l1_weight=tcfg.get('bound_l1_weight', 0.0),
             bound_l1_eps=tcfg.get('bound_l1_eps', 0.1),
+            hierarchical_cls=tcfg.get('hierarchical_cls', False),
         )
 
 
@@ -544,6 +545,7 @@ class RayCastTrainer(DetectionTrainer):
         cls_channel_min = tcfg.get('cls_channel_min', 0) if tcfg else 0
         dcn_in_reg_head = bool(tcfg.get('dcn_in_reg_head', False)) if tcfg else False
         dcn_in_cls_head = bool(tcfg.get('dcn_in_cls_head', False)) if tcfg else False
+        hierarchical_cls = bool(tcfg.get('hierarchical_cls', False)) if tcfg else False
 
         if isinstance(old_head, RayCastDetect):
             # YAML already specifies RayCastDetect — ensure n_rays matches
@@ -690,6 +692,7 @@ class RayCastTrainer(DetectionTrainer):
                 local_competition_temperature=local_competition_temperature,
                 dcn_in_reg_head=dcn_in_reg_head,
                 dcn_in_cls_head=dcn_in_cls_head,
+                hierarchical_cls=hierarchical_cls,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):

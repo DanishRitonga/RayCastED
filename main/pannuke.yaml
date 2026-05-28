@@ -93,7 +93,7 @@ training:
   focal_gamma_o2o: 2.0        # Focal loss — suppresses easy bg, keeps hard negatives
   focal_alpha_o2o: 0.75       # Fg weight — match o2m (train13 proved 0.75 works)
   bg_fg_ratio_o2o: 3             # OHEM needs bg budget > 0 (was 0 = no bg gradient)
-  ohem_bg_ratio_o2o: 1.0         # OHEM for o2o: select hardest bg instead of random
+  ohem_bg_ratio_o2o: 0.0         # OHEM disabled for hierarchical_cls experiment
   bg_cls_decay_o2o: 1.0       # Full bg weight — don't starve bg suppression (0.5 over-corrected)
   fg_cls_boost_o2o: null       # Additive boost disabled for o2o
   fg_cls_quality_scale_o2o: null  # Multiplicative disabled — was starving fg (TAL quality 0.2-0.5)
@@ -200,6 +200,12 @@ training:
   # DCNv2 (modulated deformable conv) in head
   dcn_in_reg_head: false    # disabled for clip_grad+bound_l1 isolation experiment (train39 has DCN)
   dcn_in_cls_head: false    # replace 2nd Conv in cv3 with DCNConv
+
+  # Hierarchical cls: split o2o cls into binary (fg/bg, 1ch) + class (cell type, nc ch).
+  # Binary head gets ALL 5376 anchors of gradient → strong fg/bg discrimination.
+  # Class head only learns inter-class separation on fg anchors.
+  # At inference: sigmoid(binary) × softmax(class).
+  hierarchical_cls: true
 
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
   clip_grad: 10.0

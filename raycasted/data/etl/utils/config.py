@@ -198,6 +198,12 @@ class TrainingSettings(BaseModel):
     dcn_in_reg_head: bool = False  # replace 2nd Conv in cv2 with modulated deformable conv
     dcn_in_cls_head: bool = False  # replace 2nd Conv in cv3 with modulated deformable conv
 
+    # Hierarchical cls: split o2o cls into binary (fg/bg, 1ch) + class (cell type, nc ch).
+    # Binary head gets ALL 5376 anchors of gradient → strong fg/bg discrimination.
+    # Class head only learns inter-class separation on fg anchors.
+    # At inference: sigmoid(binary) × softmax(class).
+    hierarchical_cls: bool = False
+
     # Gradient clipping (LSP-DETR uses 0.1). Ultralytics defaults to 10.0.
     clip_grad: float = 10.0
 

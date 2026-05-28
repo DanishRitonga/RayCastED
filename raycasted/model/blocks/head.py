@@ -230,6 +230,7 @@ class RayCastDetect(Detect):
         local_competition_temperature: float = 1.0,
         dcn_in_reg_head: bool = False,
         dcn_in_cls_head: bool = False,
+        hierarchical_cls: bool = False,
     ):
         """Initialize polygon detection head.
 
@@ -271,6 +272,10 @@ class RayCastDetect(Detect):
             dcn_in_reg_head: If True, replace 2nd Conv in cv2 with DCNConv (modulated
                 deformable conv). Zero-init offsets/mask so it starts as standard conv.
             dcn_in_cls_head: If True, replace 2nd Conv in cv3 with DCNConv.
+            hierarchical_cls: If True, split o2o cls head into binary (fg/bg, 1ch)
+                + class (cell type, nc ch). Binary head gets ALL 5376 anchors of gradient
+                for strong fg/bg discrimination. Class head only learns inter-class
+                separation on fg anchors. At inference: sigmoid(binary) × softmax(class).
         """
         self.n_rays = n_rays if n_rays is not None else _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays  # xy + rays
@@ -282,6 +287,7 @@ class RayCastDetect(Detect):
         self.local_competition = local_competition
         self.local_competition_kernel = local_competition_kernel
         self.local_competition_temperature = local_competition_temperature
+        self.hierarchical_cls = hierarchical_cls
 
         super().__init__(nc, reg_max, end2end, ch)
 
@@ -372,6 +378,16 @@ class RayCastDetect(Detect):
             self.one2one_cv2 = copy.deepcopy(self.cv2)
             self.one2one_cv3 = copy.deepcopy(self.cv3)  # deepcopy scaled cv3 for o2o
 
+            if hierarchical_cls:
+                # Hierarchical cls: binary (fg/bg) + class (cell type) heads.
+                # Binary head: ALL 5376 anchors get gradient → strong fg/bg signal.
+                # Class head: only fg anchors → simpler inter-class task.
+                self.one2one_cv3_binary = copy.deepcopy(self.cv3)
+                for seq in self.one2one_cv3_binary:
+                    seq[-1] = nn.Conv2d(seq[-1].in_channels, 1, 1)
+                self.one2one_cv3_class = copy.deepcopy(self.cv3)
+                # one2one_cv3 kept for o2m fallback / fuse compat; o2o uses binary+class
+
             if self.prediction_refinement_attn is not None:
                 self.one2one_prediction_refinement_attn = copy.deepcopy(self.prediction_refinement_attn)
                 self.prediction_refinement_attn = None
@@ -385,6 +401,9 @@ class RayCastDetect(Detect):
     def one2one(self):
         """Return one2one head components — separate cls head for NMS-free inference."""
         result = dict(box_head=self.one2one_cv2, cls_head=self.one2one_cv3)
+        if self.hierarchical_cls:
+            result['cls_head_binary'] = self.one2one_cv3_binary
+            result['cls_head_class'] = self.one2one_cv3_class
         if hasattr(self, 'one2one_prediction_refinement_attn') and self.one2one_prediction_refinement_attn is not None:
             result['prediction_refinement_attn'] = self.one2one_prediction_refinement_attn
         return result
@@ -395,20 +414,30 @@ class RayCastDetect(Detect):
         box_head: nn.Module | None = None,
         cls_head: nn.Module | None = None,
         prediction_refinement_attn: nn.Module | None = None,
+        cls_head_binary: nn.Module | None = None,
+        cls_head_class: nn.Module | None = None,
     ) -> dict[str, torch.Tensor]:
         """Concatenate polygon predictions and class scores across scales.
 
         Returns dict with 'boxes' key containing raycast_dim polygon logits,
         'scores' key containing class logits, and 'feats' key with feature maps.
+
+        When cls_head_binary and cls_head_class are provided (hierarchical cls),
+        returns 'binary_scores' [B, 1, N] and 'class_scores' [B, nc, N] instead
+        of 'scores'.
         """
         if box_head is None or cls_head is None:
             return {}
         bs = x[0].shape[0]
         poly = torch.cat([box_head[i](x[i]).view(bs, self.raycast_dim, -1) for i in range(self.nl)], dim=-1)
 
-        scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
-
-        result = dict(boxes=poly, scores=scores, feats=x)
+        if cls_head_binary is not None and cls_head_class is not None:
+            binary_scores = torch.cat([cls_head_binary[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
+            class_scores = torch.cat([cls_head_class[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+            result = dict(boxes=poly, binary_scores=binary_scores, class_scores=class_scores, feats=x)
+        else:
+            scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+            result = dict(boxes=poly, scores=scores, feats=x)
 
         if hasattr(self, 'aux_xy') and self.aux_xy is not None:
             aux_raw = torch.cat([self.aux_xy[i](x[i]).view(bs, 2, -1) for i in range(self.nl)], dim=-1)
@@ -510,13 +539,16 @@ class RayCastDetect(Detect):
         preds = self.forward_head(x, **self.one2many)
         if self.end2end:
             x_detach = [xi.detach() for xi in x]
-            one2one = self.forward_head(x_detach, **self.one2one)
+            one2one_kwargs = dict(self.one2one)
             has_refine = (
                 hasattr(self, 'one2one_prediction_refinement_attn')
                 and self.one2one_prediction_refinement_attn is not None
             )
             if not has_refine:
                 has_refine = hasattr(self, 'prediction_refinement_attn') and self.prediction_refinement_attn is not None
+            if has_refine:
+                one2one_kwargs.pop('prediction_refinement_attn', None)
+            one2one = self.forward_head(x_detach, **one2one_kwargs)
             if has_refine:
                 one2one = self._apply_prediction_refinement(one2one)
             preds = {'one2many': preds, 'one2one': one2one}
@@ -656,7 +688,14 @@ class RayCastDetect(Detect):
         rays_abs = rays * imgsz[0]  # [B, n_rays, N] — pixel-space ray distances
 
         dbox = torch.cat([xy_abs, rays_abs], dim=1)
-        scores = x['scores'].sigmoid()
+
+        # Hierarchical cls: combine binary fg/bg + class distribution
+        if 'binary_scores' in x and 'class_scores' in x:
+            binary_prob = x['binary_scores'].sigmoid()  # [B, 1, N]
+            class_prob = F.softmax(x['class_scores'], dim=1)  # [B, nc, N]
+            scores = binary_prob * class_prob  # [B, nc, N]
+        else:
+            scores = x['scores'].sigmoid()
 
         # Local competition: per-scale 3×3 neighborhood softmax suppresses
         # same-scale duplicates (adjacent anchors firing for one nucleus).
@@ -726,6 +765,12 @@ class RayCastDetect(Detect):
                 bias[:2] = 0.0
                 bias[2:] = ray_bias
                 b[-1].bias.data[: self.nc] = math.log(5 / self.nc / (crop_size / self.stride[i]) ** 2)
+            if self.hierarchical_cls:
+                for i in range(self.nl):
+                    self.one2one_cv3_binary[i][-1].bias.data.fill_(math.log(5 / 1 / (crop_size / self.stride[i]) ** 2))
+                    self.one2one_cv3_class[i][-1].bias.data[: self.nc] = math.log(
+                        5 / self.nc / (crop_size / self.stride[i]) ** 2
+                    )
 
         if hasattr(self, 'aux_xy') and self.aux_xy is not None:
             for layer in self.aux_xy:

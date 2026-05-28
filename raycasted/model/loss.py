@@ -351,12 +351,14 @@ class RayCastDetectionLoss(v8DetectionLoss):
         range_l1_eps: float = 0.1,
         bound_l1_weight: float = 0.0,
         bound_l1_eps: float = 0.1,
+        hierarchical_cls: bool = False,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
         self.raycast_dim = m.raycast_dim  # 2 + n_rays
         self.no = m.nc + self.raycast_dim  # BUG-02 fix (parent sets nc + reg_max*4)
         self.use_dfl = False  # DFL not applicable to polygon regression
+        self.hierarchical_cls = hierarchical_cls
 
         # Log-space ray loss configuration
         self.log_ray_loss = log_ray_loss
@@ -493,7 +495,15 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # --- Prediction parsing ---
         pred_distri = preds['boxes'].permute(0, 2, 1).contiguous()  # [B, N, raycast_dim]
-        pred_scores = preds['scores'].permute(0, 2, 1).contiguous()  # [B, N, nc]
+        use_hier = self.hierarchical_cls and 'binary_scores' in preds and 'class_scores' in preds
+        if use_hier:
+            pred_binary = preds['binary_scores'].permute(0, 2, 1).contiguous()  # [B, N, 1]
+            pred_class = preds['class_scores'].permute(0, 2, 1).contiguous()  # [B, N, nc]
+            # For assignment: use sigmoid(binary) × softmax(class) as pseudo-scores
+            combined_prob = pred_binary.sigmoid() * F.softmax(pred_class, dim=-1)
+            pred_scores = combined_prob  # [B, N, nc]
+        else:
+            pred_scores = preds['scores'].permute(0, 2, 1).contiguous()  # [B, N, nc]
         anchor_points, stride_tensor = make_anchors(preds['feats'], self.stride, 0.5)
 
         batch_size = pred_scores.shape[0]
@@ -681,13 +691,38 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 bg_weight = torch.where(cls_targets > 0, 1.0, self.bg_cls_decay)
             loss_cls = loss_cls * bg_weight
 
-        target_scores_sum = (
-            max(fg_mask.sum(), 1) if (self.soft_targets or self.gaussian_soft_targets) else max(cls_targets.sum(), 1)
-        )
-        loss[1] = loss_cls.sum() / target_scores_sum
+        if use_hier:
+            # --- Hierarchical cls: binary (fg/bg) + class (cell type) ---
+            # Binary loss: focal BCE on ALL anchors — massive fg/bg gradient signal
+            binary_target = fg_mask.float().unsqueeze(-1)  # [B, N, 1]
+            if self.focal_gamma > 0:
+                loss_binary = _focal_loss(
+                    pred_binary.float(), binary_target, gamma=self.focal_gamma, alpha=self.focal_alpha
+                )
+            else:
+                loss_binary = self.bce(pred_binary.float(), binary_target)
+            loss[1] = loss_binary.sum() / max(batch_size * pred_binary.shape[1], 1)
 
-        _cls_fg_sum = (loss_cls * cls_targets).sum().item() / max(target_scores_sum, 1)
-        _cls_bg_sum = (loss_cls * (1 - cls_targets)).sum().item() / max(target_scores_sum, 1)
+            # Class loss: CE on fg anchors only — inter-class discrimination
+            n_fg = max(fg_mask.sum(), 1)
+            if fg_mask.any():
+                fg_pred_class = pred_class[fg_mask]  # [K, nc]
+                fg_class_labels = cls_targets[fg_mask].argmax(dim=-1)  # [K]
+                loss_class = F.cross_entropy(fg_pred_class, fg_class_labels, reduction='none')
+                loss[1] += loss_class.sum() / n_fg
+
+            _cls_fg_sum = 0.0
+            _cls_bg_sum = 0.0
+        else:
+            target_scores_sum = (
+                max(fg_mask.sum(), 1)
+                if (self.soft_targets or self.gaussian_soft_targets)
+                else max(cls_targets.sum(), 1)
+            )
+            loss[1] = loss_cls.sum() / target_scores_sum
+
+            _cls_fg_sum = (loss_cls * cls_targets).sum().item() / max(target_scores_sum, 1)
+            _cls_bg_sum = (loss_cls * (1 - cls_targets)).sum().item() / max(target_scores_sum, 1)
 
         # --- Polygon regression losses (foreground only) ---
         n_fg = max(fg_mask.sum(), 1)
@@ -942,6 +977,7 @@ class RayCastE2ELoss(E2ELoss):
         range_l1_eps: float = 0.1,
         bound_l1_weight: float = 0.0,
         bound_l1_eps: float = 0.1,
+        hierarchical_cls: bool = False,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -1012,6 +1048,10 @@ class RayCastE2ELoss(E2ELoss):
             self.one2one.fg_cls_boost = fg_cls_boost_o2o
         if fg_cls_quality_scale_o2o is not None:
             self.one2one.fg_cls_quality_scale = fg_cls_quality_scale_o2o
+
+        # Hierarchical cls: binary (fg/bg) + class (cell type) for o2o branch
+        if hierarchical_cls:
+            self.one2one.hierarchical_cls = True
 
         # Per-branch Gaussian soft targets: o2o can use Gaussian independently
         if gaussian_soft_targets:

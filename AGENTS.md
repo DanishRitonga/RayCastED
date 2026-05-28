@@ -83,6 +83,8 @@ When adding a new config parameter:
 
 6. **Hard binarization destroys quality signal**: `loss.py:480` sets `cls_targets[cls_targets > 0] = 1.0` (on a cloned tensor, so no autograd issue). All positives get same target regardless of match quality. Soft targets for o2o may help.
 
+42. **Detection is the bottleneck, not segmentation**: bSQ reaches 0.756 by epoch 5 (when it finds a nucleus, it draws good boundaries), but bDQ=0.322 (it can't find them reliably). bPQ = DQ × SQ — DQ is always the limiting factor. All regression-targeting approaches (DCN, quality head, bound_l1, range_l1) are dead ends because the problem is cls discrimination, not boundary quality.
+
 ### Assignment & Warmup
 
 7. **warmup sigma must be configurable**: Sigma was previously hardcoded at 0.15. Now configurable via `assigner_radius_scale` in pannuke.yaml. Always thread sigma through loss.py → tal.py and update pannuke.yaml.
