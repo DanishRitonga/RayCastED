@@ -242,7 +242,6 @@ class _RayCastCriterionWrapper:
             bound_l1_weight=tcfg.get('bound_l1_weight', 0.0),
             bound_l1_eps=tcfg.get('bound_l1_eps', 0.1),
             hierarchical_cls=tcfg.get('hierarchical_cls', False),
-            hierarchical_cls_detach=tcfg.get('hierarchical_cls_detach', True),
         )
 
 
