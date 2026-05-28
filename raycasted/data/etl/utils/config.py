@@ -203,6 +203,7 @@ class TrainingSettings(BaseModel):
     # Class head only learns inter-class separation on fg anchors.
     # At inference: sigmoid(binary) × softmax(class).
     hierarchical_cls: bool = False
+    hierarchical_cls_detach: bool = True  # Stop-grad binary head input to prevent backbone flooding
 
     # Gradient clipping (LSP-DETR uses 0.1). Ultralytics defaults to 10.0.
     clip_grad: float = 10.0

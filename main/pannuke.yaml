@@ -205,7 +205,8 @@ training:
   # Binary head gets ALL 5376 anchors of gradient → strong fg/bg discrimination.
   # Class head only learns inter-class separation on fg anchors.
   # At inference: sigmoid(binary) × softmax(class).
-  hierarchical_cls: true
+  hierarchical_cls: true         # enabled with detach to test stop-grad binary head
+  hierarchical_cls_detach: true   # Stop-grad binary head input to prevent backbone flooding
 
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
   clip_grad: 10.0

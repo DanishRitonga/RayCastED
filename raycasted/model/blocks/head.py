@@ -231,6 +231,7 @@ class RayCastDetect(Detect):
         dcn_in_reg_head: bool = False,
         dcn_in_cls_head: bool = False,
         hierarchical_cls: bool = False,
+        hierarchical_cls_detach: bool = True,
     ):
         """Initialize polygon detection head.
 
@@ -276,6 +277,8 @@ class RayCastDetect(Detect):
                 + class (cell type, nc ch). Binary head gets ALL 5376 anchors of gradient
                 for strong fg/bg discrimination. Class head only learns inter-class
                 separation on fg anchors. At inference: sigmoid(binary) × softmax(class).
+            hierarchical_cls_detach: If True, stop-gradient binary head input features
+                to prevent backbone gradient flooding (default True).
         """
         self.n_rays = n_rays if n_rays is not None else _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays  # xy + rays
@@ -288,6 +291,7 @@ class RayCastDetect(Detect):
         self.local_competition_kernel = local_competition_kernel
         self.local_competition_temperature = local_competition_temperature
         self.hierarchical_cls = hierarchical_cls
+        self.hierarchical_cls_detach = hierarchical_cls_detach
 
         super().__init__(nc, reg_max, end2end, ch)
 
@@ -432,7 +436,10 @@ class RayCastDetect(Detect):
         poly = torch.cat([box_head[i](x[i]).view(bs, self.raycast_dim, -1) for i in range(self.nl)], dim=-1)
 
         if cls_head_binary is not None and cls_head_class is not None:
-            binary_scores = torch.cat([cls_head_binary[i](x[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1)
+            binary_in = [xi.detach() for xi in x] if self.hierarchical_cls_detach else x
+            binary_scores = torch.cat(
+                [cls_head_binary[i](binary_in[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1
+            )
             class_scores = torch.cat([cls_head_class[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
             result = dict(boxes=poly, binary_scores=binary_scores, class_scores=class_scores, feats=x)
         else:
