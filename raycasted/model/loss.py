@@ -647,21 +647,22 @@ class RayCastDetectionLoss(v8DetectionLoss):
             # near the fg/bg boundary that need gradient the most.
             fg_per_batch = fg_mask.sum(dim=1)  # [B]
             bg_mask = ~fg_mask  # [B, N]
-            bg_loss = loss_cls * bg_mask.float()  # zero fg losses
-            ohem_mask = torch.ones_like(loss_cls, dtype=torch.bool)
+            bg_loss = loss_cls * bg_mask.float().unsqueeze(-1)  # zero fg losses, [B,N,nc]
+            bg_loss_per_anchor = bg_loss.sum(dim=-1)  # [B, N] — per-anchor loss for ranking
+            ohem_mask = torch.ones_like(fg_mask)  # [B, N]
             for b in range(batch_size):
                 n_fg_b = fg_per_batch[b].item()
                 if n_fg_b == 0:
                     continue
-                bg_losses_b = bg_loss[b]
                 n_bg_keep = min(int(bg_mask[b].sum().item()), int(n_fg_b * self.bg_fg_ratio))
                 if n_bg_keep <= 0:
                     continue
+                bg_losses_b = bg_loss_per_anchor[b]  # [N]
                 _, topk_idx = bg_losses_b.topk(min(n_bg_keep, bg_losses_b.shape[0]))
                 bg_drop = bg_mask[b].clone()
                 bg_drop[topk_idx] = False  # keep hardest K bg
-                ohem_mask[b, bg_drop] = False  # drop the rest
-            loss_cls = loss_cls.masked_fill(~ohem_mask, 0.0)
+                ohem_mask[b] &= ~bg_drop  # drop the rest
+            loss_cls = loss_cls * ohem_mask.unsqueeze(-1).float()
         elif self.bg_fg_ratio > 0:
             loss_cls = loss_cls.masked_fill(ignore_mask, 0.0)
 
