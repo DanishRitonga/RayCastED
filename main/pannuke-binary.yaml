@@ -10,11 +10,7 @@ global_settings:
   annotation_type: "raycast"
 
   global_cell_map:
-    "Neoplastic": 0
-    "Inflammatory": 1
-    "Connective": 2
-    "Dead": 3
-    "Epithelial": 4
+    "Cell": 0
 
   global_tissue_map:
     "Adrenal Gland": 0
@@ -92,7 +88,7 @@ training:
   # for NMS-free inference. These override the base values above for o2o only.
   focal_gamma_o2o: 2.0        # Focal loss — suppresses easy bg, keeps hard negatives
   focal_alpha_o2o: 0.75       # Fg weight — match o2m (train13 proved 0.75 works)
-  bg_fg_ratio_o2o: 3             # OHEM needs bg budget > 0 (was 0 = no bg gradient)
+  bg_fg_ratio_o2o: 0              # Train49 setting: no bg subsampling for o2o
   ohem_bg_ratio_o2o: 0.0         # OHEM disabled for hierarchical_cls experiment
   bg_cls_decay_o2o: 1.0       # Full bg weight — don't starve bg suppression (0.5 over-corrected)
   fg_cls_boost_o2o: null       # Additive boost disabled for o2o
@@ -205,8 +201,9 @@ training:
   # Binary head gets ALL 5376 anchors of gradient → strong fg/bg discrimination.
   # Class head only learns inter-class separation on fg anchors.
   # At inference: sigmoid(binary) × softmax(class).
-  hierarchical_cls: true         # enabled with detach to test stop-grad binary head
-  hierarchical_cls_detach: true   # Stop-grad binary head input to prevent backbone flooding
+  hierarchical_cls: false        # Not needed with nc=1 (already binary)
+  hierarchical_cls_detach: true
+  nc_override: 1                 # Collapse all classes to single "cell" class
 
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
   clip_grad: 10.0

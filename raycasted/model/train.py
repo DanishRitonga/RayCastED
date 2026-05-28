@@ -242,6 +242,7 @@ class _RayCastCriterionWrapper:
             bound_l1_weight=tcfg.get('bound_l1_weight', 0.0),
             bound_l1_eps=tcfg.get('bound_l1_eps', 0.1),
             hierarchical_cls=tcfg.get('hierarchical_cls', False),
+            nc_override=tcfg.get('nc_override', None),
         )
 
 
@@ -502,9 +503,14 @@ class RayCastTrainer(DetectionTrainer):
         """
         register_raycast_head()
         nc = self.data.get('nc') if hasattr(self, 'data') and self.data else None
-        nc_override = self.training_config.get('nc_override') if self.training_config else None
-        if nc_override is not None:
+        tcfg = self.training_config or {}
+        nc_override = tcfg.get('nc_override') if tcfg else None
+        if nc_override is not None and nc is not None and nc_override != nc:
+            from ultralytics.utils import LOGGER
+            LOGGER.info(f'nc_override={nc_override}: overriding data nc={nc} → {nc_override}')
             nc = nc_override
+            self.data['nc'] = nc_override
+            self.data['names'] = {i: f'class_{i}' for i in range(nc_override)}
 
         # Detect RT-DETR YAML — if head contains RayCastRTDETRDecoder,
         # use the RT-DETR model class (different loss, no E2E head patching)
@@ -916,13 +922,7 @@ class RayCastTrainer(DetectionTrainer):
         dict needed by RayCastPredictor and ONNX export.
         """
         head = self.model.model[-1]
-        nc_override = self.training_config.get('nc_override') if self.training_config else None
-        data_nc = self.data.get('nc', getattr(self.model, 'nc', head.nc))
-        if nc_override is not None:
-            self.model.nc = nc_override
-            self.data['nc'] = nc_override
-        else:
-            self.model.nc = data_nc
+        self.model.nc = self.data.get('nc', getattr(self.model, 'nc', head.nc))
         assert head.nc == self.model.nc, (
             f'Head nc ({head.nc}) != data nc ({self.model.nc}). '
             f'Model YAML likely has wrong nc. Fix the YAML or pass nc to get_model().'

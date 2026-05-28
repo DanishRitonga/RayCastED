@@ -259,7 +259,6 @@ def compute_bpq_from_iou(
     if n_gt == 0 or n_pred == 0:
         return 0.0, 0.0, 0.0
 
-    iou_matrix = np.nan_to_num(iou_matrix, nan=0.0, posinf=0.0, neginf=0.0)
     row_ind, col_ind = linear_sum_assignment(-iou_matrix)
     matched_ious = iou_matrix[row_ind, col_ind]
 

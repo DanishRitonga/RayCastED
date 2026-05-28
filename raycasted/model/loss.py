@@ -352,6 +352,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         bound_l1_weight: float = 0.0,
         bound_l1_eps: float = 0.1,
         hierarchical_cls: bool = False,
+        nc_override: int | None = None,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -359,6 +360,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.no = m.nc + self.raycast_dim  # BUG-02 fix (parent sets nc + reg_max*4)
         self.use_dfl = False  # DFL not applicable to polygon regression
         self.hierarchical_cls = hierarchical_cls
+        self.nc_override = nc_override
 
         # Log-space ray loss configuration
         self.log_ray_loss = log_ray_loss
@@ -516,9 +518,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
         )  # [N, 4+n_rays]
         targets = self.preprocess(targets.to(self.device), batch_size)
         gt_labels, gt_bboxes = targets.split((1, self.raycast_dim), 2)  # cls:(B,N,1), poly:(B,N,raycast_dim)
-        if self.nc == 1:
-            gt_labels = torch.zeros_like(gt_labels)  # binary: all fg are class 0
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+
+        if self.nc_override is not None and self.nc_override == 1:
+            gt_labels = torch.zeros_like(gt_labels)
 
         # --- Decode predictions ---
         xy_raw = pred_distri[..., :2]  # [B, N, 2]
@@ -980,6 +983,7 @@ class RayCastE2ELoss(E2ELoss):
         bound_l1_weight: float = 0.0,
         bound_l1_eps: float = 0.1,
         hierarchical_cls: bool = False,
+        nc_override: int | None = None,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -1022,6 +1026,8 @@ class RayCastE2ELoss(E2ELoss):
             range_l1_eps=range_l1_eps,
             bound_l1_weight=bound_l1_weight,
             bound_l1_eps=bound_l1_eps,
+            hierarchical_cls=hierarchical_cls,
+            nc_override=nc_override,
         )
         super().__init__(model, loss_fn=loss_fn)
 
@@ -1054,6 +1060,10 @@ class RayCastE2ELoss(E2ELoss):
         # Hierarchical cls: binary (fg/bg) + class (cell type) for o2o branch
         if hierarchical_cls:
             self.one2one.hierarchical_cls = True
+
+        if nc_override is not None:
+            self.one2many.nc_override = nc_override
+            self.one2one.nc_override = nc_override
 
         # Per-branch Gaussian soft targets: o2o can use Gaussian independently
         if gaussian_soft_targets:
