@@ -232,6 +232,7 @@ class RayCastDetect(Detect):
         dcn_in_cls_head: bool = False,
         hierarchical_cls: bool = False,
         hierarchical_cls_detach: bool = True,
+        hierarchical_binary_threshold: float = 0.01,
     ):
         """Initialize polygon detection head.
 
@@ -292,6 +293,7 @@ class RayCastDetect(Detect):
         self.local_competition_temperature = local_competition_temperature
         self.hierarchical_cls = hierarchical_cls
         self.hierarchical_cls_detach = hierarchical_cls_detach
+        self.hierarchical_binary_threshold = hierarchical_binary_threshold
 
         super().__init__(nc, reg_max, end2end, ch)
 
@@ -696,11 +698,12 @@ class RayCastDetect(Detect):
 
         dbox = torch.cat([xy_abs, rays_abs], dim=1)
 
-        # Hierarchical cls: combine binary fg/bg + class distribution
+        # Hierarchical cls: binary head gates fg/bg, class head ranks
         if 'binary_scores' in x and 'class_scores' in x:
             binary_prob = x['binary_scores'].sigmoid()  # [B, 1, N]
             class_prob = F.softmax(x['class_scores'], dim=1)  # [B, nc, N]
-            scores = binary_prob * class_prob  # [B, nc, N]
+            binary_gate = (binary_prob > self.hierarchical_binary_threshold).float()  # [B, 1, N]
+            scores = class_prob * binary_gate  # [B, nc, N]
         else:
             scores = x['scores'].sigmoid()
 

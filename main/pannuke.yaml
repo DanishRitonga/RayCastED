@@ -204,9 +204,10 @@ training:
   # Hierarchical cls: split o2o cls into binary (fg/bg, 1ch) + class (cell type, nc ch).
   # Binary head gets ALL 5376 anchors of gradient → strong fg/bg discrimination.
   # Class head only learns inter-class separation on fg anchors.
-  # At inference: sigmoid(binary) × softmax(class).
-  hierarchical_cls: true         # enabled with detach to test stop-grad binary head
-  hierarchical_cls_detach: true   # Stop-grad binary head input to prevent backbone flooding
+  # At inference: binary sigmoid gates fg/bg (>threshold), class softmax ranks.
+  hierarchical_cls: true
+  hierarchical_cls_detach: true
+  hierarchical_binary_threshold: 0.01  # Hard gate: keep anchors with sigmoid(binary) > 0.01
 
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
   clip_grad: 10.0

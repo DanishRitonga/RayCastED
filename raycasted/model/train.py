@@ -556,6 +556,7 @@ class RayCastTrainer(DetectionTrainer):
         dcn_in_cls_head = bool(tcfg.get('dcn_in_cls_head', False)) if tcfg else False
         hierarchical_cls = bool(tcfg.get('hierarchical_cls', False)) if tcfg else False
         hierarchical_cls_detach = bool(tcfg.get('hierarchical_cls_detach', True)) if tcfg else True
+        hierarchical_binary_threshold = float(tcfg.get('hierarchical_binary_threshold', 0.01)) if tcfg else 0.01
 
         if isinstance(old_head, RayCastDetect):
             # YAML already specifies RayCastDetect — ensure n_rays matches
@@ -704,6 +705,7 @@ class RayCastTrainer(DetectionTrainer):
                 dcn_in_cls_head=dcn_in_cls_head,
                 hierarchical_cls=hierarchical_cls,
                 hierarchical_cls_detach=hierarchical_cls_detach,
+                hierarchical_binary_threshold=hierarchical_binary_threshold,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):

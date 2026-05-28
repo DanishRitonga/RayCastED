@@ -204,6 +204,7 @@ class TrainingSettings(BaseModel):
     # At inference: sigmoid(binary) × softmax(class).
     hierarchical_cls: bool = False
     hierarchical_cls_detach: bool = True  # Stop-grad binary head input to prevent backbone flooding
+    hierarchical_binary_threshold: float = 0.01  # Binary gate threshold at inference
     nc_override: int | None = None  # Force nc (e.g. 1 for binary detection); remaps all labels to class 0
 
     # Gradient clipping (LSP-DETR uses 0.1). Ultralytics defaults to 10.0.
