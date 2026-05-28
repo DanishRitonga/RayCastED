@@ -64,6 +64,7 @@ class TrainingSettings(BaseModel):
     focal_alpha: float = 0.25  # positive weight (standard: 0.25)
     log_ray_loss: bool = False  # log-space L1 on rays for scale-invariant errors
     bg_fg_ratio: int = 3  # max bg anchors per fg anchor in cls loss
+    ohem_bg_ratio: float = 0.0  # OHEM: keep hardest K bg per fg (0.0=random, >0=hard example mining)
 
     # Pixel-Level Balancing
     plb_enabled: bool = False  # area-based fg weighting to boost small nuclei
@@ -81,6 +82,7 @@ class TrainingSettings(BaseModel):
     focal_gamma_o2o: float | None = None
     focal_alpha_o2o: float | None = None
     bg_fg_ratio_o2o: int | None = None
+    ohem_bg_ratio_o2o: float | None = None  # OHEM for o2o branch (None=inherit base)
     bg_cls_decay_o2o: float | None = None  # per-branch bg suppression for o2o
     fg_cls_boost_o2o: float | None = None  # per-branch quality re-weighting for o2o
     fg_cls_quality_scale_o2o: float | None = None  # per-branch multiplicative quality for o2o

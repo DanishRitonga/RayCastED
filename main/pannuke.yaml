@@ -74,6 +74,7 @@ training:
   log_ray_loss: true           # Log-space L1 on rays — equalizes relative errors across scales
   bg_fg_ratio: 3               # Max bg anchors per fg anchor in cls loss (o2m branch)
                                 # o2o uses bg_fg_ratio_o2o=0 (no subsampling, focal handles imbalance)
+  ohem_bg_ratio: 0.0           # OHEM: select hardest bg instead of random (0.0=random, >0=enable)
 
   # Soft targets — use assigner's quality-weighted alignment scores instead of
   # hard 0/1 binarisation. TESTED: harmful in E2E dual-assigner setup. Quality
@@ -91,7 +92,8 @@ training:
   # for NMS-free inference. These override the base values above for o2o only.
   focal_gamma_o2o: 2.0        # Focal loss — suppresses easy bg, keeps hard negatives
   focal_alpha_o2o: 0.75       # Fg weight — match o2m (train13 proved 0.75 works)
-  bg_fg_ratio_o2o: 0             # bg_fg>0 hurts o2o (train56 confirmed). Keep at 0.
+  bg_fg_ratio_o2o: 3             # OHEM needs bg budget > 0 (was 0 = no bg gradient)
+  ohem_bg_ratio_o2o: 1.0         # OHEM for o2o: select hardest bg instead of random
   bg_cls_decay_o2o: 1.0       # Full bg weight — don't starve bg suppression (0.5 over-corrected)
   fg_cls_boost_o2o: null       # Additive boost disabled for o2o
   fg_cls_quality_scale_o2o: null  # Multiplicative disabled — was starving fg (TAL quality 0.2-0.5)

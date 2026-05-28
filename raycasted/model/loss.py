@@ -334,6 +334,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         focal_gamma: float = 0.0,
         focal_alpha: float = 0.25,
         bg_fg_ratio: int = 3,
+        ohem_bg_ratio: float = 0.0,
         plb_enabled: bool = False,
         bg_cls_decay: float = 1.0,
         fg_cls_boost: float = 0.0,
@@ -422,6 +423,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.lambda_suppress = lambda_suppress
         self.suppress_radius = suppress_radius
         self.bg_fg_ratio = bg_fg_ratio
+        self.ohem_bg_ratio = ohem_bg_ratio
 
         # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band
         self.range_l1_weight = range_l1_weight
@@ -587,7 +589,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # Without this, P2's 4096 anchors overwhelm the ~1200 fg anchors,
         # producing cls_loss ~15 that drowns the regression gradient signal.
         ignore_mask = torch.zeros_like(cls_targets, dtype=torch.bool)
-        if self.bg_fg_ratio > 0:
+        use_ohem = self.ohem_bg_ratio > 0 and self.bg_fg_ratio > 0
+        if self.bg_fg_ratio > 0 and not use_ohem:
             fg_per_batch = fg_mask.sum(dim=1)  # [B]
             bg_mask = ~fg_mask  # [B, N]
             for b in range(batch_size):
@@ -638,7 +641,28 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 pos_mask = (cls_targets > 0).float()
                 loss_cls = loss_cls * (1.0 + pos_mask * (cw.unsqueeze(0).unsqueeze(0) - 1.0))
 
-        if self.bg_fg_ratio > 0:
+        if use_ohem:
+            # OHEM: keep only the hardest K bg anchors per batch element.
+            # Select bg with highest cls loss — these are the confusing ones
+            # near the fg/bg boundary that need gradient the most.
+            fg_per_batch = fg_mask.sum(dim=1)  # [B]
+            bg_mask = ~fg_mask  # [B, N]
+            bg_loss = loss_cls * bg_mask.float()  # zero fg losses
+            ohem_mask = torch.ones_like(loss_cls, dtype=torch.bool)
+            for b in range(batch_size):
+                n_fg_b = fg_per_batch[b].item()
+                if n_fg_b == 0:
+                    continue
+                bg_losses_b = bg_loss[b]
+                n_bg_keep = min(int(bg_mask[b].sum().item()), int(n_fg_b * self.bg_fg_ratio))
+                if n_bg_keep <= 0:
+                    continue
+                _, topk_idx = bg_losses_b.topk(min(n_bg_keep, bg_losses_b.shape[0]))
+                bg_drop = bg_mask[b].clone()
+                bg_drop[topk_idx] = False  # keep hardest K bg
+                ohem_mask[b, bg_drop] = False  # drop the rest
+            loss_cls = loss_cls.masked_fill(~ohem_mask, 0.0)
+        elif self.bg_fg_ratio > 0:
             loss_cls = loss_cls.masked_fill(ignore_mask, 0.0)
 
         if self.bg_cls_decay < 1.0 or self.fg_cls_boost > 0 or self.fg_cls_quality_scale > 0:
@@ -881,6 +905,7 @@ class RayCastE2ELoss(E2ELoss):
         lambda_aux_xy: float = 0.0,
         aux_xy_ramp_epochs: int = 100,
         bg_fg_ratio: int = 3,
+        ohem_bg_ratio: float = 0.0,
         plb_enabled: bool = False,
         bg_cls_decay: float = 1.0,
         fg_cls_boost: float = 0.0,
@@ -889,6 +914,7 @@ class RayCastE2ELoss(E2ELoss):
         focal_gamma_o2o: float | None = None,
         focal_alpha_o2o: float | None = None,
         bg_fg_ratio_o2o: int | None = None,
+        ohem_bg_ratio_o2o: float | None = None,
         bg_cls_decay_o2o: float | None = None,
         fg_cls_boost_o2o: float | None = None,
         class_weights: torch.Tensor | None = None,
@@ -940,6 +966,7 @@ class RayCastE2ELoss(E2ELoss):
             focal_alpha=focal_alpha,
             align_threshold=align_threshold,
             bg_fg_ratio=bg_fg_ratio,
+            ohem_bg_ratio=ohem_bg_ratio,
             plb_enabled=plb_enabled,
             bg_cls_decay=bg_cls_decay,
             fg_cls_boost=fg_cls_boost,
@@ -976,6 +1003,8 @@ class RayCastE2ELoss(E2ELoss):
         if bg_fg_ratio_o2o is not None:
             self.one2one.bg_fg_ratio = bg_fg_ratio_o2o
         self._bg_fg_ratio_o2o_target = bg_fg_ratio_o2o if bg_fg_ratio_o2o is not None else 0
+        if ohem_bg_ratio_o2o is not None:
+            self.one2one.ohem_bg_ratio = ohem_bg_ratio_o2o
         if bg_cls_decay_o2o is not None:
             self.one2one.bg_cls_decay = bg_cls_decay_o2o
         if fg_cls_boost_o2o is not None:

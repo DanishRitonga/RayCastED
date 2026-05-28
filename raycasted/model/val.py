@@ -1,8 +1,7 @@
 """RayCastED — Polygon Validation Metrics (Phase 8).
 
 RayCastValidator subclasses DetectionValidator, replacing bounding-box IoU
-with GPU-accelerated Polar IoU. Reports polar mAP, centroid F1, and bPQ
-(Shapely polygon IoU, no rasterization).
+with GPU-accelerated Polar IoU. Reports polar mAP and bPQ (from Polar IoU).
 
 bPQ is used as the primary model selection metric (fitness).
 
@@ -21,7 +20,7 @@ from raycasted.data.etl.utils import constants as _val_const
 from raycasted.data.etl.utils.constants import configure_rays
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.blocks.rtdetr_head import RayCastRTDETRDecoder
-from raycasted.model.metrics import compute_bpq_shapely, raycast_batch_to_shapely
+from raycasted.model.metrics import compute_bpq_from_iou
 
 RAYCAST_DIM = 2 + _val_const.N_RAYS
 
@@ -32,16 +31,14 @@ RAYCAST_DIM = 2 + _val_const.N_RAYS
 
 
 class RayCastDetMetrics(DetMetrics):
-    """Polygon detection metrics: polar mAP + centroid F1 + bPQ (Shapely).
+    """Polygon detection metrics: polar mAP + bPQ (from Polar IoU).
 
-    Extends DetMetrics with three metric tracks:
+    Extends DetMetrics with two metric tracks:
       - shapely: mAP computed using Polar IoU
-      - centroid: F1 computed using centroid Euclidean distance (LSP-DETR comparison)
-      - bpq: binary Panoptic Quality via Shapely polygon IoU (primary fitness)
+      - bpq: binary Panoptic Quality via Polar IoU (primary fitness)
 
     Stats dict keys:
       - tp_shapely: Polar IoU true-positive matrix
-      - tp_centroid: centroid distance matching true-positive matrix
       - conf, pred_cls, target_cls, target_img: shared across all tracks
 
     bPQ is accumulated per-image in bpq_sum / bpq_count (not via ap_per_class).
@@ -50,8 +47,7 @@ class RayCastDetMetrics(DetMetrics):
     def __init__(self, names=None):
         super().__init__(names or {})
         self.shapely = Metric()
-        self.centroid = Metric()
-        self.stats = dict(tp_shapely=[], tp_centroid=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
+        self.stats = dict(tp_shapely=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
         self.box = Metric()  # kept for DetMetrics compatibility but unused
         self.bpq_sum = 0.0
         self.bpq_count = 0
@@ -59,7 +55,7 @@ class RayCastDetMetrics(DetMetrics):
         self.bdq_sum = 0.0
 
     def process(self, save_dir=Path('.'), plot=False, on_plot=None):
-        """Compute mAP from shapely and centroid true-positive stats."""
+        """Compute mAP from shapely true-positive stats."""
         stats = {k: np.concatenate(v, 0) for k, v in self.stats.items()}
 
         # Always compute GT counts — needed even when all predictions are filtered
@@ -88,50 +84,31 @@ class RayCastDetMetrics(DetMetrics):
         self.shapely.nc = len(self.names)
         self.shapely.update(results_shapely)
 
-        # Centroid F1
-        results_centroid = ap_per_class(
-            stats['tp_centroid'],
-            stats['conf'],
-            stats['pred_cls'],
-            stats['target_cls'],
-            plot=plot,
-            save_dir=save_dir,
-            names=self.names,
-            on_plot=on_plot,
-            prefix='Centroid',
-        )[2:]
-        self.centroid.nc = len(self.names)
-        self.centroid.update(results_centroid)
-
         return stats
 
     @property
     def keys(self):
-        """Return metric key names for shapely, centroid, and bPQ tracks."""
+        """Return metric key names for shapely and bPQ tracks."""
         return [
             'metrics/precision(P)',
             'metrics/recall(P)',
             'metrics/mAP50(P)',
             'metrics/mAP50-95(P)',
-            'metrics/precision(C)',
-            'metrics/recall(C)',
-            'metrics/mAP50(C)',
-            'metrics/mAP50-95(C)',
             'metrics/bPQ',
             'metrics/bSQ',
             'metrics/bDQ',
         ]
 
     def mean_results(self):
-        """Return mean results for shapely, centroid, and bPQ tracks."""
+        """Return mean results for shapely and bPQ tracks."""
         bpq = self.bpq_sum / max(self.bpq_count, 1)
         bsq = self.bsq_sum / max(self.bpq_count, 1)
         bdq = self.bdq_sum / max(self.bpq_count, 1)
-        return self.shapely.mean_results() + self.centroid.mean_results() + [bpq, bsq, bdq]
+        return self.shapely.mean_results() + [bpq, bsq, bdq]
 
     def class_result(self, i):
-        """Return per-class results for shapely and centroid tracks."""
-        return self.shapely.class_result(i) + self.centroid.class_result(i)
+        """Return per-class results for shapely track."""
+        return self.shapely.class_result(i)
 
     @property
     def maps(self):
@@ -164,11 +141,10 @@ class RayCastDetMetrics(DetMetrics):
 
 
 class RayCastValidator(DetectionValidator):
-    """Polygon detection validator with GPU Polar IoU and centroid F1.
+    """Polygon detection validator with GPU Polar IoU.
 
     Subclasses DetectionValidator, replacing bounding-box IoU with GPU-accelerated
-    Polar IoU (same metric used in training loss). Reports both polar mAP (primary)
-    and centroid F1 (for LSP-DETR comparability).
+    Polar IoU (same metric used in training loss). Reports polar mAP and bPQ.
 
     No NMS — the end-to-end model already does top-k selection via
     Hungarian matching. Distance-based dedup is handled by RayCastPredictor.
@@ -180,21 +156,15 @@ class RayCastValidator(DetectionValidator):
         self.iouv = torch.linspace(0.5, 0.95, 10)
         self.niou = self.iouv.numel()
         self.metrics = RayCastDetMetrics()
-        self.centroid_thresholds = [6.0, 8.0, 10.0]  # px, LSP-DETR comparability
-        self.n_centroid = len(self.centroid_thresholds)
         self.raycast_dim = 2 + _val_const.N_RAYS  # default; overwritten in init_metrics from model head
 
     def get_desc(self):
-        """Return a formatted header string for polygon + centroid + bPQ metrics."""
-        return ('%22s' + '%11s' * 13) % (
+        """Return a formatted header string for polygon + bPQ metrics."""
+        return ('%22s' + '%11s' * 9) % (
             'Class',
             'Images',
             'Instances',
             'Poly(P',
-            'R',
-            'mAP50',
-            'mAP50-95)',
-            'Cent(P',
             'R',
             'mAP50',
             'mAP50-95)',
@@ -325,7 +295,7 @@ class RayCastValidator(DetectionValidator):
         return pred
 
     def _process_batch(self, preds, batch):
-        """Compute GPU Polar IoU and centroid distance matches.
+        """Compute GPU Polar IoU true-positive matrix and return IoU matrix.
 
         Uses the same polar IoU as training loss (consistent metric) computed
         entirely on GPU. Only the final TP matrix transfers to CPU.
@@ -335,7 +305,7 @@ class RayCastValidator(DetectionValidator):
             batch: dict with 'bboxes' [N_gt, 34], 'cls' from _prepare_batch.
 
         Returns:
-            dict with 'tp_shapely' and 'tp_centroid' arrays.
+            dict with 'tp_shapely' array and 'iou_matrix' [N_pred, N_gt].
         """
         n_pred = preds['cls'].shape[0]
         n_gt = batch['cls'].shape[0]
@@ -343,7 +313,7 @@ class RayCastValidator(DetectionValidator):
         if n_gt == 0 or n_pred == 0:
             return {
                 'tp_shapely': np.zeros((n_pred, self.niou), dtype=bool),
-                'tp_centroid': np.zeros((n_pred, self.n_centroid), dtype=bool),
+                'iou_matrix': np.zeros((n_pred, n_gt), dtype=np.float32),
             }
 
         # Extract rays from polygon tensors (keep on GPU)
@@ -359,62 +329,12 @@ class RayCastValidator(DetectionValidator):
         # match_predictions expects iou shape [N_gt, N_pred] (parent convention)
         tp_shapely = self.match_predictions(preds['cls'], batch['cls'], iou_matrix.T).cpu().numpy()
 
-        # Centroid distance matching (CPU — small matrices, fast)
-        tp_centroid = self._compute_centroid_matches(
-            preds['bboxes'][:, :2].cpu().numpy(),
-            batch['bboxes'][:, :2].cpu().numpy(),
-            preds['cls'].cpu(),
-            batch['cls'].cpu(),
-        )
-
-        return {'tp_shapely': tp_shapely, 'tp_centroid': tp_centroid}
-
-    def _compute_centroid_matches(self, pred_centroids, gt_centroids, pred_cls, gt_cls):
-        """Match predictions to GT by centroid Euclidean distance.
-
-        For each distance threshold, creates a binary match matrix and applies
-        the same greedy matching as match_predictions.
-
-        Args:
-            pred_centroids: [N, 2] predicted centroid (cx, cy).
-            gt_centroids: [M, 2] ground truth centroid (cx, cy).
-            pred_cls: [N] predicted class indices.
-            gt_cls: [M] ground truth class indices.
-
-        Returns:
-            np.ndarray [N, n_centroid_thresholds] bool — true-positive matrix.
-        """
-        n_pred = len(pred_centroids)
-        n_thresh = len(self.centroid_thresholds)
-        correct = np.zeros((n_pred, n_thresh), dtype=bool)
-
-        # Pairwise Euclidean distance matrix
-        dists = np.sqrt(((pred_centroids[:, None, :] - gt_centroids[None, :, :]) ** 2).sum(axis=2))
-
-        # Class matching — transpose to match dists shape [N_pred, N_gt]
-        correct_class = (gt_cls[:, None] == pred_cls).T  # [N_pred, N_gt]
-        if isinstance(correct_class, torch.Tensor):
-            correct_class = correct_class.cpu().numpy()
-
-        for t_idx, threshold in enumerate(self.centroid_thresholds):
-            match_matrix = (dists <= threshold) * correct_class  # [N_pred, N_gt]
-
-            # Greedy matching: sort by distance ascending, unique per row and column
-            matches = np.nonzero(match_matrix)
-            matches = np.array(matches).T  # [K, 2] (pred_idx, gt_idx)
-            if matches.shape[0]:
-                if matches.shape[0] > 1:
-                    matches = matches[dists[matches[:, 0], matches[:, 1]].argsort()]
-                    matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
-                    matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
-                correct[matches[:, 0].astype(int), t_idx] = True
-
-        return correct
+        return {'tp_shapely': tp_shapely, 'iou_matrix': iou_matrix.cpu().numpy()}
 
     def update_metrics(self, preds, batch):
         """Update metrics with polygon predictions and ground truth.
 
-        Overridden to pass tp_shapely/tp_centroid, compute bPQ, and skip confusion matrix.
+        Overridden to pass tp_shapely, compute bPQ from polar IoU matrix, and skip confusion matrix.
         """
         for si, pred in enumerate(preds):
             self.seen += 1
@@ -423,9 +343,10 @@ class RayCastValidator(DetectionValidator):
 
             cls = pbatch['cls'].cpu().numpy()
             no_pred = predn['cls'].shape[0] == 0
+            batch_result = self._process_batch(predn, pbatch)
             self.metrics.update_stats(
                 {
-                    **self._process_batch(predn, pbatch),
+                    **{k: v for k, v in batch_result.items() if k != 'iou_matrix'},
                     'target_cls': cls,
                     'target_img': np.unique(cls),
                     'conf': np.zeros(0) if no_pred else predn['conf'].cpu().numpy(),
@@ -433,16 +354,9 @@ class RayCastValidator(DetectionValidator):
                 }
             )
 
-            # bPQ via Shapely polygon IoU (no rasterization)
-            pred_bboxes = (
-                predn['bboxes'].cpu().numpy() if predn['bboxes'].numel() > 0 else np.zeros((0, self.raycast_dim))
-            )
-            gt_bboxes = (
-                pbatch['bboxes'].cpu().numpy() if pbatch['bboxes'].numel() > 0 else np.zeros((0, self.raycast_dim))
-            )
-            pred_polys = raycast_batch_to_shapely(pred_bboxes, n_rays=self.n_rays)
-            gt_polys = raycast_batch_to_shapely(gt_bboxes, n_rays=self.n_rays)
-            bpq, bsq, bdq = compute_bpq_shapely(pred_polys, gt_polys)
+            # bPQ via polar IoU matrix (same metric as training, no rasterization)
+            iou_matrix = batch_result['iou_matrix']
+            bpq, bsq, bdq = compute_bpq_from_iou(iou_matrix)
             self.metrics.update_bpq(bpq, bsq, bdq)
 
     def get_stats(self):
