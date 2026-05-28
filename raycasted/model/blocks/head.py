@@ -702,8 +702,7 @@ class RayCastDetect(Detect):
         if 'binary_scores' in x and 'class_scores' in x:
             binary_prob = x['binary_scores'].sigmoid()  # [B, 1, N]
             class_prob = F.softmax(x['class_scores'], dim=1)  # [B, nc, N]
-            binary_gate = (binary_prob > self.hierarchical_binary_threshold).float()  # [B, 1, N]
-            scores = class_prob * binary_gate  # [B, nc, N]
+            scores = binary_prob * class_prob  # [B, nc, N] — P(fg) × P(type|fg)
         else:
             scores = x['scores'].sigmoid()
 

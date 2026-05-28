@@ -67,6 +67,160 @@ def _polygons_to_masks_fast(detections: np.ndarray, img_h: int, img_w: int) -> l
     return masks
 
 
+def _polygon_area(poly: np.ndarray) -> float:
+    """Shoelace area of ray polygon in pixel²."""
+    cx, cy = poly[0], poly[1]
+    rays = poly[2:]
+    if len(rays) < 3:
+        return 0.0
+    cos = _const.RAY_COS
+    sin = _const.RAY_SIN
+    vx = cx + rays * cos
+    vy = cy + rays * sin
+    return 0.5 * abs(np.dot(vx, np.roll(vy, 1)) - np.dot(vy, np.roll(vx, 1)))
+
+
+def _diagnose_recall(results, num_classes):
+    """Break down recall by GT size bin, class, and nearest-prediction distance."""
+    panuke_names = ["Neoplastic", "Inflammatory", "Connective", "Necrosis", "Epithelial"]
+
+    gt_areas_matched: list[float] = []
+    gt_areas_unmatched: list[float] = []
+    class_total = [0] * num_classes
+    class_matched = [0] * num_classes
+    unmatched_dists: list[float] = []
+    unmatched_nearest_conf: list[float] = []
+    unmatched_nearest_cls: list[int] = []
+    unmatched_max_conf_12: list[float] = []
+
+    for r in results:
+        gt_polys = r['gt_polys']
+        pred_polys = r['pred_polys']
+        pred_confs = r['pred_confs']
+        pred_cls = r['pred_cls']
+        gt_cls = r['gt_cls']
+
+        n_gt = len(gt_polys)
+        n_pred = len(pred_polys)
+
+        if n_gt == 0:
+            continue
+
+        gt_areas = np.array([_polygon_area(p) for p in gt_polys])
+
+        if n_pred > 0:
+            pred_cxcy = pred_polys[:, :2]
+            gt_cxcy = gt_polys[:, :2]
+            dist_matrix = np.linalg.norm(gt_cxcy[:, None, :] - pred_cxcy[None, :, :], axis=2)
+            row_ind, col_ind = linear_sum_assignment(dist_matrix)
+            matched = np.zeros(n_gt, dtype=bool)
+            matched_dists = dist_matrix[row_ind, col_ind]
+            for ri, ci, d in zip(row_ind, col_ind, matched_dists):
+                if d <= 12.0:
+                    matched[ri] = True
+        else:
+            matched = np.zeros(n_gt, dtype=bool)
+            pred_cxcy = np.zeros((0, 2))
+
+        for j in range(n_gt):
+            cls_id = int(gt_cls[j])
+            if cls_id < num_classes:
+                class_total[cls_id] += 1
+                if matched[j]:
+                    class_matched[cls_id] += 1
+
+            if matched[j]:
+                gt_areas_matched.append(float(gt_areas[j]))
+            else:
+                gt_areas_unmatched.append(float(gt_areas[j]))
+
+                if n_pred > 0:
+                    dists_j = np.linalg.norm(pred_cxcy - gt_polys[j, :2], axis=1)
+                    nearest_idx = int(np.argmin(dists_j))
+                    unmatched_dists.append(float(dists_j[nearest_idx]))
+                    unmatched_nearest_conf.append(float(pred_confs[nearest_idx]))
+                    unmatched_nearest_cls.append(int(pred_cls[nearest_idx]))
+                    nearby_mask = dists_j <= 12.0
+                    if nearby_mask.any():
+                        unmatched_max_conf_12.append(float(pred_confs[nearby_mask].max()))
+                    else:
+                        unmatched_max_conf_12.append(0.0)
+                else:
+                    unmatched_dists.append(float('inf'))
+                    unmatched_nearest_conf.append(0.0)
+                    unmatched_nearest_cls.append(-1)
+                    unmatched_max_conf_12.append(0.0)
+
+    # --- Print ---
+    total_gt = sum(class_total)
+    total_matched = sum(class_matched)
+    recall = total_matched / total_gt if total_gt > 0 else 0.0
+
+    print('\n' + '=' * 65)
+    print('Recall Diagnosis')
+    print('=' * 65)
+    print(f'  Overall: {total_matched}/{total_gt} = {recall:.4f}')
+
+    # --- By class ---
+    print(f'\n  {"Class":<18} {"Total":>8} {"Matched":>8} {"Recall":>8}')
+    print(f'  {"-"*18} {"-"*8} {"-"*8} {"-"*8}')
+    for c in range(num_classes):
+        if class_total[c] > 0:
+            r = class_matched[c] / class_total[c]
+            name = panuke_names[c] if c < len(panuke_names) else f"class_{c}"
+            print(f'  {name:<18} {class_total[c]:>8} {class_matched[c]:>8} {r:>8.4f}')
+
+    # --- By size bin ---
+    if gt_areas_matched or gt_areas_unmatched:
+        all_areas = np.array(gt_areas_matched + gt_areas_unmatched)
+        if len(all_areas) > 0:
+            p33 = np.percentile(all_areas, 33)
+            p67 = np.percentile(all_areas, 67)
+            bins = [
+                ('Small (<P33)', lambda a: a < p33),
+                ('Medium (P33-P67)', lambda a: (a >= p33) & (a < p67)),
+                ('Large (>P67)', lambda a: a >= p67),
+            ]
+            print(f'\n  {"Size Bin":<20} {"Area Range":<18} {"Total":>8} {"Matched":>8} {"Recall":>8}')
+            print(f'  {"-"*20} {"-"*18} {"-"*8} {"-"*8} {"-"*8}')
+            for label, cond in bins:
+                t = sum(1 for a in gt_areas_matched + gt_areas_unmatched if cond(a))
+                m = sum(1 for a in gt_areas_matched if cond(a))
+                min_a = min(a for a in all_areas if cond(a)) if t > 0 else 0
+                max_a = max(a for a in all_areas if cond(a)) if t > 0 else 0
+                rng = f'{min_a:.0f}-{max_a:.0f}px²'
+                rec = m / t if t > 0 else 0.0
+                print(f'  {label:<20} {rng:<18} {t:>8} {m:>8} {rec:>8.4f}')
+
+    # --- Unmatched GT: distance to nearest prediction ---
+    if unmatched_dists:
+        ud = np.array(unmatched_dists)
+        finite = ud[np.isfinite(ud)]
+        print(f'\n  Unmatched GT — Distance to nearest prediction:')
+        print(f'    <5px (near miss): {int(np.sum(finite < 5))}/{len(unmatched_dists)} ({100*sum(finite < 5)/len(unmatched_dists):.1f}%)')
+        print(f'    5-12px (drifted):  {int(np.sum((finite >= 5) & (finite <= 12)))}/{len(unmatched_dists)} ({100*sum((finite >= 5) & (finite <= 12))/len(unmatched_dists):.1f}%)')
+        print(f'    >12px (truly miss):{int(np.sum(finite > 12))}/{len(unmatched_dists)} ({100*sum(finite > 12)/len(unmatched_dists):.1f}%)')
+        no_det = int(np.isinf(ud).sum())
+        if no_det > 0:
+            print(f'    No predictions:    {no_det}/{len(unmatched_dists)} ({100*no_det/len(unmatched_dists):.1f}%)')
+
+    # --- Unmatched GT: confidence of nearby predictions ---
+    if unmatched_max_conf_12:
+        umc = np.array(unmatched_max_conf_12)
+        nonzero = umc[umc > 0]
+        print(f'\n  Unmatched GT — Max conf within 12px:')
+        if len(nonzero) > 0:
+            print(f'    Mean conf:          {nonzero.mean():.4f}')
+            print(f'    Median conf:        {float(np.median(nonzero)):.4f}')
+            above_thresh = np.sum(nonzero >= 0.2)
+            print(f'    Conf ≥0.2:          {above_thresh}/{len(unmatched_dists)} ({100*above_thresh/len(unmatched_dists):.1f}%) — wrong class or below eval-threshold')
+        no_conf = int(umc.sum() == 0)
+        if no_conf > 0:
+            print(f'    No pred within 12px:{no_conf}/{len(unmatched_dists)} ({100*no_conf/len(unmatched_dists):.1f}%) — truly missed')
+
+    print('=' * 65)
+
+
 def load_model(weights_path: str, device: torch.device):
     """Load trained RayCastED model from checkpoint."""
     register_raycast_head()
@@ -596,6 +750,9 @@ def _main(args):
     print(f'Confidence threshold: {args.conf}')
     print(f'Total predictions: {n_pred_total}')
     print(f'Total GT instances: {n_gt_total}')
+
+    # --- Recall diagnosis ---
+    _diagnose_recall(results, num_classes=nc)
 
 
 def _simple_collate(batch):
