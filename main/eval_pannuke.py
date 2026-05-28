@@ -752,7 +752,12 @@ def _main(args):
     print(f'Total GT instances: {n_gt_total}')
 
     # --- Recall diagnosis ---
-    _diagnose_recall(results, num_classes=nc)
+    try:
+        _diagnose_recall(results, num_classes=nc)
+    except Exception as exc:
+        import traceback
+        print(f'\n[DIAG ERROR] _diagnose_recall failed: {exc}', flush=True)
+        traceback.print_exc()
 
 
 def _simple_collate(batch):
