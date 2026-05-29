@@ -76,14 +76,14 @@ def _nwd_similarity_torch(pd_rays, gt_rays, pd_centroids, gt_centroids, c_val=0.
 
     # --- Covariance matrices from vertices relative to centroids ---
     # Disable AMP autocast: matmul + eigh not supported in float16
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast('cuda', enabled=False):
         pd_centered = pd_vertices - pd_centroids_f.unsqueeze(1)  # (N, n_rays, 2)
         gt_centered = gt_vertices - gt_centroids_f.unsqueeze(1)
         pd_cov = pd_centered.transpose(-2, -1) @ pd_centered / n_rays  # (N, 2, 2)
         gt_cov = gt_centered.transpose(-2, -1) @ gt_centered / n_rays
 
     # --- Wasserstein distance (disable AMP: eigh unsupported in float16) ---
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast('cuda', enabled=False):
         mu_diff_sq = ((pd_centroids_f - gt_centroids_f) ** 2).sum(-1)  # (N,)
 
         tr_pd = pd_cov.diagonal(dim1=-2, dim2=-1).sum(-1)  # (N,)
