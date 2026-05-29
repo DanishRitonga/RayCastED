@@ -949,6 +949,7 @@ class RayCastE2ELoss(E2ELoss):
         nwd_enabled: bool = False,
         nwd_c: float = 0.001,
         cls_only_tal: bool = False,
+        cls_only_anneal_epoch: int = 100,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -1103,6 +1104,7 @@ class RayCastE2ELoss(E2ELoss):
         # CLS-only TAL: o2o branch uses cls^alpha * gaussian_decay (no pIoU)
         if cls_only_tal:
             self.one2one.assigner.use_cls_only = True
+        self._cls_only_anneal_epoch = cls_only_anneal_epoch
 
         # Configurable loss weights (literature: regression 3-7x higher than cls)
         self._lambda_l1 = lambda_l1
@@ -1204,6 +1206,11 @@ class RayCastE2ELoss(E2ELoss):
                 )
             self.one2many.assigner.radius_scale = new_radius_scale
             self.one2one.assigner.radius_scale = new_radius_scale
+
+        # CLS-only TAL blend annealing: pIoU→cls-only linear mix
+        if self._cls_only_anneal_epoch > 0:
+            blend = min(current_epoch / self._cls_only_anneal_epoch, 1.0)
+            self.one2one.assigner.cls_only_blend = blend
 
         # Auxiliary XY: decay after aux_xy_decay_epoch
         if self._aux_xy_base > 0 and current_epoch >= self.aux_xy_decay_epoch:

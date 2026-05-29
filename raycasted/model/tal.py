@@ -176,6 +176,7 @@ class RayCastAssigner(TaskAlignedAssigner):
         self.use_nwd = use_nwd
         self.nwd_c = nwd_c
         self.use_cls_only = False  # set externally if cls-only TAL is enabled
+        self.cls_only_blend = 1.0  # 0=pIoU-only, 1=cls-only. Annealed by loss
 
     # -----------------------------------------------------------------
     # Shared helper: per-GT radius computation
@@ -264,10 +265,25 @@ class RayCastAssigner(TaskAlignedAssigner):
             k_prefilt = topk_idx.shape[-1]
 
             if self.use_cls_only:
-                overlaps.scatter_(2, topk_idx, torch.ones(
-                    self.bs, self.n_max_boxes, k_prefilt,
-                    dtype=overlaps.dtype, device=overlaps.device,
-                ))
+                if self.cls_only_blend >= 1.0:
+                    overlaps.scatter_(2, topk_idx, torch.ones(
+                        self.bs, self.n_max_boxes, k_prefilt,
+                        dtype=overlaps.dtype, device=overlaps.device,
+                    ))
+                else:
+                    n_rays = pd_bboxes.shape[-1] - 2
+                    bs_idx = torch.arange(self.bs, device=topk_idx.device)
+                    bs_idx = bs_idx.view(-1, 1, 1).expand(-1, self.n_max_boxes, k_prefilt)
+                    pd_block = pd_bboxes[bs_idx, topk_idx, 2:]
+                    gt_rays = gt_bboxes[:, :, 2:].unsqueeze(2).expand(-1, -1, k_prefilt, -1)
+                    from raycasted.data.etl.ops.iou import polar_iou_torch
+
+                    iou_block = polar_iou_torch(pd_block.reshape(-1, n_rays), gt_rays.reshape(-1, n_rays)).reshape(
+                        self.bs, self.n_max_boxes, k_prefilt
+                    )
+                    blend = self.cls_only_blend
+                    blended = (1.0 - blend) * iou_block + blend
+                    overlaps.scatter_(2, topk_idx, blended.to(overlaps.dtype))
             else:
                 n_rays = pd_bboxes.shape[-1] - 2
                 bs_idx = torch.arange(self.bs, device=topk_idx.device)

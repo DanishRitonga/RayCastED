@@ -244,6 +244,7 @@ class _RayCastCriterionWrapper:
             hierarchical_cls=tcfg.get('hierarchical_cls', False),
             nc_override=tcfg.get('nc_override', None),
             cls_only_tal=tcfg.get('cls_only_tal', False),
+            cls_only_anneal_epoch=tcfg.get('cls_only_anneal_epoch', 100),
         )
 
 

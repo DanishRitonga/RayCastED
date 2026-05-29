@@ -215,6 +215,7 @@ training:
   # Picks anchors based on what cls head already believes, gated by spatial proximity.
   # Self-reinforcing: higher cls → better assignment → even higher cls.
   cls_only_tal: true
+  cls_only_anneal_epoch: 100  # linear pIoU→cls blend over 100 epochs
 
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
   clip_grad: 10.0

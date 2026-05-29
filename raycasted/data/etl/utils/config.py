@@ -207,6 +207,7 @@ class TrainingSettings(BaseModel):
     # At inference: sigmoid(binary) × softmax(class).
     hierarchical_cls: bool = False
     cls_only_tal: bool = False  # o2o: assign by cls*gauss (no pIoU)
+    cls_only_anneal_epoch: int = 100  # linear pIoU→cls blend over N epochs
     hierarchical_cls_detach: bool = True  # Stop-grad binary head input to prevent backbone flooding
     hierarchical_binary_threshold: float = 0.01  # Binary gate threshold at inference
     nc_override: int | None = None  # Force nc (e.g. 1 for binary detection); remaps all labels to class 0
