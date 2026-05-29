@@ -62,7 +62,7 @@ training:
   assigner_beta: 2.0          # Polar-IoU exponent — lowered from 6.0 to make cls signal matter in anchor selection
 
   # NWD (Normalised Wasserstein Distance) — replaces pIoU for smooth small-object similarity
-  nwd_enabled: false          # NWD disabled for STAL test (train76)
+  nwd_enabled: true           # NWD enabled — smooth small-nucleus similarity (train77)
   nwd_c: 0.001                # normalisation constant (smaller = sharper drop)
   align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
   o2o_topk2_start: 3           # o2o branch initial positives per GT (annealed to 1). One-to-Few start
@@ -168,8 +168,8 @@ training:
   sigma_anneal_end: 0.5
   sigma_anneal_epoch: 200
 
-  # STAL: DISABLED — train13 didn't use this, re-evaluate later
-  stal_min_positives: 3         # STAL test — force min 3 positives per GT (train76)
+  # STAL: DISABLED — NWD handles small nuclei assignment smoothly without forcing poor anchors
+  stal_min_positives: 0         # 0 = disabled
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false
