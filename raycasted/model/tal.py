@@ -29,6 +29,78 @@ import torch
 from ultralytics.utils.tal import TaskAlignedAssigner
 
 
+def _nwd_similarity_torch(pd_rays, gt_rays, pd_centroids, gt_centroids, c_val=0.001):
+    """Normalised Wasserstein Distance similarity between star-convex polygons.
+
+    Converts rays → vertices, fits a 2D Gaussian to each polygon, then computes
+    the Wasserstein-2 distance between the two Gaussians.
+
+    W₂² = ||μ₁−μ₂||² + Tr(Σ₁ + Σ₂ − 2(Σ₁^½ Σ₂ Σ₁^½)^½)
+    NWD = exp(−W₂² / C)   in [0, 1]
+
+    Unlike pIoU (sharp cliff for small objects), NWD drops smoothly for
+    misaligned small nuclei — a 4px nucleus 2px off gets pIoU≈0.5 but NWD≈0.8.
+
+    Args:
+        pd_rays:      (N, n_rays) predicted rays in normalised coords.
+        gt_rays:      (N, n_rays) ground-truth rays in normalised coords.
+        pd_centroids: (N, 2) predicted centroids in normalised coords.
+        gt_centroids: (N, 2) GT centroids in normalised coords.
+        c_val:        Normalisation constant (smaller = sharper drop).
+
+    Returns:
+        nwd: (N,) similarity scores in [0, 1].
+    """
+    import raycasted.data.etl.utils.constants as _const
+
+    n_rays = pd_rays.shape[-1]
+    device = pd_rays.device
+    dtype = torch.float32
+
+    cos = torch.tensor(_const.RAY_COS[:n_rays], device=device, dtype=dtype)
+    sin = torch.tensor(_const.RAY_SIN[:n_rays], device=device, dtype=dtype)
+
+    pd_rays_f = pd_rays.float()
+    gt_rays_f = gt_rays.float()
+    pd_centroids_f = pd_centroids.float()
+    gt_centroids_f = gt_centroids.float()
+
+    # --- Rays → vertices ---
+    pd_vx = pd_centroids_f[:, 0:1] + pd_rays_f * cos  # (N, n_rays)
+    pd_vy = pd_centroids_f[:, 1:2] + pd_rays_f * sin
+    pd_vertices = torch.stack([pd_vx, pd_vy], dim=-1)  # (N, n_rays, 2)
+
+    gt_vx = gt_centroids_f[:, 0:1] + gt_rays_f * cos
+    gt_vy = gt_centroids_f[:, 1:2] + gt_rays_f * sin
+    gt_vertices = torch.stack([gt_vx, gt_vy], dim=-1)
+
+    # --- Covariance matrices from vertices relative to centroids ---
+    pd_centered = pd_vertices - pd_centroids_f.unsqueeze(1)  # (N, n_rays, 2)
+    gt_centered = gt_vertices - gt_centroids_f.unsqueeze(1)
+    pd_cov = pd_centered.transpose(-2, -1) @ pd_centered / n_rays  # (N, 2, 2)
+    gt_cov = gt_centered.transpose(-2, -1) @ gt_centered / n_rays
+
+    # --- Wasserstein distance ---
+    mu_diff_sq = ((pd_centroids_f - gt_centroids_f) ** 2).sum(-1)  # (N,)
+
+    tr_pd = pd_cov.diagonal(dim1=-2, dim2=-1).sum(-1)  # (N,)
+    tr_gt = gt_cov.diagonal(dim1=-2, dim2=-1).sum(-1)
+
+    eigvals_pd, eigvecs_pd = torch.linalg.eigh(pd_cov)
+    sqrt_eigvals_pd = eigvals_pd.clamp(min=0).sqrt()
+    sqrt_pd = eigvecs_pd @ torch.diag_embed(sqrt_eigvals_pd) @ eigvecs_pd.transpose(-2, -1)
+
+    b = sqrt_pd @ gt_cov @ sqrt_pd
+    eigvals_b, _ = torch.linalg.eigh(b)
+    eigvals_b = eigvals_b.clamp(min=0)
+    tr_sqrt_b = eigvals_b.sqrt().sum(-1)  # (N,)
+
+    w2_sq = (mu_diff_sq + tr_pd + tr_gt - 2.0 * tr_sqrt_b).clamp(min=0.0)
+    nwd = torch.exp(-w2_sq / max(c_val, 1e-8))
+
+    return nwd.clamp(0.0, 1.0).to(pd_rays.dtype)
+
+
 class RayCastAssigner(TaskAlignedAssigner):
     """Polygon-aware assigner with Polar-IoU + Gaussian spatial decay.
 
@@ -63,6 +135,8 @@ class RayCastAssigner(TaskAlignedAssigner):
         radius_scale=1.5,
         align_threshold=0.0,
         prefilter_k=0,
+        use_nwd=False,
+        nwd_c=0.001,
     ):
         """Initialize RayCastAssigner.
 
@@ -70,19 +144,15 @@ class RayCastAssigner(TaskAlignedAssigner):
             topk: Number of top-k candidate anchors per GT.
             num_classes: Number of object classes.
             alpha: Exponent on cls_score in alignment metric.
-            beta: Exponent on Polar-IoU in alignment metric.
+            beta: Exponent on Polar-IoU or NWD in alignment metric.
             stride: Feature map strides (default [8, 16, 32]).
             eps: Small value to prevent division by zero.
             topk2: Secondary topk for additional filtering.
             radius_scale: Gaussian sigma multiplier. sigma = radius_scale * R75.
-                Controls spatial decay width. Hard cutoff is at 3sigma.
-                Lower = tighter assignment. Higher = wider spatial influence.
-            align_threshold: Minimum overlap proxy for a candidate to be
-                considered a positive. Anchors below this threshold are
-                zeroed out before topk selection. Range [0, 1), default 0.
-            prefilter_k: Number of nearest anchors to prefilter for PolarIoU.
-                Must be > topk for proper IoU-based ranking.
-                Default (0): auto-computed as max(topk*5, 100).
+            align_threshold: Minimum overlap proxy below which anchors are zeroed.
+            prefilter_k: Number of nearest anchors to prefilter. Default: auto.
+            use_nwd: If True, use NWD similarity instead of PolarIoU.
+            nwd_c: NWD normalisation constant. Smaller = sharper drop.
         """
         super().__init__(
             topk=topk,
@@ -96,9 +166,11 @@ class RayCastAssigner(TaskAlignedAssigner):
         self.radius_scale = radius_scale
         self.align_threshold = align_threshold
         self.stal_min_positives = 0  # set by RayCastE2ELoss if enabled
-        # Number of nearest anchors to prefilter for PolarIoU.
-        # Must be > topk for proper IoU-based ranking. Default: max(topk*5, 100).
+        # Number of nearest anchors to prefilter for PolarIoU / NWD.
+        # Must be > topk for proper ranking. Default: max(topk*5, 100).
         self.prefilter_k = prefilter_k if prefilter_k > 0 else max(topk * 5, 100)
+        self.use_nwd = use_nwd
+        self.nwd_c = nwd_c
 
     # -----------------------------------------------------------------
     # Shared helper: per-GT radius computation
@@ -186,17 +258,30 @@ class RayCastAssigner(TaskAlignedAssigner):
             topk_idx, _gauss = gauss_data
             k_prefilt = topk_idx.shape[-1]
             n_rays = pd_bboxes.shape[-1] - 2
-            from raycasted.data.etl.ops.iou import polar_iou_torch
 
             bs_idx = torch.arange(self.bs, device=topk_idx.device)
             bs_idx = bs_idx.view(-1, 1, 1).expand(-1, self.n_max_boxes, k_prefilt)
             pd_block = pd_bboxes[bs_idx, topk_idx, 2:]
             gt_rays = gt_bboxes[:, :, 2:].unsqueeze(2).expand(-1, -1, k_prefilt, -1)
 
-            iou_block = polar_iou_torch(pd_block.reshape(-1, n_rays), gt_rays.reshape(-1, n_rays)).reshape(
-                self.bs, self.n_max_boxes, k_prefilt
-            )
-            overlaps.scatter_(2, topk_idx, iou_block.to(overlaps.dtype))
+            if self.use_nwd:
+                pd_centroids = pd_bboxes[bs_idx, topk_idx, :2]
+                gt_centroids = gt_bboxes[:, :, :2].unsqueeze(2).expand(-1, -1, k_prefilt, -1)
+                nwd_block = _nwd_similarity_torch(
+                    pd_block.reshape(-1, n_rays),
+                    gt_rays.reshape(-1, n_rays),
+                    pd_centroids.reshape(-1, 2),
+                    gt_centroids.reshape(-1, 2),
+                    c_val=self.nwd_c,
+                ).reshape(self.bs, self.n_max_boxes, k_prefilt)
+                overlaps.scatter_(2, topk_idx, nwd_block.to(overlaps.dtype))
+            else:
+                from raycasted.data.etl.ops.iou import polar_iou_torch
+
+                iou_block = polar_iou_torch(pd_block.reshape(-1, n_rays), gt_rays.reshape(-1, n_rays)).reshape(
+                    self.bs, self.n_max_boxes, k_prefilt
+                )
+                overlaps.scatter_(2, topk_idx, iou_block.to(overlaps.dtype))
         else:
             from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 

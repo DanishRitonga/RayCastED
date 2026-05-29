@@ -150,6 +150,8 @@ class TrainingSettings(BaseModel):
     tal_topk: int = 13  # one2many positives per GT
     assigner_alpha: float = 0.5  # cls^alpha in alignment metric
     assigner_beta: float = 6.0  # iou^beta in alignment metric
+    nwd_enabled: bool = False   # replace pIoU with NWD (Wasserstein) similarity
+    nwd_c: float = 0.001  # NWD normalisation constant (smaller = sharper)
 
     # Auxiliary xy head — bypass backbone→head bottleneck
     aux_xy_weight: float = 0.0  # Huber loss weight (0 = disabled, 10.0 = recommended)

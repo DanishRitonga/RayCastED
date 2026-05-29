@@ -195,6 +195,8 @@ class _RayCastCriterionWrapper:
             assigner_radius_scale=tcfg.get('assigner_radius_scale', 1.5),
             assigner_alpha=tcfg.get('assigner_alpha', 0.5),
             assigner_beta=tcfg.get('assigner_beta', 6.0),
+            nwd_enabled=tcfg.get('nwd_enabled', False),
+            nwd_c=tcfg.get('nwd_c', 0.001),
             log_ray_loss=tcfg.get('log_ray_loss', False),
             focal_gamma=tcfg.get('focal_gamma', 0.0),
             focal_alpha=tcfg.get('focal_alpha', 0.25),

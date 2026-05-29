@@ -353,6 +353,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         bound_l1_eps: float = 0.1,
         hierarchical_cls: bool = False,
         nc_override: int | None = None,
+        nwd_enabled: bool = False,
+        nwd_c: float = 0.001,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -361,6 +363,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.use_dfl = False  # DFL not applicable to polygon regression
         self.hierarchical_cls = hierarchical_cls
         self.nc_override = nc_override
+        self.nwd_enabled = nwd_enabled
 
         # Log-space ray loss configuration
         self.log_ray_loss = log_ray_loss
@@ -411,6 +414,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
             topk2=tal_topk2,
             radius_scale=assigner_radius_scale,
             align_threshold=align_threshold,
+            use_nwd=nwd_enabled,
+            nwd_c=nwd_c,
         )
 
         # Loss weights — decoded normalised xy space [0,1].
@@ -984,6 +989,8 @@ class RayCastE2ELoss(E2ELoss):
         bound_l1_eps: float = 0.1,
         hierarchical_cls: bool = False,
         nc_override: int | None = None,
+        nwd_enabled: bool = False,
+        nwd_c: float = 0.001,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -1028,6 +1035,8 @@ class RayCastE2ELoss(E2ELoss):
             bound_l1_eps=bound_l1_eps,
             hierarchical_cls=hierarchical_cls,
             nc_override=nc_override,
+            nwd_enabled=nwd_enabled,
+            nwd_c=nwd_c,
         )
         super().__init__(model, loss_fn=loss_fn)
 
