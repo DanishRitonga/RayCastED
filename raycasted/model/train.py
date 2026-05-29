@@ -948,7 +948,12 @@ class RayCastTrainer(DetectionTrainer):
         # Re-initialise biases with correct crop_size (Ultralytics calls bias_init
         # during model construction with no access to training config)
         if hasattr(head, 'bias_init') and not isinstance(head, RayCastRTDETRDecoder):
-            head.bias_init(crop_size=self.args.imgsz)
+            tcfg = self.training_config or {}
+            head.bias_init(
+                crop_size=self.args.imgsz,
+                native_mpp=tcfg.get('native_mpp', 0.25),
+                min_nucleus_diameter_um=tcfg.get('min_nucleus_diameter_um', 3.5),
+            )
 
 
 def train(**kwargs):

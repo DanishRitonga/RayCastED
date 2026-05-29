@@ -743,22 +743,25 @@ class RayCastDetect(Detect):
         poly = poly.gather(dim=1, index=idx.repeat(1, 1, self.raycast_dim))
         return torch.cat([poly, scores, conf], dim=-1)
 
-    def bias_init(self, crop_size: int = 256):
+    def bias_init(self, crop_size: int = 256, native_mpp: float = 0.25, min_nucleus_diameter_um: float = 3.5):
         """Initialize polygon head biases.
 
         XY channels (0-1): bias=0 for maximum sigmoid gradient (0.25) at init.
             sigmoid(0)=0.5 → offset=0.5 → decoded=(anchor+0.5)*stride/imgsz ≈ anchor_norm.
             This maximises gradient flow through the sigmoid bottleneck.
-        Ray channels (2..2+n_rays): calibrated for ~15px radius cells at 0.25 MPP
-            (lymphocytes 7-10μm → 28-40px diameter → radius ≈15px).
-            During training, GT rays are normalized by crop_size, so
-            softplus(bias) must equal target_px / crop_size.
+        Ray channels (2..2+n_rays): LSP-DETR-style — initialize to minimum plausible
+            nucleus radius so gradient is unidirectional (expand only). Avoids conflicting
+            shrink/expand signals that occur when starting at average radius.
+            Formula: radius_px = min_diameter_um / (2 * native_mpp).
+            softplus(bias) must equal radius_px / crop_size.
         Centerness channel: bias=2.0 → sigmoid(2.0)≈0.88, starts permissive.
 
         Args:
             crop_size: Training crop size used for ray normalisation.
+            native_mpp: Microns per pixel (PanNuke 40x = 0.25 um/px).
+            min_nucleus_diameter_um: Minimum plausible nucleus diameter in microns.
         """
-        target_ray_px = 15.0  # reasonable lymphocyte radius at 0.25 MPP
+        target_ray_px = min_nucleus_diameter_um / (2.0 * native_mpp)
         target_ray_norm = target_ray_px / crop_size
         ray_bias = math.log(math.exp(target_ray_norm) - 1)  # inverse softplus
         o2m = self.one2many

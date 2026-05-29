@@ -47,6 +47,11 @@ class TrainingSettings(BaseModel):
     cls_channel_scale: float = 1.0  # c3 = max(cls_channel_min, ch[0] * scale). 1.0 = original
     cls_channel_min: int = 0  # minimum cls head intermediate channels. 0 = use ch[0]
 
+    # LSP-DETR ray initialization: start at minimum plausible nucleus radius
+    # so gradient is unidirectional (expand only), avoiding conflicting shrink/expand signals
+    native_mpp: float = 0.25  # microns per pixel (PanNuke 40x = 0.25 um/px)
+    min_nucleus_diameter_um: float = 3.5  # minimum nucleus diameter (PMC 4600468), radius = 1.75um → 7px
+
     # Learning rate
     cos_lr: bool = True  # cosine LR schedule. Was False
     warm_restarts: bool = False  # CosineAnnealingWarmRestarts instead of single cosine

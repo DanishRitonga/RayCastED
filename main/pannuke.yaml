@@ -45,6 +45,11 @@ training:
   cls_channel_scale: 1.0     # c3 = max(cls_channel_min, ch[0] * scale). 1.0 = original (dead end at 2.0, train33)
   cls_channel_min: 0         # minimum cls head intermediate channels. 0 = use ch[0]
 
+  # LSP-DETR ray initialization: start at minimum plausible nucleus radius
+  # so gradient is unidirectional (expand only), avoiding conflicting shrink/expand signals
+  native_mpp: 0.25             # microns per pixel (PanNuke 40x = 0.25 um/px)
+  min_nucleus_diameter_um: 3.5 # minimum nucleus diameter (PMC 4600468), radius = 1.75um → 7px
+
   # Early stopping
   patience: 150              # increased for NWD — cls head needs time to translate smoother assignment
 
@@ -62,7 +67,7 @@ training:
   assigner_beta: 2.0          # Polar-IoU exponent — lowered from 6.0 to make cls signal matter in anchor selection
 
   # NWD (Normalised Wasserstein Distance) — replaces pIoU for smooth small-object similarity
-  nwd_enabled: true           # NWD enabled — smooth small-nucleus similarity (train77)
+  nwd_enabled: false          # NWD disabled — too smooth, can't pick winner (train77 dead end)
   nwd_c: 0.001                # normalisation constant (smaller = sharper drop)
   align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
   o2o_topk2_start: 3           # o2o branch initial positives per GT (annealed to 1). One-to-Few start
@@ -169,7 +174,7 @@ training:
   sigma_anneal_epoch: 200
 
   # STAL: DISABLED — NWD handles small nuclei assignment smoothly without forcing poor anchors
-  stal_min_positives: 0         # 0 = disabled
+  stal_min_positives: 3         # STAL + bias init — force min positives + unidirectional ray gradient (train79)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false
