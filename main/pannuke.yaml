@@ -161,13 +161,6 @@ training:
   lambda_l1: 14.0               # L1 ray distance weight
   lambda_piou: 13.0             # Polar IoU weight
 
-  # Unified suppression loss: penalises fg anchors that predict higher confidence
-  # than they "deserve". deserved = min(quality, uniqueness).
-  # quality = assigner alignment score; uniqueness = 1 - spatial proximity to other-GT anchors.
-  # Teaches cls head to suppress duplicate predictions and rank same-GT anchors.
-  lambda_suppress: 0.0           # Disabled — train24 showed it hurts (spatial repulsion too aggressive for dense nuclei)
-  suppress_radius: 0.05          # Normalised repulsion radius (~13px at 256px)
-
   # Sigma annealing: DISABLED — train13 didn't use this, re-evaluate later
   sigma_anneal_start: 0         # 0 = disabled (use assigner_radius_scale)
   sigma_anneal_end: 0.5
@@ -217,6 +210,11 @@ training:
   hierarchical_cls: true
   hierarchical_cls_detach: true
   hierarchical_binary_threshold: 0.01  # Hard gate: keep anchors with sigmoid(binary) > 0.01
+
+  # CLS-only TAL: o2o assigner uses cls^alpha * gaussian_decay (no pIoU)
+  # Picks anchors based on what cls head already believes, gated by spatial proximity.
+  # Self-reinforcing: higher cls → better assignment → even higher cls.
+  cls_only_tal: true
 
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
   clip_grad: 10.0

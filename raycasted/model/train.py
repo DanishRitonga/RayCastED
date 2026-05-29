@@ -233,8 +233,6 @@ class _RayCastCriterionWrapper:
             lambda_xy=tcfg.get('lambda_xy', 500.0),
             fg_cls_quality_scale=tcfg.get('fg_cls_quality_scale', 0.0),
             fg_cls_quality_scale_o2o=tcfg.get('fg_cls_quality_scale_o2o', None),
-            lambda_suppress=tcfg.get('lambda_suppress', 0.0),
-            suppress_radius=tcfg.get('suppress_radius', 0.05),
             steps_per_epoch=self._steps_per_epoch,
             gaussian_soft_targets=tcfg.get('gaussian_soft_targets', False),
             gaussian_sigma=tcfg.get('gaussian_sigma', 0.5),
@@ -245,6 +243,7 @@ class _RayCastCriterionWrapper:
             bound_l1_eps=tcfg.get('bound_l1_eps', 0.1),
             hierarchical_cls=tcfg.get('hierarchical_cls', False),
             nc_override=tcfg.get('nc_override', None),
+            cls_only_tal=tcfg.get('cls_only_tal', False),
         )
 
 
@@ -768,7 +767,6 @@ class RayCastTrainer(DetectionTrainer):
                 'l1_loss',
                 'piou_loss',
                 'smooth_loss',
-                'suppress_loss',
                 'aux_xy_loss',
                 'quality_loss',
             )

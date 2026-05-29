@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 #  GradNorm — Gradient Normalisation for Multi-Task Loss Balancing
 # ──────────────────────────────────────────────────────────────────────
 
-_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth', 'suppress', 'range_l1', 'bound_l1')
+_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth', 'range_l1', 'bound_l1')
 
 
 class GradNormManager:
@@ -345,8 +345,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         class_weights: torch.Tensor | None = None,
         lambda_cls: float = 2.0,
         lambda_xy: float = 500.0,
-        lambda_suppress: float = 0.0,
-        suppress_radius: float = 0.05,
         range_l1_weight: float = 0.0,
         range_l1_eps: float = 0.1,
         bound_l1_weight: float = 0.0,
@@ -429,8 +427,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.lambda_l1 = 14.0
         self.lambda_piou = 13.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
-        self.lambda_suppress = lambda_suppress
-        self.suppress_radius = suppress_radius
         self.bg_fg_ratio = bg_fg_ratio
         self.ohem_bg_ratio = ohem_bg_ratio
 
@@ -826,42 +822,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[5] += (pred_xy * 0).sum()
             loss[7] += (pred_rays * 0).sum()
 
-        # --- L_suppress: Unified suppression loss (quality ranking + spatial repulsion) ---
-        # Penalises fg anchors that predict higher confidence than they "deserve".
-        # deserved_i = min(quality_i, uniqueness_i)
-        #   quality_i = assigner's alignment score (soft targets signal)
-        #   uniqueness_i = 1 - max overlap with anchors assigned to OTHER GTs
-        # Only applied to o2o branch — o2m has too many fg anchors for O(N²) pairwise dist.
-        if self.lambda_suppress > 0 and n_fg > 1:
-            _branch = getattr(self, 'branch_name', '???')
-            if _branch == 'o2o':
-                fg_conf = pred_scores[fg_mask].float().sigmoid().amax(dim=-1)
-                fg_quality_scalar = fg_quality[fg_mask].amax(dim=-1).clamp(min=0.01)
-
-                fg_gt_idx = target_gt_idx[fg_mask]
-                fg_xy = pred_xy[fg_mask]
-
-                pairwise_dist = torch.cdist(fg_xy.unsqueeze(0), fg_xy.unsqueeze(0)).squeeze(0)
-                same_gt = fg_gt_idx.unsqueeze(1) == fg_gt_idx.unsqueeze(0)
-
-                cross_gt_mask = ~same_gt & (pairwise_dist < self.suppress_radius)
-                if cross_gt_mask.any():
-                    proximity = 1.0 - pairwise_dist / self.suppress_radius
-                    proximity = proximity.clamp(min=0.0)
-                    proximity = proximity * cross_gt_mask.float()
-                    max_proximity = proximity.amax(dim=-1)
-                    uniqueness = 1.0 - max_proximity
-                else:
-                    uniqueness = torch.ones(fg_conf.shape[0], device=self.device)
-
-                deserved = torch.min(fg_quality_scalar, uniqueness)
-                suppress_loss = (fg_conf - deserved).clamp(min=0.0).pow(2)
-                loss[5] = suppress_loss.sum() / n_fg
-            else:
-                loss[5] = torch.zeros(1, device=self.device).squeeze()
-        elif self.lambda_suppress > 0:
-            loss[5] = torch.zeros(1, device=self.device).squeeze()
-
         # --- Diagnostic: log raw (unweighted) losses + fg count every 100 steps ---
         _branch = getattr(self, 'branch_name', '???')
         if hasattr(self, '_diag_step'):
@@ -903,7 +863,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[2] *= self.lambda_l1
             loss[3] *= self.lambda_piou
             loss[4] *= self.lambda_smooth
-            loss[5] *= self.lambda_suppress
             loss[6] *= self.range_l1_weight
             loss[7] *= self.bound_l1_weight
 
@@ -977,8 +936,6 @@ class RayCastE2ELoss(E2ELoss):
         lambda_xy: float = 500.0,
         fg_cls_quality_scale: float = 0.0,
         fg_cls_quality_scale_o2o: float | None = None,
-        lambda_suppress: float = 0.0,
-        suppress_radius: float = 0.05,
         steps_per_epoch: int = 0,
         gaussian_soft_targets: bool = False,
         gaussian_sigma: float = 0.5,
@@ -991,6 +948,7 @@ class RayCastE2ELoss(E2ELoss):
         nc_override: int | None = None,
         nwd_enabled: bool = False,
         nwd_c: float = 0.001,
+        cls_only_tal: bool = False,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -1027,8 +985,6 @@ class RayCastE2ELoss(E2ELoss):
             lambda_cls=lambda_cls,
             lambda_xy=lambda_xy,
             fg_cls_quality_scale=fg_cls_quality_scale,
-            lambda_suppress=lambda_suppress,
-            suppress_radius=suppress_radius,
             range_l1_weight=range_l1_weight,
             range_l1_eps=range_l1_eps,
             bound_l1_weight=bound_l1_weight,
@@ -1143,6 +1099,10 @@ class RayCastE2ELoss(E2ELoss):
         if stal_min_positives > 0:
             self.one2many.assigner.stal_min_positives = stal_min_positives
             self.one2one.assigner.stal_min_positives = stal_min_positives
+
+        # CLS-only TAL: o2o branch uses cls^alpha * gaussian_decay (no pIoU)
+        if cls_only_tal:
+            self.one2one.assigner.use_cls_only = True
 
         # Configurable loss weights (literature: regression 3-7x higher than cls)
         self._lambda_l1 = lambda_l1

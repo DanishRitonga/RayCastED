@@ -175,6 +175,7 @@ class RayCastAssigner(TaskAlignedAssigner):
         self.prefilter_k = prefilter_k if prefilter_k > 0 else max(topk * 5, 100)
         self.use_nwd = use_nwd
         self.nwd_c = nwd_c
+        self.use_cls_only = False  # set externally if cls-only TAL is enabled
 
     # -----------------------------------------------------------------
     # Shared helper: per-GT radius computation
@@ -261,31 +262,37 @@ class RayCastAssigner(TaskAlignedAssigner):
         if gauss_data is not None:
             topk_idx, _gauss = gauss_data
             k_prefilt = topk_idx.shape[-1]
-            n_rays = pd_bboxes.shape[-1] - 2
 
-            bs_idx = torch.arange(self.bs, device=topk_idx.device)
-            bs_idx = bs_idx.view(-1, 1, 1).expand(-1, self.n_max_boxes, k_prefilt)
-            pd_block = pd_bboxes[bs_idx, topk_idx, 2:]
-            gt_rays = gt_bboxes[:, :, 2:].unsqueeze(2).expand(-1, -1, k_prefilt, -1)
-
-            if self.use_nwd:
-                pd_centroids = pd_bboxes[bs_idx, topk_idx, :2]
-                gt_centroids = gt_bboxes[:, :, :2].unsqueeze(2).expand(-1, -1, k_prefilt, -1)
-                nwd_block = _nwd_similarity_torch(
-                    pd_block.reshape(-1, n_rays),
-                    gt_rays.reshape(-1, n_rays),
-                    pd_centroids.reshape(-1, 2),
-                    gt_centroids.reshape(-1, 2),
-                    c_val=self.nwd_c,
-                ).reshape(self.bs, self.n_max_boxes, k_prefilt)
-                overlaps.scatter_(2, topk_idx, nwd_block.to(overlaps.dtype))
+            if self.use_cls_only:
+                overlaps.scatter_(2, topk_idx, torch.ones(
+                    self.bs, self.n_max_boxes, k_prefilt,
+                    dtype=overlaps.dtype, device=overlaps.device,
+                ))
             else:
-                from raycasted.data.etl.ops.iou import polar_iou_torch
+                n_rays = pd_bboxes.shape[-1] - 2
+                bs_idx = torch.arange(self.bs, device=topk_idx.device)
+                bs_idx = bs_idx.view(-1, 1, 1).expand(-1, self.n_max_boxes, k_prefilt)
+                pd_block = pd_bboxes[bs_idx, topk_idx, 2:]
+                gt_rays = gt_bboxes[:, :, 2:].unsqueeze(2).expand(-1, -1, k_prefilt, -1)
 
-                iou_block = polar_iou_torch(pd_block.reshape(-1, n_rays), gt_rays.reshape(-1, n_rays)).reshape(
-                    self.bs, self.n_max_boxes, k_prefilt
-                )
-                overlaps.scatter_(2, topk_idx, iou_block.to(overlaps.dtype))
+                if self.use_nwd:
+                    pd_centroids = pd_bboxes[bs_idx, topk_idx, :2]
+                    gt_centroids = gt_bboxes[:, :, :2].unsqueeze(2).expand(-1, -1, k_prefilt, -1)
+                    nwd_block = _nwd_similarity_torch(
+                        pd_block.reshape(-1, n_rays),
+                        gt_rays.reshape(-1, n_rays),
+                        pd_centroids.reshape(-1, 2),
+                        gt_centroids.reshape(-1, 2),
+                        c_val=self.nwd_c,
+                    ).reshape(self.bs, self.n_max_boxes, k_prefilt)
+                    overlaps.scatter_(2, topk_idx, nwd_block.to(overlaps.dtype))
+                else:
+                    from raycasted.data.etl.ops.iou import polar_iou_torch
+
+                    iou_block = polar_iou_torch(pd_block.reshape(-1, n_rays), gt_rays.reshape(-1, n_rays)).reshape(
+                        self.bs, self.n_max_boxes, k_prefilt
+                    )
+                    overlaps.scatter_(2, topk_idx, iou_block.to(overlaps.dtype))
         else:
             from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 
