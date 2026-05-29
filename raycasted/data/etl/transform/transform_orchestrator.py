@@ -1,4 +1,5 @@
 import json
+import math
 import shutil
 import tempfile
 from pathlib import Path
@@ -8,6 +9,11 @@ import polars as pl
 
 from .normalizer import NormalizerAndPadder
 from .spatialChunker import SpatialChunker
+
+# Pareto principle (Agraz et al. 2023, PMC9970045): 20% of tiles per
+# stratum is sufficient to build a representative population stain profile.
+_PARETO_FRACTION = 0.20
+_SAMPLE_SEED = 42
 
 
 class TransformOrchestrator:
@@ -75,7 +81,7 @@ class TransformOrchestrator:
         saves chunks to a temp directory, and returns a Polars registry.
 
         Returns:
-            Polars DataFrame with columns: path, split, roi_id, dataset, chunk_id
+            Polars DataFrame with columns: path, split, roi_id, dataset, chunk_id, tissue
         """
         self._chunked_dir = tempfile.mkdtemp(prefix='raycasted_chunked_')
         chunked_path = Path(self._chunked_dir)
@@ -111,6 +117,7 @@ class TransformOrchestrator:
                         'roi_id': roi_id,
                         'dataset': dataset,
                         'chunk_id': chunk_id,
+                        'tissue': int(tissue_val),
                     }
                 )
 
@@ -132,17 +139,38 @@ class TransformOrchestrator:
     def _build_population_profile(self) -> str | None:
         """Stage 2: Compute population-level stain normalization profile.
 
-        Iterates through chunked tiles, estimates stain profiles, computes
-        population statistics, and saves as JSON.
+        Samples tiles from the chunked registry using stratified Pareto
+        sampling (Agraz et al. 2023, PMC9970045): 20% of tiles per
+        (dataset, tissue) stratum, ensuring balanced representation
+        regardless of stratum size.
 
         Returns:
             Path to the saved profile JSON, or None if no valid profiles found.
         """
         estimator = self._get_estimator()
+
+        # --- Stratified Pareto sampling ---
+        sampled_frames = []
+        for group in self.registry.partition_by(['dataset', 'tissue']):
+            n = group.height
+            n_sample = max(1, math.ceil(n * _PARETO_FRACTION))
+            if n <= n_sample:
+                sampled_frames.append(group)
+            else:
+                sampled_frames.append(group.sample(n=n_sample, seed=_SAMPLE_SEED))
+
+        sampled = pl.concat(sampled_frames)
+        n_total = self.registry.height
+        n_sampled = sampled.height
+        n_strata = len(sampled_frames)
+        print(f'Stage 2: Pareto sampling {n_sampled}/{n_total} tiles '
+              f'({_PARETO_FRACTION:.0%} per stratum across {n_strata} strata)')
+
+        # --- Estimate stain profiles on sampled tiles ---
         stain_matrices = []
         max_concentrations = []
 
-        for row in self.registry.iter_rows(named=True):
+        for row in sampled.iter_rows(named=True):
             data = np.load(row['path'])
             img = data['image']
 
@@ -175,5 +203,5 @@ class TransformOrchestrator:
         with open(profile_path, 'w') as f:
             json.dump(profile, f, indent=2)
 
-        print(f'Stage 2 complete: stain profile built from {len(stain_matrices)} tiles.')
+        print(f'Stage 2 complete: stain profile built from {len(stain_matrices)}/{n_sampled} sampled tiles.')
         return str(profile_path)
