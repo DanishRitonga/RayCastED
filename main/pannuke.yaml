@@ -165,7 +165,7 @@ training:
   sigma_anneal_epoch: 200
 
   # STAL: DISABLED — train13 didn't use this, re-evaluate later
-  stal_min_positives: 0         # 0 = disabled
+  stal_min_positives: 3         # force min 3 positives per GT (for small nuclei)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false
