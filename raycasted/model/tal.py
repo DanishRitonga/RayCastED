@@ -75,27 +75,31 @@ def _nwd_similarity_torch(pd_rays, gt_rays, pd_centroids, gt_centroids, c_val=0.
     gt_vertices = torch.stack([gt_vx, gt_vy], dim=-1)
 
     # --- Covariance matrices from vertices relative to centroids ---
-    pd_centered = pd_vertices - pd_centroids_f.unsqueeze(1)  # (N, n_rays, 2)
-    gt_centered = gt_vertices - gt_centroids_f.unsqueeze(1)
-    pd_cov = pd_centered.transpose(-2, -1) @ pd_centered / n_rays  # (N, 2, 2)
-    gt_cov = gt_centered.transpose(-2, -1) @ gt_centered / n_rays
+    # Disable AMP autocast: matmul + eigh not supported in float16
+    with torch.cuda.amp.autocast(enabled=False):
+        pd_centered = pd_vertices - pd_centroids_f.unsqueeze(1)  # (N, n_rays, 2)
+        gt_centered = gt_vertices - gt_centroids_f.unsqueeze(1)
+        pd_cov = pd_centered.transpose(-2, -1) @ pd_centered / n_rays  # (N, 2, 2)
+        gt_cov = gt_centered.transpose(-2, -1) @ gt_centered / n_rays
 
-    # --- Wasserstein distance ---
-    mu_diff_sq = ((pd_centroids_f - gt_centroids_f) ** 2).sum(-1)  # (N,)
+    # --- Wasserstein distance (disable AMP: eigh unsupported in float16) ---
+    with torch.cuda.amp.autocast(enabled=False):
+        mu_diff_sq = ((pd_centroids_f - gt_centroids_f) ** 2).sum(-1)  # (N,)
 
-    tr_pd = pd_cov.diagonal(dim1=-2, dim2=-1).sum(-1)  # (N,)
-    tr_gt = gt_cov.diagonal(dim1=-2, dim2=-1).sum(-1)
+        tr_pd = pd_cov.diagonal(dim1=-2, dim2=-1).sum(-1)  # (N,)
+        tr_gt = gt_cov.diagonal(dim1=-2, dim2=-1).sum(-1)
 
-    eigvals_pd, eigvecs_pd = torch.linalg.eigh(pd_cov)
-    sqrt_eigvals_pd = eigvals_pd.clamp(min=0).sqrt()
-    sqrt_pd = eigvecs_pd @ torch.diag_embed(sqrt_eigvals_pd) @ eigvecs_pd.transpose(-2, -1)
+        eigvals_pd, eigvecs_pd = torch.linalg.eigh(pd_cov)
+        sqrt_eigvals_pd = eigvals_pd.clamp(min=0).sqrt()
+        sqrt_pd = eigvecs_pd @ torch.diag_embed(sqrt_eigvals_pd) @ eigvecs_pd.transpose(-2, -1)
 
-    b = sqrt_pd @ gt_cov @ sqrt_pd
-    eigvals_b, _ = torch.linalg.eigh(b)
-    eigvals_b = eigvals_b.clamp(min=0)
-    tr_sqrt_b = eigvals_b.sqrt().sum(-1)  # (N,)
+        b = sqrt_pd @ gt_cov @ sqrt_pd
+        eigvals_b, _ = torch.linalg.eigh(b)
+        eigvals_b = eigvals_b.clamp(min=0)
+        tr_sqrt_b = eigvals_b.sqrt().sum(-1)  # (N,)
 
-    w2_sq = (mu_diff_sq + tr_pd + tr_gt - 2.0 * tr_sqrt_b).clamp(min=0.0)
+        w2_sq = (mu_diff_sq + tr_pd + tr_gt - 2.0 * tr_sqrt_b).clamp(min=0.0)
+
     nwd = torch.exp(-w2_sq / max(c_val, 1e-8))
 
     return nwd.clamp(0.0, 1.0).to(pd_rays.dtype)
