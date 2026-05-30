@@ -64,7 +64,7 @@ training:
   tal_topk: 15                 # one2many positives per GT — dynamic topk masks garbage candidates
   assigner_radius_scale: 1.0  # containment radius multiplier (1.0 = 75th-pctile GT radius)
   assigner_alpha: 0.5         # cls score exponent in align = cls^α × piou^β
-  assigner_beta: 2.0          # Polar-IoU exponent — lowered from 6.0 to make cls signal matter in anchor selection
+  assigner_beta: 1.0          # Polar-IoU exponent — lowered to 1.0 to soften pIoU→cls transition
 
   # NWD (Normalised Wasserstein Distance) — replaces pIoU for smooth small-object similarity
   nwd_enabled: false          # NWD disabled — too smooth, can't pick winner (train77 dead end)
