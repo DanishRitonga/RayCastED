@@ -71,8 +71,8 @@ training:
   nwd_c: 0.001                # normalisation constant (smaller = sharper drop)
   align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
   o2o_topk2_start: 3           # o2o branch initial positives per GT (annealed to 1). One-to-Few start
-  o2o_topk2_anneal_epoch: 67   # epoch to start annealing topk2 from 3→1 (~11% of 600)
-  o2o_topk2_anneal_end: 0.5    # topk2 reaches 1 at 50% of training (epoch 300)
+  o2o_topk2_anneal_epoch: 67   # epoch to start annealing topk2 from 3→1 (~17% of 400)
+  o2o_topk2_anneal_end: 0.5    # topk2 reaches 1 at 50% of training (epoch 200)
 
   # Per-o2o cls loss overrides
   # (o2o branch is overridden by the per-branch section below)
@@ -168,7 +168,7 @@ training:
 
   # STAL: DISABLED — NWD handles small nuclei assignment smoothly without forcing poor anchors
   stal_min_positives: 3         # STAL + bias init — force min positives + unidirectional ray gradient (train79)
-  stal_backfill_mode: distance_cls  # "distance" = nearest anchor, "distance_cls" = nearest × (1-cls_score)
+  stal_backfill_mode: distance  # "distance" = nearest anchor (default, isolates feature bank change)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false
