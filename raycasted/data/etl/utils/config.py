@@ -116,6 +116,7 @@ class TrainingSettings(BaseModel):
 
     # STAL: Small-Target-Aware Label Assignment (YOLO26)
     stal_min_positives: int = 0  # minimum positive anchors per GT (0 = disabled)
+    stal_backfill_mode: str = "distance"  # "distance" or "distance_cls"
 
     # Weighted sampling
     weighted_sampling: bool = False

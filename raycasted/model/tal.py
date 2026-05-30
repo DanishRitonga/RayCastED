@@ -170,6 +170,7 @@ class RayCastAssigner(TaskAlignedAssigner):
         self.radius_scale = radius_scale
         self.align_threshold = align_threshold
         self.stal_min_positives = 0  # set by RayCastE2ELoss if enabled
+        self.stal_backfill_mode = "distance"  # "distance" or "distance_cls"
         # Number of nearest anchors to prefilter for PolarIoU / NWD.
         # Must be > topk for proper ranking. Default: max(topk*5, 100).
         self.prefilter_k = prefilter_k if prefilter_k > 0 else max(topk * 5, 100)
@@ -367,8 +368,16 @@ class RayCastAssigner(TaskAlignedAssigner):
             valid_gt = mask_gt.any(dim=-1)  # [bs, n_max_boxes]
             missing = (pos_per_gt < self.stal_min_positives) & valid_gt
             if missing.any():
-                distances = torch.cdist(gt_bboxes[:, :, :2].float(), anc_points.float())
-                _, nearest_idx = distances.min(dim=-1)  # [bs, n_max_boxes]
+                if self.stal_backfill_mode == "distance_cls":
+                    distances = torch.cdist(gt_bboxes[:, :, :2].float(), anc_points.float())
+                    dist_normalized = distances / (distances.max(dim=-1, keepdim=True).values.clamp(min=1e-6))
+                    cls_per_anchor = pd_scores.max(dim=-1).values  # [B, N]
+                    cls_cost = 1.0 - cls_per_anchor.unsqueeze(1)  # [B, 1, N]
+                    combined_cost = dist_normalized * cls_cost  # [B, n_max_boxes, N]
+                    nearest_idx = combined_cost.min(dim=-1).indices  # [B, n_max_boxes]
+                else:
+                    distances = torch.cdist(gt_bboxes[:, :, :2].float(), anc_points.float())
+                    _, nearest_idx = distances.min(dim=-1)  # [bs, n_max_boxes]
                 for b in range(self.bs):
                     missing_gts = missing[b].nonzero(as_tuple=True)[0]
                     for g in missing_gts:

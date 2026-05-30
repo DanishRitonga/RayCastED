@@ -930,6 +930,7 @@ class RayCastE2ELoss(E2ELoss):
         sigma_anneal_end: float = 0.0,
         sigma_anneal_epoch: int = 0,
         stal_min_positives: int = 0,
+        stal_backfill_mode: str = "distance",
         lambda_l1: float = 14.0,
         lambda_piou: float = 13.0,
         lambda_cls: float = 2.0,
@@ -1100,6 +1101,8 @@ class RayCastE2ELoss(E2ELoss):
         if stal_min_positives > 0:
             self.one2many.assigner.stal_min_positives = stal_min_positives
             self.one2one.assigner.stal_min_positives = stal_min_positives
+        self.one2many.assigner.stal_backfill_mode = stal_backfill_mode
+        self.one2one.assigner.stal_backfill_mode = stal_backfill_mode
 
         # CLS-only TAL: o2o branch uses cls^alpha * gaussian_decay (no pIoU)
         if cls_only_tal:
@@ -1209,7 +1212,7 @@ class RayCastE2ELoss(E2ELoss):
 
         # CLS-only TAL blend annealing: pIoU→cls-only linear mix
         if self._cls_only_anneal_epoch > 0:
-            blend = min(current_epoch / self._cls_only_anneal_epoch, 1.0)
+            blend = 1.0 - min(current_epoch / self._cls_only_anneal_epoch, 1.0)
             self.one2one.assigner.cls_only_blend = blend
 
         # Auxiliary XY: decay after aux_xy_decay_epoch

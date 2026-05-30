@@ -168,6 +168,7 @@ training:
 
   # STAL: DISABLED — NWD handles small nuclei assignment smoothly without forcing poor anchors
   stal_min_positives: 3         # STAL + bias init — force min positives + unidirectional ray gradient (train79)
+  stal_backfill_mode: distance  # "distance" = nearest anchor, "distance_cls" = nearest × (1-cls_score)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false
@@ -215,7 +216,7 @@ training:
   # Picks anchors based on what cls head already believes, gated by spatial proximity.
   # Self-reinforcing: higher cls → better assignment → even higher cls.
   cls_only_tal: true
-  cls_only_anneal_epoch: 100  # linear pIoU→cls blend over 100 epochs
+  cls_only_anneal_epoch: 100  # cls→pIoU blend over 100 epochs (cls-only early, pIoU late)
 
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
   clip_grad: 10.0

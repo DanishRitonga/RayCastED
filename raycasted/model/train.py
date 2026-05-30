@@ -245,6 +245,7 @@ class _RayCastCriterionWrapper:
             nc_override=tcfg.get('nc_override', None),
             cls_only_tal=tcfg.get('cls_only_tal', False),
             cls_only_anneal_epoch=tcfg.get('cls_only_anneal_epoch', 100),
+            stal_backfill_mode=tcfg.get('stal_backfill_mode', 'distance'),
         )
 
 
