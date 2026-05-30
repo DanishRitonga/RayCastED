@@ -64,7 +64,7 @@ training:
   tal_topk: 15                 # one2many positives per GT — dynamic topk masks garbage candidates
   assigner_radius_scale: 1.0  # containment radius multiplier (1.0 = 75th-pctile GT radius)
   assigner_alpha: 0.5         # cls score exponent in align = cls^α × piou^β
-  assigner_beta: 1.0          # Polar-IoU exponent — lowered to 1.0 to soften pIoU→cls transition
+  assigner_beta: 0.0          # Polar-IoU exponent — 0 = pure cls-only align (best so far, train80)
 
   # NWD (Normalised Wasserstein Distance) — replaces pIoU for smooth small-object similarity
   nwd_enabled: false          # NWD disabled — too smooth, can't pick winner (train77 dead end)
@@ -168,7 +168,7 @@ training:
 
   # STAL: DISABLED — NWD handles small nuclei assignment smoothly without forcing poor anchors
   stal_min_positives: 3         # STAL + bias init — force min positives + unidirectional ray gradient (train79)
-  stal_backfill_mode: distance  # "distance" = nearest anchor, "distance_cls" = nearest × (1-cls_score)
+  stal_backfill_mode: distance_cls  # "distance" = nearest anchor, "distance_cls" = nearest × (1-cls_score)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false
