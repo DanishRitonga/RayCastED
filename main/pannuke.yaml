@@ -221,6 +221,15 @@ training:
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
   clip_grad: 10.0
 
+  # Feature Bank: EMA prototype bank for classification feature refinement
+  # (Chen et al., 2026). Maintains per-class running-mean prototypes from
+  # the cls head's intermediate c3 features. Contrastive loss pulls fg
+  # features toward their assigned class prototype.
+  feature_bank_enabled: true
+  feature_bank_momentum: 0.9       # EMA momentum (higher = slower updates, more stable)
+  feature_bank_temperature: 0.07   # InfoNCE temperature (lower = sharper)
+  feature_bank_weight: 0.5         # contrastive loss weight multiplier
+
   # Asymmetric max() bound loss (LSP-DETR criterion.py:16-27):
   # loss = max(relu(r_gt*(1-eps) - r_pred), relu(r_pred - r_gt*(1+eps)))
   # Takes worst violation per ray. Zero inside tolerance band.

@@ -216,6 +216,15 @@ class TrainingSettings(BaseModel):
     # Gradient clipping (LSP-DETR uses 0.1). Ultralytics defaults to 10.0.
     clip_grad: float = 10.0
 
+    # Feature Bank: EMA prototype bank for classification feature refinement
+    # (Chen et al., 2026 — JCST). Maintains per-class running-mean prototypes
+    # from the cls head's intermediate c3 features. A contrastive loss pulls
+    # fg features toward their assigned class prototype.
+    feature_bank_enabled: bool = False  # enable feature bank (0 = disabled)
+    feature_bank_momentum: float = 0.9  # EMA momentum for prototype updates
+    feature_bank_temperature: float = 0.07  # InfoNCE temperature
+    feature_bank_weight: float = 0.5  # contrastive loss weight multiplier
+
     model_config = ConfigDict(extra='forbid')
 
 

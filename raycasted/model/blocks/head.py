@@ -233,6 +233,7 @@ class RayCastDetect(Detect):
         hierarchical_cls: bool = False,
         hierarchical_cls_detach: bool = True,
         hierarchical_binary_threshold: float = 0.01,
+        feature_bank_enabled: bool = False,
     ):
         """Initialize polygon detection head.
 
@@ -280,6 +281,9 @@ class RayCastDetect(Detect):
                 separation on fg anchors. At inference: sigmoid(binary) × softmax(class).
             hierarchical_cls_detach: If True, stop-gradient binary head input features
                 to prevent backbone gradient flooding (default True).
+            feature_bank_enabled: If True, extract intermediate cls head features (c3)
+                from the o2o branch during forward pass and include them in the
+                preds dict as 'cls_feats_flat' for use by the FeatureBank.
         """
         self.n_rays = n_rays if n_rays is not None else _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays  # xy + rays
@@ -294,6 +298,7 @@ class RayCastDetect(Detect):
         self.hierarchical_cls = hierarchical_cls
         self.hierarchical_cls_detach = hierarchical_cls_detach
         self.hierarchical_binary_threshold = hierarchical_binary_threshold
+        self.feature_bank_enabled = feature_bank_enabled
 
         super().__init__(nc, reg_max, end2end, ch)
 
@@ -452,7 +457,11 @@ class RayCastDetect(Detect):
             aux_raw = torch.cat([self.aux_xy[i](x[i]).view(bs, 2, -1) for i in range(self.nl)], dim=-1)
             result['aux_xy_raw'] = aux_raw
 
-        if prediction_refinement_attn is not None:
+        # Extract intermediate c3 features when prediction refinement or
+        # feature bank is enabled.  Feature bank needs cls_feats_flat for
+        # EMA prototype updates even without prediction refinement.
+        _extract_c3 = prediction_refinement_attn is not None or getattr(self, 'feature_bank_enabled', False)
+        if _extract_c3:
             c3_feats = []
             for i in range(self.nl):
                 feat = cls_head[i][:-1](x[i])  # [B, c3, H, W]

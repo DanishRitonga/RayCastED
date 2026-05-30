@@ -246,6 +246,10 @@ class _RayCastCriterionWrapper:
             cls_only_tal=tcfg.get('cls_only_tal', False),
             cls_only_anneal_epoch=tcfg.get('cls_only_anneal_epoch', 100),
             stal_backfill_mode=tcfg.get('stal_backfill_mode', 'distance'),
+            feature_bank_enabled=tcfg.get('feature_bank_enabled', False),
+            feature_bank_momentum=tcfg.get('feature_bank_momentum', 0.9),
+            feature_bank_temperature=tcfg.get('feature_bank_temperature', 0.07),
+            feature_bank_weight=tcfg.get('feature_bank_weight', 0.5),
         )
 
 
@@ -560,6 +564,7 @@ class RayCastTrainer(DetectionTrainer):
         hierarchical_cls = bool(tcfg.get('hierarchical_cls', False)) if tcfg else False
         hierarchical_cls_detach = bool(tcfg.get('hierarchical_cls_detach', True)) if tcfg else True
         hierarchical_binary_threshold = float(tcfg.get('hierarchical_binary_threshold', 0.01)) if tcfg else 0.01
+        feature_bank_enabled = bool(tcfg.get('feature_bank_enabled', False)) if tcfg else False
 
         if isinstance(old_head, RayCastDetect):
             # YAML already specifies RayCastDetect — ensure n_rays matches
@@ -626,6 +631,10 @@ class RayCastTrainer(DetectionTrainer):
                 if old_head._end2end_arg:
                     old_head.one2one_prediction_refinement_attn = copy.deepcopy(old_head.prediction_refinement_attn)
                     old_head.prediction_refinement_attn = None
+
+            # Enable feature bank c3 feature extraction if configured
+            if feature_bank_enabled:
+                old_head.feature_bank_enabled = True
 
             # Rebuild cv2 with DCN if configured and not already present
             if dcn_in_reg_head:
@@ -709,6 +718,7 @@ class RayCastTrainer(DetectionTrainer):
                 hierarchical_cls=hierarchical_cls,
                 hierarchical_cls_detach=hierarchical_cls_detach,
                 hierarchical_binary_threshold=hierarchical_binary_threshold,
+                feature_bank_enabled=feature_bank_enabled,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):
