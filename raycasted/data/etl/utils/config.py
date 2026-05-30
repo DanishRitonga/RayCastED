@@ -224,6 +224,7 @@ class TrainingSettings(BaseModel):
     feature_bank_momentum: float = 0.9  # EMA momentum for prototype updates
     feature_bank_temperature: float = 0.07  # InfoNCE temperature
     feature_bank_weight: float = 0.5  # contrastive loss weight multiplier
+    feature_bank_warmup_epochs: int = 0  # epochs to wait before activating FB (0 = immediate)
 
     model_config = ConfigDict(extra='forbid')
 

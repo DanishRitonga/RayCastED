@@ -229,6 +229,7 @@ training:
   feature_bank_momentum: 0.9       # EMA momentum (higher = slower updates, more stable)
   feature_bank_temperature: 0.07   # InfoNCE temperature (lower = sharper)
   feature_bank_weight: 0.5         # contrastive loss weight multiplier
+  feature_bank_warmup_epochs: 50   # skip FB for first N epochs — let cls head learn meaningful features first
 
   # Asymmetric max() bound loss (LSP-DETR criterion.py:16-27):
   # loss = max(relu(r_gt*(1-eps) - r_pred), relu(r_pred - r_gt*(1+eps)))

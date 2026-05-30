@@ -960,6 +960,7 @@ class RayCastE2ELoss(E2ELoss):
         feature_bank_momentum: float = 0.9,
         feature_bank_temperature: float = 0.07,
         feature_bank_weight: float = 0.5,
+        feature_bank_warmup_epochs: int = 0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -1147,6 +1148,7 @@ class RayCastE2ELoss(E2ELoss):
         self._feature_bank_momentum = feature_bank_momentum
         self._feature_bank_temperature = feature_bank_temperature
         self._feature_bank_weight = feature_bank_weight
+        self._feature_bank_warmup_epochs = feature_bank_warmup_epochs
         self.feature_bank = None  # lazily created after nc and c3 are known
 
     def set_steps_per_epoch(self, steps_per_epoch: int) -> None:
@@ -1353,8 +1355,12 @@ class RayCastE2ELoss(E2ELoss):
             loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
 
         # --- Feature Bank: contrastive loss on o2o cls intermediate features ---
+        # Skip during warmup: prototypes are random, TAL assignments are noisy.
+        # Let the cls head establish meaningful features before pulling toward prototypes.
+        _fb_warmed_up = self.updates >= self._feature_bank_warmup_epochs
         has_fb = (
             self._feature_bank_enabled
+            and _fb_warmed_up
             and 'cls_feats_flat' in one2one_preds
             and hasattr(self.one2one, '_fg_mask')
             and self.one2one._fg_mask is not None

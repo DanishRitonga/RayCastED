@@ -250,6 +250,7 @@ class _RayCastCriterionWrapper:
             feature_bank_momentum=tcfg.get('feature_bank_momentum', 0.9),
             feature_bank_temperature=tcfg.get('feature_bank_temperature', 0.07),
             feature_bank_weight=tcfg.get('feature_bank_weight', 0.5),
+            feature_bank_warmup_epochs=tcfg.get('feature_bank_warmup_epochs', 0),
         )
 
 
