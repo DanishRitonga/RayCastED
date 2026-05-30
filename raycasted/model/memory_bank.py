@@ -95,6 +95,8 @@ class FeatureBank(nn.Module):
         if self.prototypes is None:
             self._init_prototypes(features.device)
 
+        # AMP safety: cast to float32 to match prototypes dtype
+        features = features.float()
         for c in range(self.num_classes):
             mask = labels == c
             if mask.any():
@@ -127,6 +129,10 @@ class FeatureBank(nn.Module):
         """
         if self.prototypes is None or features.numel() == 0:
             return torch.tensor(0.0, device=features.device, requires_grad=True)
+
+        # AMP safety: cast to float32 for stable cosine similarity
+        # Float32 is required for numerical stability in exp() inside cross_entropy
+        features = features.float()
 
         # [K, D] × [D, C] = [K, C] — cosine similarity scaled by temperature
         features_norm = F.normalize(features, dim=-1)
