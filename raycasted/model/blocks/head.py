@@ -427,12 +427,14 @@ class RayCastDetect(Detect):
                 nn.SiLU(inplace=True),
                 nn.Conv2d(c4_feat // 16, nc, 1),
             )
-            # Zero-init projection heads → initial competition is uniform (no preference)
-            # Softmax of [0, 0, 0] = [1/3, 1/3, 1/3] → fair competition at init
-            nn.init.zeros_(self.ps_p3_proj[-1].weight)
-            nn.init.zeros_(self.ps_p3_proj[-1].bias)
-            nn.init.zeros_(self.ps_p4_proj[-1].weight)
-            nn.init.zeros_(self.ps_p4_proj[-1].bias)
+            # Xavier init → non-zero outputs with spatial variation (from feature structure).
+            # Zero init would collapse all positions to uniform 1/3 weight — no sub-grid structure.
+            for proj in [self.ps_p3_proj, self.ps_p4_proj]:
+                for m in proj.modules():
+                    if isinstance(m, nn.Conv2d):
+                        nn.init.xavier_uniform_(m.weight)
+                        if m.bias is not None:
+                            nn.init.zeros_(m.bias)
         else:
             self.ps_p3_shuffle = None
             self.ps_p3_proj = None
@@ -567,7 +569,15 @@ class RayCastDetect(Detect):
         p4_subgrid = self.ps_p4_proj(p4_shuffled)   # [B, nc, H_p2, W_p2]
 
         # Softmax competition at P2 resolution (per-position, per-class)
+        # LayerNorm across scale dim (dim=2) prevents magnitude mismatch between
+        # trained cv3 scores (P2, magnitude ~1-2) and zero-init projection heads
+        # (P3/P4 subgrid, magnitude ~0). Without normalization, softmax gives P2
+        # ~76% weight and suppresses P3/P4 from the first epoch.
         stacked = torch.stack([p2_scores, p3_subgrid, p4_subgrid], dim=2)  # [B, nc, 3, H_p2, W_p2]
+        # Normalize per-position, per-class across the 3 scales
+        stacked_perm = stacked.permute(0, 1, 3, 4, 2)  # [B, nc, H, W, 3]
+        stacked_norm = F.layer_norm(stacked_perm, (3,))  # normalize over scale dim
+        stacked = stacked_norm.permute(0, 1, 4, 2, 3)  # [B, nc, 3, H, W]
         temp = self.inter_scale_temperature if self.inter_scale_temperature != 1.0 else 1.0
         if temp != 1.0:
             stacked = stacked / temp
