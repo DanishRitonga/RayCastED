@@ -242,6 +242,7 @@ class _RayCastCriterionWrapper:
             bound_l1_weight=tcfg.get('bound_l1_weight', 0.0),
             bound_l1_eps=tcfg.get('bound_l1_eps', 0.1),
             hierarchical_cls=tcfg.get('hierarchical_cls', False),
+            hierarchical_soft_cascade=tcfg.get('hierarchical_soft_cascade', True),
             nc_override=tcfg.get('nc_override', None),
             cls_only_tal=tcfg.get('cls_only_tal', False),
             cls_only_anneal_epoch=tcfg.get('cls_only_anneal_epoch', 100),
@@ -555,6 +556,7 @@ class RayCastTrainer(DetectionTrainer):
         prediction_refinement_topk = tcfg.get('prediction_refinement_topk', 100) if tcfg else 100
         inter_scale_competition = bool(tcfg.get('inter_scale_competition', False)) if tcfg else False
         inter_scale_temperature = tcfg.get('inter_scale_temperature', 1.0) if tcfg else 1.0
+        inter_scale_pixel_shuffle = bool(tcfg.get('inter_scale_pixel_shuffle', False)) if tcfg else False
         local_competition = bool(tcfg.get('local_competition', False)) if tcfg else False
         local_competition_kernel = tcfg.get('local_competition_kernel', 3) if tcfg else 3
         local_competition_temperature = tcfg.get('local_competition_temperature', 1.0) if tcfg else 1.0
@@ -600,6 +602,10 @@ class RayCastTrainer(DetectionTrainer):
             if inter_scale_competition:
                 old_head.inter_scale_competition = True
                 old_head.inter_scale_temperature = inter_scale_temperature
+                old_head.inter_scale_pixel_shuffle = inter_scale_pixel_shuffle
+                # Note: PixelShuffle modules must be added to the head at construction time.
+                # If loading from a checkpoint that didn't have pixel shuffle, the modules
+                # won't exist and the competition will fall back to bilinear.
 
             # Set local competition flags on existing RayCastDetect head
             if local_competition:
@@ -711,6 +717,7 @@ class RayCastTrainer(DetectionTrainer):
                 prediction_refinement_topk=prediction_refinement_topk,
                 inter_scale_competition=inter_scale_competition,
                 inter_scale_temperature=inter_scale_temperature,
+                inter_scale_pixel_shuffle=inter_scale_pixel_shuffle,
                 local_competition=local_competition,
                 local_competition_kernel=local_competition_kernel,
                 local_competition_temperature=local_competition_temperature,

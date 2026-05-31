@@ -350,6 +350,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         bound_l1_weight: float = 0.0,
         bound_l1_eps: float = 0.1,
         hierarchical_cls: bool = False,
+        hierarchical_soft_cascade: bool = True,
         nc_override: int | None = None,
         nwd_enabled: bool = False,
         nwd_c: float = 0.001,
@@ -360,6 +361,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.no = m.nc + self.raycast_dim  # BUG-02 fix (parent sets nc + reg_max*4)
         self.use_dfl = False  # DFL not applicable to polygon regression
         self.hierarchical_cls = hierarchical_cls
+        self.hierarchical_soft_cascade = hierarchical_soft_cascade
         self.nc_override = nc_override
         self.nwd_enabled = nwd_enabled
 
@@ -710,11 +712,18 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[1] = loss_binary.sum() / max(fg_mask.sum(), 1)
 
             # Class loss: CE on fg anchors only — inter-class discrimination
+            # Soft cascade: weight class loss by binary head's confidence.
+            # Anchors where binary head is confident get full class gradient;
+            # ambiguous anchors get dampened gradient (curriculum learning).
             n_fg = max(fg_mask.sum(), 1)
             if fg_mask.any():
                 fg_pred_class = pred_class[fg_mask]  # [K, nc]
                 fg_class_labels = cls_targets[fg_mask].argmax(dim=-1)  # [K]
                 loss_class = F.cross_entropy(fg_pred_class, fg_class_labels, reduction='none')
+                if self.hierarchical_soft_cascade:
+                    # Detached binary weight — no gradient to binary head from class loss
+                    fg_binary_conf = pred_binary[fg_mask].sigmoid().squeeze(-1).detach()  # [K]
+                    loss_class = loss_class * fg_binary_conf
                 loss[1] += loss_class.sum() / n_fg
 
             _cls_fg_sum = 0.0
@@ -951,6 +960,7 @@ class RayCastE2ELoss(E2ELoss):
         bound_l1_weight: float = 0.0,
         bound_l1_eps: float = 0.1,
         hierarchical_cls: bool = False,
+        hierarchical_soft_cascade: bool = True,
         nc_override: int | None = None,
         nwd_enabled: bool = False,
         nwd_c: float = 0.001,
@@ -1002,6 +1012,7 @@ class RayCastE2ELoss(E2ELoss):
             bound_l1_weight=bound_l1_weight,
             bound_l1_eps=bound_l1_eps,
             hierarchical_cls=hierarchical_cls,
+            hierarchical_soft_cascade=hierarchical_soft_cascade,
             nc_override=nc_override,
             nwd_enabled=nwd_enabled,
             nwd_c=nwd_c,

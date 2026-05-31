@@ -187,6 +187,7 @@ class TrainingSettings(BaseModel):
     # gathers regression from winning scale. Addresses multi-scale duplicates.
     inter_scale_competition: bool = False
     inter_scale_temperature: float = 1.0  # softmax temperature (lower = sharper competition)
+    inter_scale_pixel_shuffle: bool = False  # sub-grid-aware competition via PixelShuffle (trainable)
 
     # Local (intra-scale) competition: per-scale 3×3 neighborhood softmax.
     # Each anchor competes with its 8 neighbors — local winner-take-more.
@@ -211,6 +212,7 @@ class TrainingSettings(BaseModel):
     cls_only_anneal_epoch: int = 100  # linear pIoU→cls blend over N epochs
     hierarchical_cls_detach: bool = True  # Stop-grad binary head input to prevent backbone flooding
     hierarchical_binary_threshold: float = 0.01  # Binary gate threshold at inference
+    hierarchical_soft_cascade: bool = True  # Weight class loss by binary head confidence (soft curriculum)
     nc_override: int | None = None  # Force nc (e.g. 1 for binary detection); remaps all labels to class 0
 
     # Gradient clipping (LSP-DETR uses 0.1). Ultralytics defaults to 10.0.

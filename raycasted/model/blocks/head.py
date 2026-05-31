@@ -225,6 +225,7 @@ class RayCastDetect(Detect):
         prediction_refinement_topk: int = 100,
         inter_scale_competition: bool = False,
         inter_scale_temperature: float = 1.0,
+        inter_scale_pixel_shuffle: bool = False,
         local_competition: bool = False,
         local_competition_kernel: int = 3,
         local_competition_temperature: float = 1.0,
@@ -292,6 +293,7 @@ class RayCastDetect(Detect):
         self.prediction_refinement_topk = prediction_refinement_topk
         self.inter_scale_competition = inter_scale_competition
         self.inter_scale_temperature = inter_scale_temperature
+        self.inter_scale_pixel_shuffle = inter_scale_pixel_shuffle
         self.local_competition = local_competition
         self.local_competition_kernel = local_competition_kernel
         self.local_competition_temperature = local_competition_temperature
@@ -403,6 +405,40 @@ class RayCastDetect(Detect):
                 self.one2one_prediction_refinement_attn = copy.deepcopy(self.prediction_refinement_attn)
                 self.prediction_refinement_attn = None
 
+        # --- PixelShuffle inter-scale competition (sub-grid aware) ---
+        # Instead of bilinear upsampling scores (which blurs sub-grid structure),
+        # pixel shuffle decomposes P3/P4 features into sub-grid-aware P2 resolution,
+        # then a lightweight projection computes per-position competition scores.
+        # This is trainable end-to-end (gradients flow through projection heads).
+        if inter_scale_pixel_shuffle and self.nl >= 3 and len(ch) >= 3:
+            # P3 features → P2 resolution via PixelShuffle(2)
+            c3_feat = ch[1]  # P3 feature channels (128 for YOLO11n)
+            self.ps_p3_shuffle = nn.PixelShuffle(upscale_factor=2)
+            self.ps_p3_proj = nn.Sequential(
+                nn.Conv2d(c3_feat // 4, c3_feat // 4, 3, padding=1, groups=c3_feat // 4),
+                nn.SiLU(inplace=True),
+                nn.Conv2d(c3_feat // 4, nc, 1),
+            )
+            # P4 features → P2 resolution via PixelShuffle(4)
+            c4_feat = ch[2]  # P4 feature channels (256 for YOLO11n)
+            self.ps_p4_shuffle = nn.PixelShuffle(upscale_factor=4)
+            self.ps_p4_proj = nn.Sequential(
+                nn.Conv2d(c4_feat // 16, c4_feat // 16, 3, padding=1, groups=c4_feat // 16),
+                nn.SiLU(inplace=True),
+                nn.Conv2d(c4_feat // 16, nc, 1),
+            )
+            # Zero-init projection heads → initial competition is uniform (no preference)
+            # Softmax of [0, 0, 0] = [1/3, 1/3, 1/3] → fair competition at init
+            nn.init.zeros_(self.ps_p3_proj[-1].weight)
+            nn.init.zeros_(self.ps_p3_proj[-1].bias)
+            nn.init.zeros_(self.ps_p4_proj[-1].weight)
+            nn.init.zeros_(self.ps_p4_proj[-1].bias)
+        else:
+            self.ps_p3_shuffle = None
+            self.ps_p3_proj = None
+            self.ps_p4_shuffle = None
+            self.ps_p4_proj = None
+
     @property
     def one2many(self):
         """Return one2many head components."""
@@ -436,6 +472,9 @@ class RayCastDetect(Detect):
         When cls_head_binary and cls_head_class are provided (hierarchical cls),
         returns 'binary_scores' [B, 1, N] and 'class_scores' [B, nc, N] instead
         of 'scores'.
+
+        When inter_scale_pixel_shuffle is enabled, class scores are competition-
+        weighted using sub-grid-aware pixel shuffle before concatenation.
         """
         if box_head is None or cls_head is None:
             return {}
@@ -447,10 +486,26 @@ class RayCastDetect(Detect):
             binary_scores = torch.cat(
                 [cls_head_binary[i](binary_in[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1
             )
-            class_scores = torch.cat([cls_head_class[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+            # Compute per-scale class scores (reshape to spatial for competition)
+            spatial_shapes = [(x[i].shape[2], x[i].shape[3]) for i in range(self.nl)]
+            class_per_scale = [
+                cls_head_class[i](x[i]).view(bs, self.nc, spatial_shapes[i][0], spatial_shapes[i][1])
+                for i in range(self.nl)
+            ]
+            # Apply pixel shuffle competition on class scores
+            class_per_scale = self._apply_pixelshuffle_competition(class_per_scale, x, spatial_shapes)
+            # Flatten back to [B, nc, N]
+            class_scores = torch.cat([cs.view(bs, self.nc, -1) for cs in class_per_scale], dim=-1)
             result = dict(boxes=poly, binary_scores=binary_scores, class_scores=class_scores, feats=x)
         else:
-            scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+            spatial_shapes = [(x[i].shape[2], x[i].shape[3]) for i in range(self.nl)]
+            scores_per_scale = [
+                cls_head[i](x[i]).view(bs, self.nc, spatial_shapes[i][0], spatial_shapes[i][1])
+                for i in range(self.nl)
+            ]
+            # Apply pixel shuffle competition on scores
+            scores_per_scale = self._apply_pixelshuffle_competition(scores_per_scale, x, spatial_shapes)
+            scores = torch.cat([ss.view(bs, self.nc, -1) for ss in scores_per_scale], dim=-1)
             result = dict(boxes=poly, scores=scores, feats=x)
 
         if hasattr(self, 'aux_xy') and self.aux_xy is not None:
@@ -469,6 +524,63 @@ class RayCastDetect(Detect):
                 c3_feats.append(feat.permute(0, 2, 3, 1).reshape(bs, h * w, -1))
             cls_feats_flat = torch.cat(c3_feats, dim=1)  # [B, N_total, c3]
             result['cls_feats_flat'] = cls_feats_flat
+
+        return result
+
+    def _apply_pixelshuffle_competition(
+        self,
+        scores_per_scale: list[torch.Tensor],
+        feats: list[torch.Tensor],
+        spatial_shapes: list[tuple[int, int]],
+    ) -> list[torch.Tensor]:
+        """PixelShuffle sub-grid-aware inter-scale competition.
+
+        Instead of bilinear upsampling (which blurs sub-grid structure),
+        decomposes P3/P4 features into sub-grid scores at P2 resolution
+        via PixelShuffle + lightweight projection. Competition weights
+        are computed at native P2 resolution, preserving position-specific
+        information.
+
+        Args:
+            scores_per_scale: [B, nc, H_i, W_i] per scale (spatial, not flattened).
+            feats: Raw feature maps per scale (for PixelShuffle input).
+            spatial_shapes: [(H_i, W_i)] per scale.
+
+        Returns:
+            Competition-weighted scores per scale (same shapes as input).
+        """
+        if self.ps_p3_shuffle is None or self.nl < 3:
+            return scores_per_scale
+
+        bs = scores_per_scale[0].shape[0]
+        H_p2, W_p2 = spatial_shapes[0]
+
+        # P2 scores: already at P2 resolution
+        p2_scores = scores_per_scale[0]  # [B, nc, H_p2, W_p2]
+
+        # P3 features → PixelShuffle(2) → projection → sub-grid scores at P2 resolution
+        p3_shuffled = self.ps_p3_shuffle(feats[1])  # [B, C3//4, H_p2, W_p2]
+        p3_subgrid = self.ps_p3_proj(p3_shuffled)   # [B, nc, H_p2, W_p2]
+
+        # P4 features → PixelShuffle(4) → projection → sub-grid scores at P2 resolution
+        p4_shuffled = self.ps_p4_shuffle(feats[2])  # [B, C4//16, H_p2, W_p2]
+        p4_subgrid = self.ps_p4_proj(p4_shuffled)   # [B, nc, H_p2, W_p2]
+
+        # Softmax competition at P2 resolution (per-position, per-class)
+        stacked = torch.stack([p2_scores, p3_subgrid, p4_subgrid], dim=2)  # [B, nc, 3, H_p2, W_p2]
+        temp = self.inter_scale_temperature if self.inter_scale_temperature != 1.0 else 1.0
+        if temp != 1.0:
+            stacked = stacked / temp
+        competition_weights = F.softmax(stacked, dim=2)  # [B, nc, 3, H_p2, W_p2]
+
+        # Apply weights to native-resolution scores
+        result = []
+        for i in range(self.nl):
+            h, w = spatial_shapes[i]
+            w_i = competition_weights[:, :, i]  # [B, nc, H_p2, W_p2]
+            if h != H_p2 or w != W_p2:
+                w_i = F.interpolate(w_i, size=(h, w), mode='bilinear', align_corners=False)
+            result.append(scores_per_scale[i] * w_i)
 
         return result
 
@@ -722,9 +834,9 @@ class RayCastDetect(Detect):
 
         # Inter-scale competition: softmax across scales suppresses cross-scale duplicates.
         # Same nucleus often predicted at both P2 and P3 with high confidence.
-        # Competition: upsample all scales to P2, softmax across scale dim,
-        # multiply each scale's confidence by its competition weight.
-        if self.inter_scale_competition and self.nl > 1:
+        # With pixel_shuffle, competition is applied in forward_head (trainable).
+        # Without pixel_shuffle, fall back to bilinear upsampling (inference-only).
+        if self.inter_scale_competition and self.nl > 1 and not self.inter_scale_pixel_shuffle:
             scores = self._apply_inter_scale_competition(
                 scores,
                 x['feats'],

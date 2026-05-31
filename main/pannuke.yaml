@@ -133,6 +133,7 @@ training:
   # Lower temperature = sharper winner-take-more. No NMS needed.
   inter_scale_competition: true      # enable inter-scale competition at inference
   inter_scale_temperature: 0.5       # softmax temperature (1.0 = standard, 0.5 = sharper winner-take-more)
+  inter_scale_pixel_shuffle: true    # sub-grid-aware competition via PixelShuffle (trainable end-to-end)
 
   # Local (intra-scale) competition: per-scale 3×3 neighborhood softmax.
   # Each anchor competes with its 8 neighbors — local winner-take-more.
@@ -211,6 +212,7 @@ training:
   hierarchical_cls: true
   hierarchical_cls_detach: true
   hierarchical_binary_threshold: 0.01  # Hard gate: keep anchors with sigmoid(binary) > 0.01
+  hierarchical_soft_cascade: false  # DISABLED: test pixel shuffle competition in isolation
 
   # CLS-only TAL: o2o assigner uses cls^alpha * gaussian_decay (no pIoU)
   # Picks anchors based on what cls head already believes, gated by spatial proximity.
@@ -225,7 +227,10 @@ training:
   # (Chen et al., 2026). Maintains per-class running-mean prototypes from
   # the cls head's intermediate c3 features. Contrastive loss pulls fg
   # features toward their assigned class prototype.
-  feature_bank_enabled: true
+  # DISABLED: Hurt mAP50 by ~10pts across 3 experiments. Single prototype
+  # per class is too naive — big/small nuclei within same class have very
+  # different features. EMA average lands in no-man's-land.
+  feature_bank_enabled: false
   feature_bank_momentum: 0.9       # EMA momentum (higher = slower updates, more stable)
   feature_bank_temperature: 0.07   # InfoNCE temperature (lower = sharper)
   feature_bank_weight: 0.5         # contrastive loss weight multiplier
