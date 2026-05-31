@@ -784,10 +784,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
             self._fg_mask = fg_mask
             self._fg_quality = fg_quality.detach()
             self._target_gt_idx = target_gt_idx
-            # Store fg class labels for feature bank contrastive loss
-            # cls_targets is [B, N, nc] one-hot; convert to [B, N] integer labels
-            with torch.no_grad():
-                self._fg_cls_labels = cls_targets.argmax(dim=-1)  # [B, N]
 
             # L_smooth: Curvature (2nd-order) regularisation on predicted rays
             smooth_loss = curvature_smoothness_loss_torch(fg_pred_rays)
@@ -832,7 +828,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
             self._fg_mask = None
             self._fg_quality = None
             self._target_gt_idx = None
-            self._fg_cls_labels = None
             # DDP safety — touch all prediction tensors to avoid unused-gradient errors
             loss[0] += (pred_xy * 0).sum()
             loss[2] += (pred_rays * 0).sum()
@@ -970,11 +965,6 @@ class RayCastE2ELoss(E2ELoss):
         nwd_c: float = 0.001,
         cls_only_tal: bool = False,
         cls_only_anneal_epoch: int = 100,
-        feature_bank_enabled: bool = False,
-        feature_bank_momentum: float = 0.9,
-        feature_bank_temperature: float = 0.07,
-        feature_bank_weight: float = 0.5,
-        feature_bank_warmup_epochs: int = 0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -1152,14 +1142,6 @@ class RayCastE2ELoss(E2ELoss):
         self._max_epochs = max_epochs
         self.aux_xy_decay_epoch = max(1, aux_xy_ramp_epochs)
 
-        # Feature Bank: EMA prototype bank for classification feature refinement
-        self._feature_bank_enabled = feature_bank_enabled
-        self._feature_bank_momentum = feature_bank_momentum
-        self._feature_bank_temperature = feature_bank_temperature
-        self._feature_bank_weight = feature_bank_weight
-        self._feature_bank_warmup_epochs = feature_bank_warmup_epochs
-        self.feature_bank = None  # lazily created after nc and c3 are known
-
     def set_steps_per_epoch(self, steps_per_epoch: int) -> None:
         """Update steps_per_epoch after dataset size becomes known.
 
@@ -1290,71 +1272,6 @@ class RayCastE2ELoss(E2ELoss):
             else:
                 loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
         else:
-            loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
-
-        # --- Feature Bank: contrastive loss on o2o cls intermediate features ---
-        # Skip during warmup: prototypes are random, TAL assignments are noisy.
-        # Let the cls head establish meaningful features before pulling toward prototypes.
-        _fb_warmed_up = self.updates >= self._feature_bank_warmup_epochs
-        has_fb = (
-            self._feature_bank_enabled
-            and _fb_warmed_up
-            and 'cls_feats_flat' in one2one_preds
-            and hasattr(self.one2one, '_fg_mask')
-            and self.one2one._fg_mask is not None
-        )
-        if has_fb:
-            if self.feature_bank is None:
-                # Lazy init: need nc and c3 dimension from the model
-                m = self.one2one  # RayCastDetectionLoss instance
-                _nc = m.nc if hasattr(m, 'nc') else one2one_preds['cls_feats_flat'].shape[-1]
-                _c3 = one2one_preds['cls_feats_flat'].shape[-1]
-                from raycasted.model.memory_bank import FeatureBank
-
-                self.feature_bank = FeatureBank(
-                    num_classes=_nc,
-                    feat_dim=_c3,
-                    momentum=self._feature_bank_momentum,
-                    temperature=self._feature_bank_temperature,
-                    weight=self._feature_bank_weight,
-                )
-                logger.info('FeatureBank created: %s', self.feature_bank)
-
-            cls_feats_flat = one2one_preds['cls_feats_flat']  # [B, N_total, c3]
-            fg_mask_o2o = self.one2one._fg_mask  # [B, N]
-
-            if fg_mask_o2o.any():
-                B, N_total, c3 = cls_feats_flat.shape
-                # Flatten batch + spatial dims: [B, N_total, c3] → [B*N_total, c3]
-                flat_feats = cls_feats_flat.reshape(-1, c3)
-                flat_fg = fg_mask_o2o.reshape(-1)  # [B*N_total]
-
-                fg_feats = flat_feats[flat_fg]  # [K, c3] — foreground features with grad
-
-                # Get class labels for fg anchors from o2o assignment
-                fg_cls_labels = self.one2one._fg_cls_labels  # [B, N] or None
-                if fg_cls_labels is not None:
-                    flat_cls = fg_cls_labels.reshape(-1)
-                    fg_labels = flat_cls[flat_fg].long()  # [K]
-                else:
-                    # Fallback: derive from cls_targets via argmax
-                    fg_labels = None
-
-                if fg_labels is not None and fg_labels.numel() > 0:
-                    # Compute contrastive loss with grad flowing through features
-                    # (prototypes are already detached inside compute_contrastive_loss)
-                    fb_loss = self.feature_bank.compute_contrastive_loss(fg_feats, fg_labels)
-                    fb_loss_val = fb_loss * self._feature_bank_weight
-                    total_loss = torch.cat([total_loss, fb_loss_val.unsqueeze(0)])
-                    loss_detach = torch.cat([loss_detach, fb_loss_val.detach().unsqueeze(0)])
-
-                    # Update prototypes with EMA (detached features only — no grad through bank)
-                    self.feature_bank.update(fg_feats.detach(), fg_labels)
-                else:
-                    loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
-            else:
-                loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
-        elif self._feature_bank_enabled:
             loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
 
         return total_loss, loss_detach
