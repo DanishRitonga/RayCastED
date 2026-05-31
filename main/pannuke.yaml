@@ -40,8 +40,8 @@ global_settings:
 # Training settings — recommended values for improved detection quality.
 training:
   # Head architecture
-  head_channel_scale: 0.25   # c2 = max(head_channel_min, ch * scale). Was 0.25
-  head_channel_min: 16       # minimum channels in polygon head. Was 16
+  head_channel_scale: 0.5    # c2 = max(head_channel_min, ch * scale). Was 0.25
+  head_channel_min: 64       # minimum channels in polygon head. Was 16
   cls_channel_scale: 1.0     # c3 = max(cls_channel_min, ch[0] * scale). 1.0 = original (dead end at 2.0, train33)
   cls_channel_min: 0         # minimum cls head intermediate channels. 0 = use ch[0]
 
@@ -64,15 +64,15 @@ training:
   tal_topk: 15                 # one2many positives per GT — dynamic topk masks garbage candidates
   assigner_radius_scale: 1.0  # containment radius multiplier (1.0 = 75th-pctile GT radius)
   assigner_alpha: 0.5         # cls score exponent in align = cls^α × piou^β
-  assigner_beta: 0.0          # Polar-IoU exponent — 0 = pure cls-only align (best so far, train80)
+  assigner_beta: 2.0          # Polar-IoU exponent — lowered from 6.0 to make cls signal matter in anchor selection
 
   # NWD (Normalised Wasserstein Distance) — replaces pIoU for smooth small-object similarity
   nwd_enabled: false          # NWD disabled — too smooth, can't pick winner (train77 dead end)
   nwd_c: 0.001                # normalisation constant (smaller = sharper drop)
   align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
   o2o_topk2_start: 3           # o2o branch initial positives per GT (annealed to 1). One-to-Few start
-  o2o_topk2_anneal_epoch: 67   # epoch to start annealing topk2 from 3→1 (~17% of 400)
-  o2o_topk2_anneal_end: 0.5    # topk2 reaches 1 at 50% of training (epoch 200)
+  o2o_topk2_anneal_epoch: 67   # epoch to start annealing topk2 from 3→1 (~11% of 600)
+  o2o_topk2_anneal_end: 0.5    # topk2 reaches 1 at 50% of training (epoch 300)
 
   # Per-o2o cls loss overrides
   # (o2o branch is overridden by the per-branch section below)
@@ -111,6 +111,15 @@ training:
   aux_xy_weight: 10.0           # Huber loss weight for aux xy predictions
   aux_xy_ramp_epochs: 100       # epoch at which aux xy weight begins linear decay to zero
 
+  # Prediction-level self-attention on top-K scored predictions (o2o branch only).
+  # After FCN scores all 5376 anchors, top-K=100 by confidence are selected.
+  # These K predictions (mostly fg) undergo TransformerEncoder self-attention,
+  # producing per-prediction suppression weights. Fundamentally different from
+  # feature-level attention (train31/32/34 dead ends) which operated on 5376
+  # bg-dominated anchor features.
+  prediction_refinement_weight: 0.0  # disabled for topk2 ablation (train38)
+  prediction_refinement_topk: 100    # number of top predictions to refine
+
   # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band for overlaps.
   # loss = max(r_gt*(1-eps) - r_pred, 0) + max(r_pred - r_gt*(1+eps), 0)
   # Zero if prediction falls within [r_gt*(1-eps), r_gt*(1+eps)].
@@ -124,7 +133,6 @@ training:
   # Lower temperature = sharper winner-take-more. No NMS needed.
   inter_scale_competition: true      # enable inter-scale competition at inference
   inter_scale_temperature: 0.5       # softmax temperature (1.0 = standard, 0.5 = sharper winner-take-more)
-  inter_scale_pixel_shuffle: false   # sub-grid-aware competition via PixelShuffle (trainable end-to-end)
 
   # Local (intra-scale) competition: per-scale 3×3 neighborhood softmax.
   # Each anchor competes with its 8 neighbors — local winner-take-more.
@@ -160,7 +168,6 @@ training:
 
   # STAL: DISABLED — NWD handles small nuclei assignment smoothly without forcing poor anchors
   stal_min_positives: 3         # STAL + bias init — force min positives + unidirectional ray gradient (train79)
-  stal_backfill_mode: distance  # "distance" = nearest anchor (default, isolates feature bank change)
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false
@@ -203,24 +210,14 @@ training:
   hierarchical_cls: true
   hierarchical_cls_detach: true
   hierarchical_binary_threshold: 0.01  # Hard gate: keep anchors with sigmoid(binary) > 0.01
-  hierarchical_soft_cascade: false  # DISABLED: test pixel shuffle competition in isolation
 
   # CLS-only TAL: o2o assigner uses cls^alpha * gaussian_decay (no pIoU)
   # Picks anchors based on what cls head already believes, gated by spatial proximity.
   # Self-reinforcing: higher cls → better assignment → even higher cls.
   cls_only_tal: true
-  cls_only_anneal_epoch: 100  # cls→pIoU blend over 100 epochs (cls-only early, pIoU late)
 
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
   clip_grad: 10.0
-
-  # Feature Bank: EMA prototype bank for classification feature refinement
-  # (Chen et al., 2026). Maintains per-class running-mean prototypes from
-  # the cls head's intermediate c3 features. Contrastive loss pulls fg
-  # features toward their assigned class prototype.
-  # DISABLED: Hurt mAP50 by ~10pts across 3 experiments. Single prototype
-  # per class is too naive — big/small nuclei within same class have very
-  # different features. EMA average lands in no-man's-land.
 
   # Asymmetric max() bound loss (LSP-DETR criterion.py:16-27):
   # loss = max(relu(r_gt*(1-eps) - r_pred), relu(r_pred - r_gt*(1+eps)))

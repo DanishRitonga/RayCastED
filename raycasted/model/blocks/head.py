@@ -105,6 +105,96 @@ class LargeKernelRefinementBlock(nn.Module):
         self.lk_conv.bias.data.copy_(lk_bias + sk_bias)
 
 
+class PredictionRefinementAttention(nn.Module):
+    """Self-attention on top-K scored predictions for duplicate suppression.
+
+    After the FCN scores all 5376 anchors, the top-K (e.g., 100) by
+    confidence are selected. These K predictions (mostly fg) undergo
+    standard O(N^2) multi-head self-attention, letting each prediction
+    "see" all others. A final linear head outputs a 1-channel suppression
+    logit per prediction — at inference: ``final_conf = cls * sigmoid(refine)``.
+
+    This is fundamentally different from AnchorSelfAttention (train31/32)
+    which applied linear attention on ALL 5376 anchors (98.7% bg) at the
+    feature level, washing out fg/bg discrimination. Here, the 5376→K
+    selection happens BEFORE interaction, so attention operates on a
+    predominantly-fg set.
+
+    Inspired by Efficient DETR (dense→sparse), Sparse R-CNN (proposal
+    self-attention), and Relation Network (inter-proposal attention).
+
+    Args:
+        feat_dim: Input feature dimension per prediction (c3 from cls head).
+        num_heads: Number of attention heads.
+        ff_dim: Feed-forward intermediate dimension.
+        dropout: Dropout rate.
+    """
+
+    def __init__(self, feat_dim: int, num_heads: int = 4, ff_dim: int = 256, dropout: float = 0.0):
+        super().__init__()
+        self.encoder_layer = nn.TransformerEncoderLayer(
+            d_model=feat_dim,
+            nhead=num_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True,
+            norm_first=True,
+        )
+        self.suppress_head = nn.Linear(feat_dim, 1)
+        self._init_suppress_head()
+
+    def _init_suppress_head(self):
+        nn.init.zeros_(self.suppress_head.weight)
+        nn.init.constant_(self.suppress_head.bias, 2.0)
+
+    @staticmethod
+    def build_2d_sincos_pe(w: int, h: int, embed_dim: int) -> torch.Tensor:
+        assert embed_dim % 4 == 0, f'embed_dim {embed_dim} must be divisible by 4'
+        pos_dim = embed_dim // 4
+        omega = torch.arange(pos_dim, dtype=torch.float32) / pos_dim
+        omega = 1.0 / (10000.0**omega)
+        grid_w = torch.arange(w, dtype=torch.float32)
+        grid_h = torch.arange(h, dtype=torch.float32)
+        gw, gh = torch.meshgrid(grid_w, grid_h, indexing='ij')
+        out_w = gw.flatten()[..., None] @ omega[None]
+        out_h = gh.flatten()[..., None] @ omega[None]
+        return torch.cat([torch.sin(out_w), torch.cos(out_w), torch.sin(out_h), torch.cos(out_h)], 1)
+
+    def forward(
+        self,
+        tokens: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply self-attention on top-K prediction tokens.
+
+        Args:
+            tokens: [B, K, feat_dim] — per-prediction features (c3 cls features).
+            positions: [B, K, 2] — normalised (x, y) centroid positions in [0, 1].
+
+        Returns:
+            [B, K, 1] — suppression logits. Sigmoid gives multiplicative weight.
+        """
+        B, K, C = tokens.shape
+        pe_embed_dim = C // 4 * 4
+        if pe_embed_dim < C:
+            pe_embed_dim = max(4, (C // 4) * 4)
+        pe_embed_dim = min(pe_embed_dim, C)
+        if pe_embed_dim % 4 != 0:
+            pe_embed_dim = ((pe_embed_dim // 4) * 4) or 4
+
+        pe = self.build_2d_sincos_pe(K, 1, pe_embed_dim).to(device=tokens.device, dtype=tokens.dtype)
+        if pe_embed_dim < C:
+            pe_padded = torch.zeros(1, K, C, device=tokens.device, dtype=tokens.dtype)
+            pe_padded[:, :, :pe_embed_dim] = pe.unsqueeze(0)
+            pe = pe_padded.squeeze(0)
+        tokens = tokens + pe[:K, :C].unsqueeze(0)
+
+        out = self.encoder_layer(tokens)
+        suppress_logits = self.suppress_head(out)
+        return suppress_logits
+
+
 class RayCastDetect(Detect):
     """Polygon detection head replacing bounding-box regression with raycast.
 
@@ -131,9 +221,10 @@ class RayCastDetect(Detect):
         cls_channel_min: int = 0,
         refinement_kernel_size: int = 3,
         aux_xy: bool = False,
+        prediction_refinement: bool = False,
+        prediction_refinement_topk: int = 100,
         inter_scale_competition: bool = False,
         inter_scale_temperature: float = 1.0,
-        inter_scale_pixel_shuffle: bool = False,
         local_competition: bool = False,
         local_competition_kernel: int = 3,
         local_competition_temperature: float = 1.0,
@@ -163,6 +254,12 @@ class RayCastDetect(Detect):
                 7 or 13 = LargeKernelRefinementBlock (LKCell-style, wider receptive field).
             aux_xy: If True, attach a lightweight 1x1 conv head for auxiliary xy regression
                 directly on neck features, bypassing the 4-layer head stack.
+            prediction_refinement: If True, apply self-attention on top-K scored
+                predictions AFTER the FCN head. Each prediction sees all other top-K
+                predictions, enabling inter-prediction competition (learned NMS).
+                Fundamentally different from feature-level attention (train31/32/34)
+                which operated on 5376 bg-dominated anchor features.
+            prediction_refinement_topk: Number of top predictions to refine (default 100).
             inter_scale_competition: If True, softmax competition across scales at inference.
                 Upsamples P3/P4 cls to P2 resolution, stacks, softmax across scale dim,
                 multiplies each scale's confidence by its competition weight. Suppresses
@@ -187,9 +284,10 @@ class RayCastDetect(Detect):
         self.n_rays = n_rays if n_rays is not None else _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays  # xy + rays
         self._end2end_arg = end2end  # store before parent __init__ (end2end is a property)
+        self._prediction_refinement = prediction_refinement
+        self.prediction_refinement_topk = prediction_refinement_topk
         self.inter_scale_competition = inter_scale_competition
         self.inter_scale_temperature = inter_scale_temperature
-        self.inter_scale_pixel_shuffle = inter_scale_pixel_shuffle
         self.local_competition = local_competition
         self.local_competition_kernel = local_competition_kernel
         self.local_competition_temperature = local_competition_temperature
@@ -268,6 +366,16 @@ class RayCastDetect(Detect):
         else:
             self.aux_xy = None
 
+        if prediction_refinement:
+            self.prediction_refinement_attn = PredictionRefinementAttention(
+                feat_dim=c3,
+                num_heads=4,
+                ff_dim=256,
+                dropout=0.0,
+            )
+        else:
+            self.prediction_refinement_attn = None
+
         # Separate o2o heads — both box (cv2) and cls (cv3) are deepcopied.
         # Shared cv3 caused 11.5x overprediction: o2m's dense positives (topk=15)
         # taught the shared cls head to fire high scores for many anchors per GT,
@@ -286,41 +394,9 @@ class RayCastDetect(Detect):
                 self.one2one_cv3_class = copy.deepcopy(self.cv3)
                 # one2one_cv3 kept for o2m fallback / fuse compat; o2o uses binary+class
 
-        # --- PixelShuffle inter-scale competition (sub-grid aware) ---
-        # Instead of bilinear upsampling scores (which blurs sub-grid structure),
-        # pixel shuffle decomposes P3/P4 features into sub-grid-aware P2 resolution,
-        # then a lightweight projection computes per-position competition scores.
-        # This is trainable end-to-end (gradients flow through projection heads).
-        if inter_scale_pixel_shuffle and self.nl >= 3 and len(ch) >= 3:
-            # P3 features → P2 resolution via PixelShuffle(2)
-            c3_feat = ch[1]  # P3 feature channels (128 for YOLO11n)
-            self.ps_p3_shuffle = nn.PixelShuffle(upscale_factor=2)
-            self.ps_p3_proj = nn.Sequential(
-                nn.Conv2d(c3_feat // 4, c3_feat // 4, 3, padding=1, groups=c3_feat // 4),
-                nn.SiLU(inplace=True),
-                nn.Conv2d(c3_feat // 4, nc, 1),
-            )
-            # P4 features → P2 resolution via PixelShuffle(4)
-            c4_feat = ch[2]  # P4 feature channels (256 for YOLO11n)
-            self.ps_p4_shuffle = nn.PixelShuffle(upscale_factor=4)
-            self.ps_p4_proj = nn.Sequential(
-                nn.Conv2d(c4_feat // 16, c4_feat // 16, 3, padding=1, groups=c4_feat // 16),
-                nn.SiLU(inplace=True),
-                nn.Conv2d(c4_feat // 16, nc, 1),
-            )
-            # Xavier init → non-zero outputs with spatial variation (from feature structure).
-            # Zero init would collapse all positions to uniform 1/3 weight — no sub-grid structure.
-            for proj in [self.ps_p3_proj, self.ps_p4_proj]:
-                for m in proj.modules():
-                    if isinstance(m, nn.Conv2d):
-                        nn.init.xavier_uniform_(m.weight)
-                        if m.bias is not None:
-                            nn.init.zeros_(m.bias)
-        else:
-            self.ps_p3_shuffle = None
-            self.ps_p3_proj = None
-            self.ps_p4_shuffle = None
-            self.ps_p4_proj = None
+            if self.prediction_refinement_attn is not None:
+                self.one2one_prediction_refinement_attn = copy.deepcopy(self.prediction_refinement_attn)
+                self.prediction_refinement_attn = None
 
     @property
     def one2many(self):
@@ -334,6 +410,8 @@ class RayCastDetect(Detect):
         if self.hierarchical_cls:
             result['cls_head_binary'] = self.one2one_cv3_binary
             result['cls_head_class'] = self.one2one_cv3_class
+        if hasattr(self, 'one2one_prediction_refinement_attn') and self.one2one_prediction_refinement_attn is not None:
+            result['prediction_refinement_attn'] = self.one2one_prediction_refinement_attn
         return result
 
     def forward_head(
@@ -341,9 +419,9 @@ class RayCastDetect(Detect):
         x: list[torch.Tensor],
         box_head: nn.Module | None = None,
         cls_head: nn.Module | None = None,
+        prediction_refinement_attn: nn.Module | None = None,
         cls_head_binary: nn.Module | None = None,
         cls_head_class: nn.Module | None = None,
-        apply_competition: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Concatenate polygon predictions and class scores across scales.
 
@@ -353,9 +431,6 @@ class RayCastDetect(Detect):
         When cls_head_binary and cls_head_class are provided (hierarchical cls),
         returns 'binary_scores' [B, 1, N] and 'class_scores' [B, nc, N] instead
         of 'scores'.
-
-        When inter_scale_pixel_shuffle is enabled, class scores are competition-
-        weighted using sub-grid-aware pixel shuffle before concatenation.
         """
         if box_head is None or cls_head is None:
             return {}
@@ -367,153 +442,24 @@ class RayCastDetect(Detect):
             binary_scores = torch.cat(
                 [cls_head_binary[i](binary_in[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1
             )
-            # Compute per-scale class scores (reshape to spatial for competition)
-            spatial_shapes = [(x[i].shape[2], x[i].shape[3]) for i in range(self.nl)]
-            class_per_scale = [
-                cls_head_class[i](x[i]).view(bs, self.nc, spatial_shapes[i][0], spatial_shapes[i][1])
-                for i in range(self.nl)
-            ]
-            # Apply inter-scale competition on class scores (o2o only)
-            if apply_competition:
-                class_per_scale = self._apply_competition_spatial(class_per_scale, x, spatial_shapes)
-            # Flatten back to [B, nc, N]
-            class_scores = torch.cat([cs.view(bs, self.nc, -1) for cs in class_per_scale], dim=-1)
+            class_scores = torch.cat([cls_head_class[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
             result = dict(boxes=poly, binary_scores=binary_scores, class_scores=class_scores, feats=x)
         else:
-            spatial_shapes = [(x[i].shape[2], x[i].shape[3]) for i in range(self.nl)]
-            scores_per_scale = [
-                cls_head[i](x[i]).view(bs, self.nc, spatial_shapes[i][0], spatial_shapes[i][1]) for i in range(self.nl)
-            ]
-            # Apply inter-scale competition on scores (o2o only)
-            if apply_competition:
-                scores_per_scale = self._apply_competition_spatial(scores_per_scale, x, spatial_shapes)
-            scores = torch.cat([ss.view(bs, self.nc, -1) for ss in scores_per_scale], dim=-1)
+            scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
             result = dict(boxes=poly, scores=scores, feats=x)
 
         if hasattr(self, 'aux_xy') and self.aux_xy is not None:
             aux_raw = torch.cat([self.aux_xy[i](x[i]).view(bs, 2, -1) for i in range(self.nl)], dim=-1)
             result['aux_xy_raw'] = aux_raw
 
-        return result
-
-    def _apply_competition_spatial(
-        self,
-        scores_per_scale: list[torch.Tensor],
-        feats: list[torch.Tensor],
-        spatial_shapes: list[tuple[int, int]],
-    ) -> list[torch.Tensor]:
-        """Dispatch to pixel shuffle or bilinear inter-scale competition."""
-        if self.inter_scale_pixel_shuffle and self.ps_p3_shuffle is not None:
-            return self._apply_pixelshuffle_competition(
-                scores_per_scale, feats, spatial_shapes
-            )
-        return self._apply_bilinear_competition(scores_per_scale, spatial_shapes)
-
-    def _apply_bilinear_competition(
-        self,
-        scores_per_scale: list[torch.Tensor],
-        spatial_shapes: list[tuple[int, int]],
-    ) -> list[torch.Tensor]:
-        """Bilinear inter-scale competition on spatial score maps.
-
-        Upsamples all scales to P2 resolution, computes softmax across
-        the scale dimension, and applies competition weights back at
-        native resolution. Fully differentiable for training.
-
-        Args:
-            scores_per_scale: [B, nc, H_i, W_i] per scale.
-            spatial_shapes: [(H_i, W_i)] per scale.
-
-        Returns:
-            Competition-weighted scores per scale (same shapes).
-        """
-        if len(scores_per_scale) < 2:
-            return scores_per_scale
-
-        H_p2, W_p2 = spatial_shapes[0]
-
-        upsampled = [scores_per_scale[0]]
-        for ss in scores_per_scale[1:]:
-            upsampled.append(F.interpolate(ss, size=(H_p2, W_p2), mode='bilinear', align_corners=False))
-
-        stacked = torch.stack(upsampled, dim=2)  # [B, nc, S, H_p2, W_p2]
-        temp = self.inter_scale_temperature
-        if temp != 1.0:
-            stacked = stacked / temp
-        competition_weights = F.softmax(stacked, dim=2)  # [B, nc, S, H_p2, W_p2]
-
-        result = []
-        for si in range(len(scores_per_scale)):
-            cw = competition_weights[:, :, si]  # [B, nc, H_p2, W_p2]
-            h, w = spatial_shapes[si]
-            if h != H_p2 or w != W_p2:
-                cw = F.interpolate(cw, size=(h, w), mode='bilinear', align_corners=False)
-            result.append(scores_per_scale[si] * cw)
-
-        return result
-
-    def _apply_pixelshuffle_competition(
-        self,
-        scores_per_scale: list[torch.Tensor],
-        feats: list[torch.Tensor],
-        spatial_shapes: list[tuple[int, int]],
-    ) -> list[torch.Tensor]:
-        """PixelShuffle sub-grid-aware inter-scale competition.
-
-        Instead of bilinear upsampling (which blurs sub-grid structure),
-        decomposes P3/P4 features into sub-grid scores at P2 resolution
-        via PixelShuffle + lightweight projection. Competition weights
-        are computed at native P2 resolution, preserving position-specific
-        information.
-
-        Args:
-            scores_per_scale: [B, nc, H_i, W_i] per scale (spatial, not flattened).
-            feats: Raw feature maps per scale (for PixelShuffle input).
-            spatial_shapes: [(H_i, W_i)] per scale.
-
-        Returns:
-            Competition-weighted scores per scale (same shapes as input).
-        """
-        if self.ps_p3_shuffle is None or self.nl < 3:
-            return scores_per_scale
-
-        bs = scores_per_scale[0].shape[0]
-        H_p2, W_p2 = spatial_shapes[0]
-
-        # P2 scores: already at P2 resolution
-        p2_scores = scores_per_scale[0]  # [B, nc, H_p2, W_p2]
-
-        # P3 features → PixelShuffle(2) → projection → sub-grid scores at P2 resolution
-        p3_shuffled = self.ps_p3_shuffle(feats[1])  # [B, C3//4, H_p2, W_p2]
-        p3_subgrid = self.ps_p3_proj(p3_shuffled)  # [B, nc, H_p2, W_p2]
-
-        # P4 features → PixelShuffle(4) → projection → sub-grid scores at P2 resolution
-        p4_shuffled = self.ps_p4_shuffle(feats[2])  # [B, C4//16, H_p2, W_p2]
-        p4_subgrid = self.ps_p4_proj(p4_shuffled)  # [B, nc, H_p2, W_p2]
-
-        # Softmax competition at P2 resolution (per-position, per-class)
-        # LayerNorm across scale dim (dim=2) prevents magnitude mismatch between
-        # trained cv3 scores (P2, magnitude ~1-2) and zero-init projection heads
-        # (P3/P4 subgrid, magnitude ~0). Without normalization, softmax gives P2
-        # ~76% weight and suppresses P3/P4 from the first epoch.
-        stacked = torch.stack([p2_scores, p3_subgrid, p4_subgrid], dim=2)  # [B, nc, 3, H_p2, W_p2]
-        # Normalize per-position, per-class across the 3 scales
-        stacked_perm = stacked.permute(0, 1, 3, 4, 2)  # [B, nc, H, W, 3]
-        stacked_norm = F.layer_norm(stacked_perm, (3,))  # normalize over scale dim
-        stacked = stacked_norm.permute(0, 1, 4, 2, 3)  # [B, nc, 3, H, W]
-        temp = self.inter_scale_temperature
-        if temp != 1.0:
-            stacked = stacked / temp
-        competition_weights = F.softmax(stacked, dim=2)  # [B, nc, 3, H_p2, W_p2]
-
-        # Apply weights to native-resolution scores
-        result = []
-        for i in range(self.nl):
-            h, w = spatial_shapes[i]
-            w_i = competition_weights[:, :, i]  # [B, nc, H_p2, W_p2]
-            if h != H_p2 or w != W_p2:
-                w_i = F.interpolate(w_i, size=(h, w), mode='bilinear', align_corners=False)
-            result.append(scores_per_scale[i] * w_i)
+        if prediction_refinement_attn is not None:
+            c3_feats = []
+            for i in range(self.nl):
+                feat = cls_head[i][:-1](x[i])  # [B, c3, H, W]
+                h, w = feat.shape[2], feat.shape[3]
+                c3_feats.append(feat.permute(0, 2, 3, 1).reshape(bs, h * w, -1))
+            cls_feats_flat = torch.cat(c3_feats, dim=1)  # [B, N_total, c3]
+            result['cls_feats_flat'] = cls_feats_flat
 
         return result
 
@@ -526,12 +472,94 @@ class RayCastDetect(Detect):
         self.cv2 = None
         self.cv3 = None
 
+    def _apply_prediction_refinement(self, one2one_preds: dict) -> dict:
+        """Apply prediction-level self-attention on top-K scored predictions.
+
+        Selects top-K predictions by max class confidence, applies
+        TransformerEncoder self-attention among them, and outputs a
+        per-prediction suppression weight (sigmoid → multiply with cls score).
+
+        This is fundamentally different from feature-level attention
+        (train31/32/34): it operates on K=100 mostly-fg predictions
+        AFTER the FCN scores them, not on 5376 bg-dominated anchor features.
+
+        Args:
+            one2one_preds: Dict from forward_head with 'scores', 'cls_feats_flat',
+                'boxes', 'feats' keys.
+
+        Returns:
+            Modified dict with 'refine_suppress' [B, nc, N] and
+            'refine_raw' [B, K, 1] for loss computation.
+        """
+        if 'cls_feats_flat' not in one2one_preds:
+            return one2one_preds
+        attn = self.one2one_prediction_refinement_attn if hasattr(self, 'one2one_prediction_refinement_attn') else None
+        if attn is None:
+            attn = self.prediction_refinement_attn if hasattr(self, 'prediction_refinement_attn') else None
+        if attn is None:
+            return one2one_preds
+
+        scores = one2one_preds['scores']  # [B, nc, N] — raw logits
+        cls_feats = one2one_preds['cls_feats_flat']  # [B, N, c3]
+        bs, nc, N = scores.shape
+        K = self.prediction_refinement_topk
+
+        max_scores = scores.sigmoid().max(dim=1).values  # [B, N]
+        topk_vals, topk_idx = max_scores.topk(min(K, N), dim=1)  # [B, K]
+
+        topk_feats = torch.gather(cls_feats, 1, topk_idx.unsqueeze(-1).expand(-1, -1, cls_feats.shape[-1]))
+
+        # Compute normalised centroid positions for sincos PE
+        feats = one2one_preds['feats']
+        shape = feats[0].shape
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (a.transpose(0, 1) for a in make_anchors(feats, self.stride, 0.5))
+            self.shape = shape
+        anchors = self.anchors  # [2, N]
+        strides = self.strides  # [1, N] or [2, N]
+        if strides.dim() == 2 and strides.shape[0] == 2:
+            strides = strides[:1, :]
+        if strides.dim() == 3:
+            strides = strides.squeeze(0)
+        if anchors.dim() == 3:
+            anchors = anchors.squeeze(0)
+
+        xy_raw = one2one_preds['boxes'][:, :2, :].sigmoid()  # [B, 2, N]
+        xy_px = (xy_raw * 2.0 - 0.5 + anchors.unsqueeze(0)) * strides.unsqueeze(0)
+        imgsz = strides.max().item() * feats[0].shape[2]
+        xy_norm = (xy_px / max(imgsz, 1)).clamp(0, 1)
+        topk_xy = torch.gather(xy_norm, 2, topk_idx.unsqueeze(1).expand(-1, 2, -1))
+        topk_pos = topk_xy.permute(0, 2, 1)
+
+        suppress_logits = attn(topk_feats, topk_pos)  # [B, K, 1]
+        suppress_weights = suppress_logits.sigmoid()  # [B, K, 1]
+
+        full_suppress = torch.ones(bs, 1, N, device=scores.device, dtype=scores.dtype)
+        topk_expand = topk_idx.unsqueeze(1).expand(-1, 1, -1)
+        full_suppress.scatter_(2, topk_expand, suppress_weights.permute(0, 2, 1))
+
+        one2one_preds['refine_suppress'] = full_suppress
+        one2one_preds['refine_raw'] = suppress_logits
+        one2one_preds['refine_topk_idx'] = topk_idx
+        return one2one_preds
+
     def forward(self, x: list[torch.Tensor]):
-        """Override Detect.forward for end-to-end prediction."""
+        """Override Detect.forward to apply prediction-level refinement."""
         preds = self.forward_head(x, **self.one2many)
         if self.end2end:
             x_detach = [xi.detach() for xi in x]
-            one2one = self.forward_head(x_detach, apply_competition=False, **self.one2one)
+            one2one_kwargs = dict(self.one2one)
+            has_refine = (
+                hasattr(self, 'one2one_prediction_refinement_attn')
+                and self.one2one_prediction_refinement_attn is not None
+            )
+            if not has_refine:
+                has_refine = hasattr(self, 'prediction_refinement_attn') and self.prediction_refinement_attn is not None
+            if has_refine:
+                one2one_kwargs.pop('prediction_refinement_attn', None)
+            one2one = self.forward_head(x_detach, **one2one_kwargs)
+            if has_refine:
+                one2one = self._apply_prediction_refinement(one2one)
             preds = {'one2many': preds, 'one2one': one2one}
         if self.training:
             return preds
@@ -685,14 +713,16 @@ class RayCastDetect(Detect):
 
         # Inter-scale competition: softmax across scales suppresses cross-scale duplicates.
         # Same nucleus often predicted at both P2 and P3 with high confidence.
-        # With pixel_shuffle, competition is applied in forward_head (trainable).
-        # Without pixel_shuffle, fall back to bilinear upsampling (inference-only).
-        if self.inter_scale_competition and self.nl > 1 and not self.inter_scale_pixel_shuffle:
+        # Competition: upsample all scales to P2, softmax across scale dim,
+        # multiply each scale's confidence by its competition weight.
+        if self.inter_scale_competition and self.nl > 1:
             scores = self._apply_inter_scale_competition(
                 scores,
                 x['feats'],
             )
 
+        if 'refine_suppress' in x:
+            scores = scores * x['refine_suppress']
         return torch.cat((dbox, scores), 1)
 
     def postprocess(self, preds: torch.Tensor) -> torch.Tensor:

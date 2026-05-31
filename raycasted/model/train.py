@@ -236,16 +236,14 @@ class _RayCastCriterionWrapper:
             steps_per_epoch=self._steps_per_epoch,
             gaussian_soft_targets=tcfg.get('gaussian_soft_targets', False),
             gaussian_sigma=tcfg.get('gaussian_sigma', 0.5),
+            prediction_refinement_weight=tcfg.get('prediction_refinement_weight', 0.0),
             range_l1_weight=tcfg.get('range_l1_weight', 0.0),
             range_l1_eps=tcfg.get('range_l1_eps', 0.1),
             bound_l1_weight=tcfg.get('bound_l1_weight', 0.0),
             bound_l1_eps=tcfg.get('bound_l1_eps', 0.1),
             hierarchical_cls=tcfg.get('hierarchical_cls', False),
-            hierarchical_soft_cascade=tcfg.get('hierarchical_soft_cascade', True),
             nc_override=tcfg.get('nc_override', None),
             cls_only_tal=tcfg.get('cls_only_tal', False),
-            cls_only_anneal_epoch=tcfg.get('cls_only_anneal_epoch', 100),
-            stal_backfill_mode=tcfg.get('stal_backfill_mode', 'distance'),
         )
 
 
@@ -510,7 +508,6 @@ class RayCastTrainer(DetectionTrainer):
         nc_override = tcfg.get('nc_override') if tcfg else None
         if nc_override is not None and nc is not None and nc_override != nc:
             from ultralytics.utils import LOGGER
-
             LOGGER.info(f'nc_override={nc_override}: overriding data nc={nc} → {nc_override}')
             nc = nc_override
             self.data['nc'] = nc_override
@@ -547,9 +544,10 @@ class RayCastTrainer(DetectionTrainer):
         old_head = model.model[-1]
         tcfg = self.training_config
         aux_xy = bool(tcfg.get('aux_xy_weight', 0) > 0) if tcfg else False
+        prediction_refinement = bool(tcfg.get('prediction_refinement_weight', 0) > 0) if tcfg else False
+        prediction_refinement_topk = tcfg.get('prediction_refinement_topk', 100) if tcfg else 100
         inter_scale_competition = bool(tcfg.get('inter_scale_competition', False)) if tcfg else False
         inter_scale_temperature = tcfg.get('inter_scale_temperature', 1.0) if tcfg else 1.0
-        inter_scale_pixel_shuffle = bool(tcfg.get('inter_scale_pixel_shuffle', False)) if tcfg else False
         local_competition = bool(tcfg.get('local_competition', False)) if tcfg else False
         local_competition_kernel = tcfg.get('local_competition_kernel', 3) if tcfg else 3
         local_competition_temperature = tcfg.get('local_competition_temperature', 1.0) if tcfg else 1.0
@@ -594,10 +592,6 @@ class RayCastTrainer(DetectionTrainer):
             if inter_scale_competition:
                 old_head.inter_scale_competition = True
                 old_head.inter_scale_temperature = inter_scale_temperature
-                old_head.inter_scale_pixel_shuffle = inter_scale_pixel_shuffle
-                # Note: PixelShuffle modules must be added to the head at construction time.
-                # If loading from a checkpoint that didn't have pixel shuffle, the modules
-                # won't exist and the competition will fall back to bilinear.
 
             # Set local competition flags on existing RayCastDetect head
             if local_competition:
@@ -612,6 +606,24 @@ class RayCastTrainer(DetectionTrainer):
                 for layer in old_head.aux_xy:
                     nn.init.zeros_(layer.bias)
                     nn.init.zeros_(layer.weight)
+
+            # Attach prediction-level self-attention on top-K scored predictions
+            if prediction_refinement and (
+                not hasattr(old_head, 'prediction_refinement_attn')
+                or getattr(old_head, 'prediction_refinement_attn', None) is None
+            ):
+                from raycasted.model.blocks.head import PredictionRefinementAttention
+
+                c3 = max(old_head.cv3[0][-1].in_channels, old_head.nc)
+                old_head.prediction_refinement_attn = PredictionRefinementAttention(
+                    feat_dim=c3,
+                    num_heads=4,
+                    ff_dim=256,
+                )
+                old_head.prediction_refinement_topk = prediction_refinement_topk
+                if old_head._end2end_arg:
+                    old_head.one2one_prediction_refinement_attn = copy.deepcopy(old_head.prediction_refinement_attn)
+                    old_head.prediction_refinement_attn = None
 
             # Rebuild cv2 with DCN if configured and not already present
             if dcn_in_reg_head:
@@ -683,9 +695,10 @@ class RayCastTrainer(DetectionTrainer):
                 cls_channel_min=cls_channel_min,
                 refinement_kernel_size=refinement_kernel_size,
                 aux_xy=aux_xy,
+                prediction_refinement=prediction_refinement,
+                prediction_refinement_topk=prediction_refinement_topk,
                 inter_scale_competition=inter_scale_competition,
                 inter_scale_temperature=inter_scale_temperature,
-                inter_scale_pixel_shuffle=inter_scale_pixel_shuffle,
                 local_competition=local_competition,
                 local_competition_kernel=local_competition_kernel,
                 local_competition_temperature=local_competition_temperature,

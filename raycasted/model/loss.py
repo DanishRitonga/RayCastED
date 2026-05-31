@@ -350,7 +350,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         bound_l1_weight: float = 0.0,
         bound_l1_eps: float = 0.1,
         hierarchical_cls: bool = False,
-        hierarchical_soft_cascade: bool = True,
         nc_override: int | None = None,
         nwd_enabled: bool = False,
         nwd_c: float = 0.001,
@@ -361,7 +360,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.no = m.nc + self.raycast_dim  # BUG-02 fix (parent sets nc + reg_max*4)
         self.use_dfl = False  # DFL not applicable to polygon regression
         self.hierarchical_cls = hierarchical_cls
-        self.hierarchical_soft_cascade = hierarchical_soft_cascade
         self.nc_override = nc_override
         self.nwd_enabled = nwd_enabled
 
@@ -714,25 +712,19 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[1] = loss_binary.sum() / max(fg_mask.sum(), 1)
 
             # Class loss: CE on fg anchors only — inter-class discrimination
-            # Soft cascade: weight class loss by binary head's confidence.
-            # Anchors where binary head is confident get full class gradient;
-            # ambiguous anchors get dampened gradient (curriculum learning).
             n_fg = max(fg_mask.sum(), 1)
             if fg_mask.any():
                 fg_pred_class = pred_class[fg_mask]  # [K, nc]
                 fg_class_labels = cls_targets[fg_mask].argmax(dim=-1)  # [K]
                 loss_class = F.cross_entropy(fg_pred_class, fg_class_labels, reduction='none')
-                if self.hierarchical_soft_cascade:
-                    # Detached binary weight — no gradient to binary head from class loss
-                    fg_binary_conf = pred_binary[fg_mask].sigmoid().squeeze(-1).detach()  # [K]
-                    loss_class = loss_class * fg_binary_conf
+                if plb_weights is not None:
+                    fg_plb_cls = plb_weights[fg_mask]  # [K]
+                    loss_class = loss_class * (1.0 + fg_plb_cls)
                 loss[1] += loss_class.sum() / n_fg
 
             _cls_fg_sum = 0.0
             _cls_bg_sum = 0.0
         else:
-            if plb_weights is not None:
-                loss_cls = loss_cls * (1.0 + plb_weights.unsqueeze(-1))
             target_scores_sum = (
                 max(fg_mask.sum(), 1)
                 if (self.soft_targets or self.gaussian_soft_targets)
@@ -744,9 +736,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
             _cls_bg_sum = (loss_cls * (1 - cls_targets)).sum().item() / max(target_scores_sum, 1)
 
         # --- Polygon regression losses (foreground only) ---
-        n_fg = fg_mask.sum()
+        n_fg = max(fg_mask.sum(), 1)
         if n_fg > 0:
-            n_fg = max(n_fg, 1)
             fg_plb = plb_weights[fg_mask] if plb_weights is not None else None
             fg_pred_rays = pred_rays[fg_mask]
             fg_target_xy = target_bboxes[fg_mask][:, :2]
@@ -944,7 +935,6 @@ class RayCastE2ELoss(E2ELoss):
         sigma_anneal_end: float = 0.0,
         sigma_anneal_epoch: int = 0,
         stal_min_positives: int = 0,
-        stal_backfill_mode: str = 'distance',
         lambda_l1: float = 14.0,
         lambda_piou: float = 13.0,
         lambda_cls: float = 2.0,
@@ -954,17 +944,16 @@ class RayCastE2ELoss(E2ELoss):
         steps_per_epoch: int = 0,
         gaussian_soft_targets: bool = False,
         gaussian_sigma: float = 0.5,
+        prediction_refinement_weight: float = 0.0,
         range_l1_weight: float = 0.0,
         range_l1_eps: float = 0.1,
         bound_l1_weight: float = 0.0,
         bound_l1_eps: float = 0.1,
         hierarchical_cls: bool = False,
-        hierarchical_soft_cascade: bool = True,
         nc_override: int | None = None,
         nwd_enabled: bool = False,
         nwd_c: float = 0.001,
         cls_only_tal: bool = False,
-        cls_only_anneal_epoch: int = 100,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -1006,7 +995,6 @@ class RayCastE2ELoss(E2ELoss):
             bound_l1_weight=bound_l1_weight,
             bound_l1_eps=bound_l1_eps,
             hierarchical_cls=hierarchical_cls,
-            hierarchical_soft_cascade=hierarchical_soft_cascade,
             nc_override=nc_override,
             nwd_enabled=nwd_enabled,
             nwd_c=nwd_c,
@@ -1098,6 +1086,9 @@ class RayCastE2ELoss(E2ELoss):
         assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
             f'E2E violation: one2many topk={self.one2many.assigner.topk} != topk2={self.one2many.assigner.topk2}'
         )
+        assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
+            f'E2E violation: one2many.topk2 ({self.one2many.assigner.topk2}) != topk ({self.one2many.assigner.topk})'
+        )
 
         # Steps per epoch (for epoch estimation in update() and o2m/o2o decay)
         # Can be set dynamically via set_steps_per_epoch() once dataset is known.
@@ -1113,13 +1104,10 @@ class RayCastE2ELoss(E2ELoss):
         if stal_min_positives > 0:
             self.one2many.assigner.stal_min_positives = stal_min_positives
             self.one2one.assigner.stal_min_positives = stal_min_positives
-        self.one2many.assigner.stal_backfill_mode = stal_backfill_mode
-        self.one2one.assigner.stal_backfill_mode = stal_backfill_mode
 
         # CLS-only TAL: o2o branch uses cls^alpha * gaussian_decay (no pIoU)
         if cls_only_tal:
             self.one2one.assigner.use_cls_only = True
-        self._cls_only_anneal_epoch = cls_only_anneal_epoch
 
         # Configurable loss weights (literature: regression 3-7x higher than cls)
         self._lambda_l1 = lambda_l1
@@ -1141,6 +1129,9 @@ class RayCastE2ELoss(E2ELoss):
         self.aux_xy_lambda = lambda_aux_xy
         self._max_epochs = max_epochs
         self.aux_xy_decay_epoch = max(1, aux_xy_ramp_epochs)
+
+        # Prediction refinement weight: BCE loss for inter-prediction attention (0 = disabled)
+        self._prediction_refinement_weight = prediction_refinement_weight
 
     def set_steps_per_epoch(self, steps_per_epoch: int) -> None:
         """Update steps_per_epoch after dataset size becomes known.
@@ -1179,7 +1170,8 @@ class RayCastE2ELoss(E2ELoss):
             if self._aux_xy_base > 0:
                 print(f'  Auxiliary XY head: weight={self._aux_xy_base}, decay_epoch={self.aux_xy_decay_epoch}')
 
-        # Loss weight annealing (current_epoch already set above)
+        # Loss weight annealing
+        current_epoch = float(self.updates)
 
         # Smooth: reverse-anneal (0 → 1) over first 40% of training
         t_smooth = min(self.updates / self.smooth_anneal_epochs, 1.0)
@@ -1217,11 +1209,6 @@ class RayCastE2ELoss(E2ELoss):
                 )
             self.one2many.assigner.radius_scale = new_radius_scale
             self.one2one.assigner.radius_scale = new_radius_scale
-
-        # CLS-only TAL blend annealing: pIoU→cls-only linear mix
-        if self._cls_only_anneal_epoch > 0:
-            blend = 1.0 - min(current_epoch / self._cls_only_anneal_epoch, 1.0)
-            self.one2one.assigner.cls_only_blend = blend
 
         # Auxiliary XY: decay after aux_xy_decay_epoch
         if self._aux_xy_base > 0 and current_epoch >= self.aux_xy_decay_epoch:
@@ -1272,6 +1259,76 @@ class RayCastE2ELoss(E2ELoss):
             else:
                 loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
         else:
+            loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
+
+        # Prediction refinement loss: BCE on attention output for top-K predictions
+        # Target: 1.0 for best anchor per GT among the top-K, 0.0 for duplicates.
+        # The attention module sees only top-K=100 predictions (mostly fg) so
+        # inter-prediction competition is meaningful — unlike feature-level attention
+        # (train31/32/34) which operated on 5376 bg-dominated anchor features.
+        has_refine = (
+            self._prediction_refinement_weight > 0
+            and 'refine_raw' in one2one_preds
+            and hasattr(self.one2one, '_fg_mask')
+            and self.one2one._fg_mask is not None
+        )
+        if has_refine:
+            refine_raw = one2one_preds['refine_raw']  # [B, K, 1]
+            topk_idx = one2one_preds['refine_topk_idx']  # [B, K]
+            fg_mask = self.one2one._fg_mask  # [B, N]
+            fg_quality = self.one2one._fg_quality if hasattr(self.one2one, '_fg_quality') else None
+            target_gt_idx = self.one2one._target_gt_idx  # [B, N]
+            bs, K, _ = refine_raw.shape
+            n_fg = max(fg_mask.sum(), 1)
+
+            refine_target = torch.zeros(bs, K, 1, device=refine_raw.device, dtype=refine_raw.dtype)
+            if fg_quality is not None and fg_mask.any():
+                fg_idx = fg_mask.nonzero(as_tuple=False)
+                batch_idx = fg_idx[:, 0]
+                anchor_idx = fg_idx[:, 1]
+                assigned_gt = target_gt_idx[batch_idx, anchor_idx].clamp(min=0)
+                fg_qual_max = fg_quality[batch_idx, anchor_idx].max(dim=-1).values
+
+                n_gt_max = target_gt_idx.shape[1]
+                composite = batch_idx * n_gt_max + assigned_gt
+                sort_order = fg_qual_max.argsort(descending=True)
+                sorted_composite = composite[sort_order]
+                sorted_anchor = anchor_idx[sort_order]
+
+                n_groups = fg_mask.shape[0] * n_gt_max
+                best_anchor = torch.full((n_groups,), -1, dtype=torch.long, device=refine_raw.device)
+                best_anchor.scatter_(0, sorted_composite, sorted_anchor)
+
+                valid = best_anchor >= 0
+                valid_groups = valid.nonzero(as_tuple=False).squeeze(-1)
+                valid_batch = valid_groups // n_gt_max
+                valid_anchors = best_anchor[valid_groups]
+
+                # Vectorized mapping: for each (batch, anchor), find if it appears in topk_idx
+                # Create a mask: for each batch, which topk positions correspond to best anchors
+                for b in range(bs):
+                    best_in_b = valid_anchors[valid_batch == b]
+                    if best_in_b.numel() == 0:
+                        continue
+                    # topk_idx[b] is [K], best_in_b is the set of best anchor indices
+                    is_best = (topk_idx[b].unsqueeze(0) == best_in_b.unsqueeze(1)).any(dim=0)  # [K]
+                    refine_target[b, is_best, 0] = 1.0
+
+            refine_loss = F.binary_cross_entropy_with_logits(refine_raw, refine_target, reduction='none')
+            topk_fg_mask = torch.zeros(bs, K, 1, device=refine_raw.device, dtype=torch.bool)
+            for b in range(bs):
+                fg_anchors_b = fg_mask[b].nonzero(as_tuple=False).squeeze(-1)
+                if fg_anchors_b.numel() == 0:
+                    continue
+                # topk_idx[b] is [K], check which topk positions are fg anchors
+                is_fg = (topk_idx[b].unsqueeze(0) == fg_anchors_b.unsqueeze(1)).any(dim=0)
+                topk_fg_mask[b, is_fg, 0] = True
+
+            n_topk_fg = max(topk_fg_mask.sum(), 1)
+            refine_loss = (refine_loss * topk_fg_mask.float()).sum() / n_topk_fg * self._prediction_refinement_weight
+            total_loss = torch.cat([total_loss, refine_loss.unsqueeze(0)])
+            loss_detach = torch.cat([loss_detach, refine_loss.detach().unsqueeze(0)])
+        elif self._prediction_refinement_weight > 0:
             loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
 
         return total_loss, loss_detach
