@@ -465,6 +465,7 @@ class RayCastDetect(Detect):
         prediction_refinement_attn: nn.Module | None = None,
         cls_head_binary: nn.Module | None = None,
         cls_head_class: nn.Module | None = None,
+        apply_competition: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Concatenate polygon predictions and class scores across scales.
 
@@ -494,8 +495,9 @@ class RayCastDetect(Detect):
                 cls_head_class[i](x[i]).view(bs, self.nc, spatial_shapes[i][0], spatial_shapes[i][1])
                 for i in range(self.nl)
             ]
-            # Apply pixel shuffle competition on class scores
-            class_per_scale = self._apply_pixelshuffle_competition(class_per_scale, x, spatial_shapes)
+            # Apply pixel shuffle competition on class scores (o2o only)
+            if apply_competition:
+                class_per_scale = self._apply_pixelshuffle_competition(class_per_scale, x, spatial_shapes)
             # Flatten back to [B, nc, N]
             class_scores = torch.cat([cs.view(bs, self.nc, -1) for cs in class_per_scale], dim=-1)
             result = dict(boxes=poly, binary_scores=binary_scores, class_scores=class_scores, feats=x)
@@ -505,8 +507,9 @@ class RayCastDetect(Detect):
                 cls_head[i](x[i]).view(bs, self.nc, spatial_shapes[i][0], spatial_shapes[i][1])
                 for i in range(self.nl)
             ]
-            # Apply pixel shuffle competition on scores
-            scores_per_scale = self._apply_pixelshuffle_competition(scores_per_scale, x, spatial_shapes)
+            # Apply pixel shuffle competition on scores (o2o only)
+            if apply_competition:
+                scores_per_scale = self._apply_pixelshuffle_competition(scores_per_scale, x, spatial_shapes)
             scores = torch.cat([ss.view(bs, self.nc, -1) for ss in scores_per_scale], dim=-1)
             result = dict(boxes=poly, scores=scores, feats=x)
 
@@ -688,7 +691,7 @@ class RayCastDetect(Detect):
                 has_refine = hasattr(self, 'prediction_refinement_attn') and self.prediction_refinement_attn is not None
             if has_refine:
                 one2one_kwargs.pop('prediction_refinement_attn', None)
-            one2one = self.forward_head(x_detach, **one2one_kwargs)
+            one2one = self.forward_head(x_detach, apply_competition=True, **one2one_kwargs)
             if has_refine:
                 one2one = self._apply_prediction_refinement(one2one)
             preds = {'one2many': preds, 'one2one': one2one}
