@@ -547,7 +547,7 @@ class RayCastDetect(Detect):
         preds = self.forward_head(x, **self.one2many)
         if self.end2end:
             x_detach = [xi.detach() for xi in x]
-            one2one = self.forward_head(x_detach, apply_competition=True, **self.one2one)
+            one2one = self.forward_head(x_detach, apply_competition=False, **self.one2one)
             preds = {'one2many': preds, 'one2one': one2one}
         if self.training:
             return preds
