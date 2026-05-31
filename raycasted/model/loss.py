@@ -709,6 +709,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 )
             else:
                 loss_binary = self.bce(pred_binary.float(), binary_target)
+            if plb_weights is not None:
+                loss_binary = loss_binary * (1.0 + plb_weights.unsqueeze(-1))
             loss[1] = loss_binary.sum() / max(fg_mask.sum(), 1)
 
             # Class loss: CE on fg anchors only — inter-class discrimination
@@ -729,6 +731,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
             _cls_fg_sum = 0.0
             _cls_bg_sum = 0.0
         else:
+            if plb_weights is not None:
+                loss_cls = loss_cls * (1.0 + plb_weights.unsqueeze(-1))
             target_scores_sum = (
                 max(fg_mask.sum(), 1)
                 if (self.soft_targets or self.gaussian_soft_targets)

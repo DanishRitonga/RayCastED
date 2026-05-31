@@ -40,8 +40,8 @@ global_settings:
 # Training settings — recommended values for improved detection quality.
 training:
   # Head architecture
-  head_channel_scale: 0.5    # c2 = max(head_channel_min, ch * scale). Was 0.25
-  head_channel_min: 64       # minimum channels in polygon head. Was 16
+  head_channel_scale: 0.25   # c2 = max(head_channel_min, ch * scale). Was 0.25
+  head_channel_min: 16       # minimum channels in polygon head. Was 16
   cls_channel_scale: 1.0     # c3 = max(cls_channel_min, ch[0] * scale). 1.0 = original (dead end at 2.0, train33)
   cls_channel_min: 0         # minimum cls head intermediate channels. 0 = use ch[0]
 
