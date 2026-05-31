@@ -378,9 +378,9 @@ class RayCastDetect(Detect):
                 cls_head_class[i](x[i]).view(bs, self.nc, spatial_shapes[i][0], spatial_shapes[i][1])
                 for i in range(self.nl)
             ]
-            # Apply pixel shuffle competition on class scores (o2o only)
+            # Apply inter-scale competition on class scores (o2o only)
             if apply_competition:
-                class_per_scale = self._apply_pixelshuffle_competition(class_per_scale, x, spatial_shapes)
+                class_per_scale = self._apply_competition_spatial(class_per_scale, x, spatial_shapes)
             # Flatten back to [B, nc, N]
             class_scores = torch.cat([cs.view(bs, self.nc, -1) for cs in class_per_scale], dim=-1)
             result = dict(boxes=poly, binary_scores=binary_scores, class_scores=class_scores, feats=x)
@@ -389,9 +389,9 @@ class RayCastDetect(Detect):
             scores_per_scale = [
                 cls_head[i](x[i]).view(bs, self.nc, spatial_shapes[i][0], spatial_shapes[i][1]) for i in range(self.nl)
             ]
-            # Apply pixel shuffle competition on scores (o2o only)
+            # Apply inter-scale competition on scores (o2o only)
             if apply_competition:
-                scores_per_scale = self._apply_pixelshuffle_competition(scores_per_scale, x, spatial_shapes)
+                scores_per_scale = self._apply_competition_spatial(scores_per_scale, x, spatial_shapes)
             scores = torch.cat([ss.view(bs, self.nc, -1) for ss in scores_per_scale], dim=-1)
             result = dict(boxes=poly, scores=scores, feats=x)
 
@@ -409,6 +409,62 @@ class RayCastDetect(Detect):
                 c3_feats.append(feat.permute(0, 2, 3, 1).reshape(bs, h * w, -1))
             cls_feats_flat = torch.cat(c3_feats, dim=1)  # [B, N_total, c3]
             result['cls_feats_flat'] = cls_feats_flat
+
+        return result
+
+    def _apply_competition_spatial(
+        self,
+        scores_per_scale: list[torch.Tensor],
+        feats: list[torch.Tensor],
+        spatial_shapes: list[tuple[int, int]],
+    ) -> list[torch.Tensor]:
+        """Dispatch to pixel shuffle or bilinear inter-scale competition."""
+        if self.inter_scale_pixel_shuffle and self.ps_p3_shuffle is not None:
+            return self._apply_pixelshuffle_competition(
+                scores_per_scale, feats, spatial_shapes
+            )
+        return self._apply_bilinear_competition(scores_per_scale, spatial_shapes)
+
+    def _apply_bilinear_competition(
+        self,
+        scores_per_scale: list[torch.Tensor],
+        spatial_shapes: list[tuple[int, int]],
+    ) -> list[torch.Tensor]:
+        """Bilinear inter-scale competition on spatial score maps.
+
+        Upsamples all scales to P2 resolution, computes softmax across
+        the scale dimension, and applies competition weights back at
+        native resolution. Fully differentiable for training.
+
+        Args:
+            scores_per_scale: [B, nc, H_i, W_i] per scale.
+            spatial_shapes: [(H_i, W_i)] per scale.
+
+        Returns:
+            Competition-weighted scores per scale (same shapes).
+        """
+        if len(scores_per_scale) < 2:
+            return scores_per_scale
+
+        H_p2, W_p2 = spatial_shapes[0]
+
+        upsampled = [scores_per_scale[0]]
+        for ss in scores_per_scale[1:]:
+            upsampled.append(F.interpolate(ss, size=(H_p2, W_p2), mode='bilinear', align_corners=False))
+
+        stacked = torch.stack(upsampled, dim=2)  # [B, nc, S, H_p2, W_p2]
+        temp = self.inter_scale_temperature
+        if temp != 1.0:
+            stacked = stacked / temp
+        competition_weights = F.softmax(stacked, dim=2)  # [B, nc, S, H_p2, W_p2]
+
+        result = []
+        for si in range(len(scores_per_scale)):
+            cw = competition_weights[:, :, si]  # [B, nc, H_p2, W_p2]
+            h, w = spatial_shapes[si]
+            if h != H_p2 or w != W_p2:
+                cw = F.interpolate(cw, size=(h, w), mode='bilinear', align_corners=False)
+            result.append(scores_per_scale[si] * cw)
 
         return result
 
