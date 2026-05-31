@@ -740,8 +740,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
             _cls_bg_sum = (loss_cls * (1 - cls_targets)).sum().item() / max(target_scores_sum, 1)
 
         # --- Polygon regression losses (foreground only) ---
-        n_fg = max(fg_mask.sum(), 1)
+        n_fg = fg_mask.sum()
         if n_fg > 0:
+            n_fg = max(n_fg, 1)
             fg_plb = plb_weights[fg_mask] if plb_weights is not None else None
             fg_pred_rays = pred_rays[fg_mask]
             fg_target_xy = target_bboxes[fg_mask][:, :2]
@@ -944,7 +945,7 @@ class RayCastE2ELoss(E2ELoss):
         sigma_anneal_end: float = 0.0,
         sigma_anneal_epoch: int = 0,
         stal_min_positives: int = 0,
-        stal_backfill_mode: str = "distance",
+        stal_backfill_mode: str = 'distance',
         lambda_l1: float = 14.0,
         lambda_piou: float = 13.0,
         lambda_cls: float = 2.0,
@@ -954,7 +955,6 @@ class RayCastE2ELoss(E2ELoss):
         steps_per_epoch: int = 0,
         gaussian_soft_targets: bool = False,
         gaussian_sigma: float = 0.5,
-        prediction_refinement_weight: float = 0.0,
         range_l1_weight: float = 0.0,
         range_l1_eps: float = 0.1,
         bound_l1_weight: float = 0.0,
@@ -1104,9 +1104,6 @@ class RayCastE2ELoss(E2ELoss):
         assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
             f'E2E violation: one2many topk={self.one2many.assigner.topk} != topk2={self.one2many.assigner.topk2}'
         )
-        assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
-            f'E2E violation: one2many.topk2 ({self.one2many.assigner.topk2}) != topk ({self.one2many.assigner.topk})'
-        )
 
         # Steps per epoch (for epoch estimation in update() and o2m/o2o decay)
         # Can be set dynamically via set_steps_per_epoch() once dataset is known.
@@ -1150,9 +1147,6 @@ class RayCastE2ELoss(E2ELoss):
         self.aux_xy_lambda = lambda_aux_xy
         self._max_epochs = max_epochs
         self.aux_xy_decay_epoch = max(1, aux_xy_ramp_epochs)
-
-        # Prediction refinement weight: BCE loss for inter-prediction attention (0 = disabled)
-        self._prediction_refinement_weight = prediction_refinement_weight
 
         # Feature Bank: EMA prototype bank for classification feature refinement
         self._feature_bank_enabled = feature_bank_enabled
@@ -1199,8 +1193,7 @@ class RayCastE2ELoss(E2ELoss):
             if self._aux_xy_base > 0:
                 print(f'  Auxiliary XY head: weight={self._aux_xy_base}, decay_epoch={self.aux_xy_decay_epoch}')
 
-        # Loss weight annealing
-        current_epoch = float(self.updates)
+        # Loss weight annealing (current_epoch already set above)
 
         # Smooth: reverse-anneal (0 → 1) over first 40% of training
         t_smooth = min(self.updates / self.smooth_anneal_epochs, 1.0)
@@ -1295,76 +1288,6 @@ class RayCastE2ELoss(E2ELoss):
         else:
             loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
 
-        # Prediction refinement loss: BCE on attention output for top-K predictions
-        # Target: 1.0 for best anchor per GT among the top-K, 0.0 for duplicates.
-        # The attention module sees only top-K=100 predictions (mostly fg) so
-        # inter-prediction competition is meaningful — unlike feature-level attention
-        # (train31/32/34) which operated on 5376 bg-dominated anchor features.
-        has_refine = (
-            self._prediction_refinement_weight > 0
-            and 'refine_raw' in one2one_preds
-            and hasattr(self.one2one, '_fg_mask')
-            and self.one2one._fg_mask is not None
-        )
-        if has_refine:
-            refine_raw = one2one_preds['refine_raw']  # [B, K, 1]
-            topk_idx = one2one_preds['refine_topk_idx']  # [B, K]
-            fg_mask = self.one2one._fg_mask  # [B, N]
-            fg_quality = self.one2one._fg_quality if hasattr(self.one2one, '_fg_quality') else None
-            target_gt_idx = self.one2one._target_gt_idx  # [B, N]
-            bs, K, _ = refine_raw.shape
-            n_fg = max(fg_mask.sum(), 1)
-
-            refine_target = torch.zeros(bs, K, 1, device=refine_raw.device, dtype=refine_raw.dtype)
-            if fg_quality is not None and fg_mask.any():
-                fg_idx = fg_mask.nonzero(as_tuple=False)
-                batch_idx = fg_idx[:, 0]
-                anchor_idx = fg_idx[:, 1]
-                assigned_gt = target_gt_idx[batch_idx, anchor_idx].clamp(min=0)
-                fg_qual_max = fg_quality[batch_idx, anchor_idx].max(dim=-1).values
-
-                n_gt_max = target_gt_idx.shape[1]
-                composite = batch_idx * n_gt_max + assigned_gt
-                sort_order = fg_qual_max.argsort(descending=True)
-                sorted_composite = composite[sort_order]
-                sorted_anchor = anchor_idx[sort_order]
-
-                n_groups = fg_mask.shape[0] * n_gt_max
-                best_anchor = torch.full((n_groups,), -1, dtype=torch.long, device=refine_raw.device)
-                best_anchor.scatter_(0, sorted_composite, sorted_anchor)
-
-                valid = best_anchor >= 0
-                valid_groups = valid.nonzero(as_tuple=False).squeeze(-1)
-                valid_batch = valid_groups // n_gt_max
-                valid_anchors = best_anchor[valid_groups]
-
-                # Vectorized mapping: for each (batch, anchor), find if it appears in topk_idx
-                # Create a mask: for each batch, which topk positions correspond to best anchors
-                for b in range(bs):
-                    best_in_b = valid_anchors[valid_batch == b]
-                    if best_in_b.numel() == 0:
-                        continue
-                    # topk_idx[b] is [K], best_in_b is the set of best anchor indices
-                    is_best = (topk_idx[b].unsqueeze(0) == best_in_b.unsqueeze(1)).any(dim=0)  # [K]
-                    refine_target[b, is_best, 0] = 1.0
-
-            refine_loss = F.binary_cross_entropy_with_logits(refine_raw, refine_target, reduction='none')
-            topk_fg_mask = torch.zeros(bs, K, 1, device=refine_raw.device, dtype=torch.bool)
-            for b in range(bs):
-                fg_anchors_b = fg_mask[b].nonzero(as_tuple=False).squeeze(-1)
-                if fg_anchors_b.numel() == 0:
-                    continue
-                # topk_idx[b] is [K], check which topk positions are fg anchors
-                is_fg = (topk_idx[b].unsqueeze(0) == fg_anchors_b.unsqueeze(1)).any(dim=0)
-                topk_fg_mask[b, is_fg, 0] = True
-
-            n_topk_fg = max(topk_fg_mask.sum(), 1)
-            refine_loss = (refine_loss * topk_fg_mask.float()).sum() / n_topk_fg * self._prediction_refinement_weight
-            total_loss = torch.cat([total_loss, refine_loss.unsqueeze(0)])
-            loss_detach = torch.cat([loss_detach, refine_loss.detach().unsqueeze(0)])
-        elif self._prediction_refinement_weight > 0:
-            loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
-
         # --- Feature Bank: contrastive loss on o2o cls intermediate features ---
         # Skip during warmup: prototypes are random, TAL assignments are noisy.
         # Let the cls head establish meaningful features before pulling toward prototypes.
@@ -1416,9 +1339,7 @@ class RayCastE2ELoss(E2ELoss):
                 if fg_labels is not None and fg_labels.numel() > 0:
                     # Compute contrastive loss with grad flowing through features
                     # (prototypes are already detached inside compute_contrastive_loss)
-                    fb_loss = self.feature_bank.compute_contrastive_loss(
-                        fg_feats, fg_labels
-                    )
+                    fb_loss = self.feature_bank.compute_contrastive_loss(fg_feats, fg_labels)
                     fb_loss_val = fb_loss * self._feature_bank_weight
                     total_loss = torch.cat([total_loss, fb_loss_val.unsqueeze(0)])
                     loss_detach = torch.cat([loss_detach, fb_loss_val.detach().unsqueeze(0)])

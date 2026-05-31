@@ -82,7 +82,7 @@ def _polygon_area(poly: np.ndarray) -> float:
 
 def _diagnose_recall(results, num_classes):
     """Break down recall by GT size bin, class, and nearest-prediction distance."""
-    panuke_names = ["Neoplastic", "Inflammatory", "Connective", "Necrosis", "Epithelial"]
+    panuke_names = ['Neoplastic', 'Inflammatory', 'Connective', 'Necrosis', 'Epithelial']
 
     gt_areas_matched: list[float] = []
     gt_areas_unmatched: list[float] = []
@@ -163,11 +163,11 @@ def _diagnose_recall(results, num_classes):
 
     # --- By class ---
     print(f'\n  {"Class":<18} {"Total":>8} {"Matched":>8} {"Recall":>8}')
-    print(f'  {"-"*18} {"-"*8} {"-"*8} {"-"*8}')
+    print(f'  {"-" * 18} {"-" * 8} {"-" * 8} {"-" * 8}')
     for c in range(num_classes):
         if class_total[c] > 0:
             r = class_matched[c] / class_total[c]
-            name = panuke_names[c] if c < len(panuke_names) else f"class_{c}"
+            name = panuke_names[c] if c < len(panuke_names) else f'class_{c}'
             print(f'  {name:<18} {class_total[c]:>8} {class_matched[c]:>8} {r:>8.4f}')
 
     # --- By size bin ---
@@ -182,7 +182,7 @@ def _diagnose_recall(results, num_classes):
                 ('Large (>P67)', lambda a: a >= p67),
             ]
             print(f'\n  {"Size Bin":<20} {"Area Range":<18} {"Total":>8} {"Matched":>8} {"Recall":>8}')
-            print(f'  {"-"*20} {"-"*18} {"-"*8} {"-"*8} {"-"*8}')
+            print(f'  {"-" * 20} {"-" * 18} {"-" * 8} {"-" * 8} {"-" * 8}')
             for label, cond in bins:
                 t = sum(1 for a in gt_areas_matched + gt_areas_unmatched if cond(a))
                 m = sum(1 for a in gt_areas_matched if cond(a))
@@ -197,12 +197,20 @@ def _diagnose_recall(results, num_classes):
         ud = np.array(unmatched_dists)
         finite = ud[np.isfinite(ud)]
         print(f'\n  Unmatched GT — Distance to nearest prediction:')
-        print(f'    <5px (near miss): {int(np.sum(finite < 5))}/{len(unmatched_dists)} ({100*sum(finite < 5)/len(unmatched_dists):.1f}%)')
-        print(f'    5-12px (drifted):  {int(np.sum((finite >= 5) & (finite <= 12)))}/{len(unmatched_dists)} ({100*sum((finite >= 5) & (finite <= 12))/len(unmatched_dists):.1f}%)')
-        print(f'    >12px (truly miss):{int(np.sum(finite > 12))}/{len(unmatched_dists)} ({100*sum(finite > 12)/len(unmatched_dists):.1f}%)')
+        print(
+            f'    <5px (near miss): {int(np.sum(finite < 5))}/{len(unmatched_dists)} ({100 * sum(finite < 5) / len(unmatched_dists):.1f}%)'
+        )
+        print(
+            f'    5-12px (drifted):  {int(np.sum((finite >= 5) & (finite <= 12)))}/{len(unmatched_dists)} ({100 * sum((finite >= 5) & (finite <= 12)) / len(unmatched_dists):.1f}%)'
+        )
+        print(
+            f'    >12px (truly miss):{int(np.sum(finite > 12))}/{len(unmatched_dists)} ({100 * sum(finite > 12) / len(unmatched_dists):.1f}%)'
+        )
         no_det = int(np.isinf(ud).sum())
         if no_det > 0:
-            print(f'    No predictions:    {no_det}/{len(unmatched_dists)} ({100*no_det/len(unmatched_dists):.1f}%)')
+            print(
+                f'    No predictions:    {no_det}/{len(unmatched_dists)} ({100 * no_det / len(unmatched_dists):.1f}%)'
+            )
 
     # --- Unmatched GT: confidence of nearby predictions ---
     if unmatched_max_conf_12:
@@ -213,10 +221,14 @@ def _diagnose_recall(results, num_classes):
             print(f'    Mean conf:          {nonzero.mean():.4f}')
             print(f'    Median conf:        {float(np.median(nonzero)):.4f}')
             above_thresh = np.sum(nonzero >= 0.2)
-            print(f'    Conf ≥0.2:          {above_thresh}/{len(unmatched_dists)} ({100*above_thresh/len(unmatched_dists):.1f}%) — wrong class or below eval-threshold')
+            print(
+                f'    Conf ≥0.2:          {above_thresh}/{len(unmatched_dists)} ({100 * above_thresh / len(unmatched_dists):.1f}%) — wrong class or below eval-threshold'
+            )
         no_conf = int(umc.sum() == 0)
         if no_conf > 0:
-            print(f'    No pred within 12px:{no_conf}/{len(unmatched_dists)} ({100*no_conf/len(unmatched_dists):.1f}%) — truly missed')
+            print(
+                f'    No pred within 12px:{no_conf}/{len(unmatched_dists)} ({100 * no_conf / len(unmatched_dists):.1f}%) — truly missed'
+            )
 
     print('=' * 65)
 
@@ -368,7 +380,7 @@ def compute_metrics_streaming(results, num_classes):
     Rasterizes masks, computes per-image metrics, then frees masks.
     Peak memory = O(max_masks_per_image * H * W) instead of O(total_masks * H * W).
     """
-    iou_thresholds = [0.5, 0.75] + [round(x, 2) for x in np.arange(0.5, 1.0, 0.05)]
+    iou_thresholds = sorted(set(round(x, 2) for x in np.arange(0.5, 1.0, 0.05)))
 
     # Accumulators
     aji_scores = []
@@ -634,7 +646,7 @@ def main():
 
 def _main(args):
     data_dir = args.data_dir
-    if data_dir is None and args.config is not None and args.output is not None:
+    if not data_dir and args.config is not None and args.output is not None:
         from raycasted.data.etl.transform.transform_orchestrator import TransformOrchestrator
         from raycasted.data.etl.utils.config import ETLConfig
 
@@ -756,6 +768,7 @@ def _main(args):
         _diagnose_recall(results, num_classes=nc)
     except Exception as exc:
         import traceback
+
         print(f'\n[DIAG ERROR] _diagnose_recall failed: {exc}', flush=True)
         traceback.print_exc()
 
@@ -778,7 +791,7 @@ def _simple_collate(batch):
         targets = _torch.from_numpy(np.concatenate(target_list, axis=0))
     else:
         ann_width = next((lbl.shape[1] for lbl in labels_list if lbl.ndim == 2 and lbl.shape[1] > 0), 35)
-        targets = _torch.zeros((0, 2 + ann_width), dtype=_torch.float32)
+        targets = _torch.zeros((0, 1 + ann_width), dtype=_torch.float32)
 
     return {
         'img': images,

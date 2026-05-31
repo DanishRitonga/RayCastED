@@ -170,7 +170,7 @@ class RayCastAssigner(TaskAlignedAssigner):
         self.radius_scale = radius_scale
         self.align_threshold = align_threshold
         self.stal_min_positives = 0  # set by RayCastE2ELoss if enabled
-        self.stal_backfill_mode = "distance"  # "distance" or "distance_cls"
+        self.stal_backfill_mode = 'distance'  # "distance" or "distance_cls"
         # Number of nearest anchors to prefilter for PolarIoU / NWD.
         # Must be > topk for proper ranking. Default: max(topk*5, 100).
         self.prefilter_k = prefilter_k if prefilter_k > 0 else max(topk * 5, 100)
@@ -267,10 +267,17 @@ class RayCastAssigner(TaskAlignedAssigner):
 
             if self.use_cls_only:
                 if self.cls_only_blend >= 1.0:
-                    overlaps.scatter_(2, topk_idx, torch.ones(
-                        self.bs, self.n_max_boxes, k_prefilt,
-                        dtype=overlaps.dtype, device=overlaps.device,
-                    ))
+                    overlaps.scatter_(
+                        2,
+                        topk_idx,
+                        torch.ones(
+                            self.bs,
+                            self.n_max_boxes,
+                            k_prefilt,
+                            dtype=overlaps.dtype,
+                            device=overlaps.device,
+                        ),
+                    )
                 else:
                     n_rays = pd_bboxes.shape[-1] - 2
                     bs_idx = torch.arange(self.bs, device=topk_idx.device)
@@ -368,7 +375,7 @@ class RayCastAssigner(TaskAlignedAssigner):
             valid_gt = mask_gt.any(dim=-1)  # [bs, n_max_boxes]
             missing = (pos_per_gt < self.stal_min_positives) & valid_gt
             if missing.any():
-                if self.stal_backfill_mode == "distance_cls":
+                if self.stal_backfill_mode == 'distance_cls':
                     distances = torch.cdist(gt_bboxes[:, :, :2].float(), anc_points.float())
                     dist_normalized = distances / (distances.max(dim=-1, keepdim=True).values.clamp(min=1e-6))
                     cls_per_anchor = pd_scores.max(dim=-1).values  # [B, N]
@@ -409,8 +416,8 @@ class RayCastAssigner(TaskAlignedAssigner):
             metric_mask = metric_mask & topk_mask
         topk_idxs.masked_fill_(~metric_mask, 0)
 
-        count_tensor = torch.zeros(metrics.shape, dtype=torch.int8, device=topk_idxs.device)
-        ones = torch.ones_like(topk_idxs[:, :, :1], dtype=torch.int8, device=topk_idxs.device)
+        count_tensor = torch.zeros(metrics.shape, dtype=torch.int32, device=topk_idxs.device)
+        ones = torch.ones_like(topk_idxs[:, :, :1], dtype=torch.int32, device=topk_idxs.device)
         for k in range(safe_k):
             count_tensor.scatter_add_(-1, topk_idxs[:, :, k : k + 1], ones)
         count_tensor.clamp_(0, 1)

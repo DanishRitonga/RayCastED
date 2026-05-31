@@ -98,15 +98,6 @@ training:
   aux_xy_weight: 10.0           # Huber loss weight for aux xy predictions
   aux_xy_ramp_epochs: 100       # epoch at which aux xy weight begins linear decay to zero
 
-  # Prediction-level self-attention on top-K scored predictions (o2o branch only).
-  # After FCN scores all 5376 anchors, top-K=100 by confidence are selected.
-  # These K predictions (mostly fg) undergo TransformerEncoder self-attention,
-  # producing per-prediction suppression weights. Fundamentally different from
-  # feature-level attention (train31/32/34 dead ends) which operated on 5376
-  # bg-dominated anchor features.
-  prediction_refinement_weight: 0.0  # disabled for topk2 ablation (train38)
-  prediction_refinement_topk: 100    # number of top predictions to refine
-
   # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band for overlaps.
   # loss = max(r_gt*(1-eps) - r_pred, 0) + max(r_pred - r_gt*(1+eps), 0)
   # Zero if prediction falls within [r_gt*(1-eps), r_gt*(1+eps)].

@@ -236,7 +236,6 @@ class _RayCastCriterionWrapper:
             steps_per_epoch=self._steps_per_epoch,
             gaussian_soft_targets=tcfg.get('gaussian_soft_targets', False),
             gaussian_sigma=tcfg.get('gaussian_sigma', 0.5),
-            prediction_refinement_weight=tcfg.get('prediction_refinement_weight', 0.0),
             range_l1_weight=tcfg.get('range_l1_weight', 0.0),
             range_l1_eps=tcfg.get('range_l1_eps', 0.1),
             bound_l1_weight=tcfg.get('bound_l1_weight', 0.0),
@@ -516,6 +515,7 @@ class RayCastTrainer(DetectionTrainer):
         nc_override = tcfg.get('nc_override') if tcfg else None
         if nc_override is not None and nc is not None and nc_override != nc:
             from ultralytics.utils import LOGGER
+
             LOGGER.info(f'nc_override={nc_override}: overriding data nc={nc} → {nc_override}')
             nc = nc_override
             self.data['nc'] = nc_override
@@ -552,8 +552,6 @@ class RayCastTrainer(DetectionTrainer):
         old_head = model.model[-1]
         tcfg = self.training_config
         aux_xy = bool(tcfg.get('aux_xy_weight', 0) > 0) if tcfg else False
-        prediction_refinement = bool(tcfg.get('prediction_refinement_weight', 0) > 0) if tcfg else False
-        prediction_refinement_topk = tcfg.get('prediction_refinement_topk', 100) if tcfg else 100
         inter_scale_competition = bool(tcfg.get('inter_scale_competition', False)) if tcfg else False
         inter_scale_temperature = tcfg.get('inter_scale_temperature', 1.0) if tcfg else 1.0
         inter_scale_pixel_shuffle = bool(tcfg.get('inter_scale_pixel_shuffle', False)) if tcfg else False
@@ -620,24 +618,6 @@ class RayCastTrainer(DetectionTrainer):
                 for layer in old_head.aux_xy:
                     nn.init.zeros_(layer.bias)
                     nn.init.zeros_(layer.weight)
-
-            # Attach prediction-level self-attention on top-K scored predictions
-            if prediction_refinement and (
-                not hasattr(old_head, 'prediction_refinement_attn')
-                or getattr(old_head, 'prediction_refinement_attn', None) is None
-            ):
-                from raycasted.model.blocks.head import PredictionRefinementAttention
-
-                c3 = max(old_head.cv3[0][-1].in_channels, old_head.nc)
-                old_head.prediction_refinement_attn = PredictionRefinementAttention(
-                    feat_dim=c3,
-                    num_heads=4,
-                    ff_dim=256,
-                )
-                old_head.prediction_refinement_topk = prediction_refinement_topk
-                if old_head._end2end_arg:
-                    old_head.one2one_prediction_refinement_attn = copy.deepcopy(old_head.prediction_refinement_attn)
-                    old_head.prediction_refinement_attn = None
 
             # Enable feature bank c3 feature extraction if configured
             if feature_bank_enabled:
@@ -713,8 +693,6 @@ class RayCastTrainer(DetectionTrainer):
                 cls_channel_min=cls_channel_min,
                 refinement_kernel_size=refinement_kernel_size,
                 aux_xy=aux_xy,
-                prediction_refinement=prediction_refinement,
-                prediction_refinement_topk=prediction_refinement_topk,
                 inter_scale_competition=inter_scale_competition,
                 inter_scale_temperature=inter_scale_temperature,
                 inter_scale_pixel_shuffle=inter_scale_pixel_shuffle,

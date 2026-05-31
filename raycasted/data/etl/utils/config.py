@@ -116,7 +116,7 @@ class TrainingSettings(BaseModel):
 
     # STAL: Small-Target-Aware Label Assignment (YOLO26)
     stal_min_positives: int = 0  # minimum positive anchors per GT (0 = disabled)
-    stal_backfill_mode: str = "distance"  # "distance" or "distance_cls"
+    stal_backfill_mode: str = 'distance'  # "distance" or "distance_cls"
 
     # Weighted sampling
     weighted_sampling: bool = False
@@ -152,21 +152,12 @@ class TrainingSettings(BaseModel):
     tal_topk: int = 13  # one2many positives per GT
     assigner_alpha: float = 0.5  # cls^alpha in alignment metric
     assigner_beta: float = 6.0  # iou^beta in alignment metric
-    nwd_enabled: bool = False   # replace pIoU with NWD (Wasserstein) similarity
+    nwd_enabled: bool = False  # replace pIoU with NWD (Wasserstein) similarity
     nwd_c: float = 0.001  # NWD normalisation constant (smaller = sharper)
 
     # Auxiliary xy head — bypass backbone→head bottleneck
     aux_xy_weight: float = 0.0  # Huber loss weight (0 = disabled, 10.0 = recommended)
     aux_xy_ramp_epochs: int = 100  # epochs over which aux weight decays
-
-    # Prediction-level self-attention on top-K scored predictions (o2o branch only).
-    # After FCN scores all 5376 anchors, top-K=100 by confidence are selected.
-    # These K predictions (mostly fg) undergo TransformerEncoder self-attention,
-    # producing per-prediction suppression weights. Fundamentally different from
-    # feature-level attention (train31/32/34 dead ends) which operated on 5376
-    # bg-dominated anchor features.
-    prediction_refinement_weight: float = 0.0  # BCE loss weight (0 = disabled, 1.0 = recommended)
-    prediction_refinement_topk: int = 100  # number of top predictions to refine
 
     # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band for overlaps.
     # loss = max(r_gt*(1-eps) - r_pred, 0) + max(r_pred - r_gt*(1+eps), 0)
