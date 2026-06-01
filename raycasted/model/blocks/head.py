@@ -260,7 +260,7 @@ class RayCastDetect(Detect):
                 Fundamentally different from feature-level attention (train31/32/34)
                 which operated on 5376 bg-dominated anchor features.
             prediction_refinement_topk: Number of top predictions to refine (default 100).
-            inter_scale_competition: If True, softmax competition across scales at inference.
+            inter_scale_competition: If True, softmax competition across scales (training + inference).
                 Upsamples P3/P4 cls to P2 resolution, stacks, softmax across scale dim,
                 multiplies each scale's confidence by its competition weight. Suppresses
                 cross-scale duplicates (same nucleus predicted at P2 AND P3).
@@ -562,6 +562,19 @@ class RayCastDetect(Detect):
                 one2one = self._apply_prediction_refinement(one2one)
             preds = {'one2many': preds, 'one2one': one2one}
         if self.training:
+            if self.end2end and self.inter_scale_competition and self.nl > 1:
+                one2one = preds['one2one']
+                use_hier = self.hierarchical_cls and 'binary_scores' in one2one and 'class_scores' in one2one
+                if use_hier:
+                    binary_prob = one2one['binary_scores'].sigmoid()
+                    adjusted = self._apply_inter_scale_competition(binary_prob, one2one['feats'])
+                    adjusted = adjusted.clamp(min=1e-7, max=1 - 1e-7)
+                    one2one['binary_scores'] = torch.log(adjusted / (1 - adjusted))
+                else:
+                    scores_prob = one2one['scores'].sigmoid()
+                    adjusted = self._apply_inter_scale_competition(scores_prob, one2one['feats'])
+                    adjusted = adjusted.clamp(min=1e-7, max=1 - 1e-7)
+                    one2one['scores'] = torch.log(adjusted / (1 - adjusted))
             return preds
         y = self._inference(preds['one2one'] if self.end2end else preds)
         if self.end2end:
@@ -618,8 +631,7 @@ class RayCastDetect(Detect):
         the scale dimension. Each scale's confidence is multiplied by its
         competition weight — the winning scale gets ~1.0, losers get ~0.
 
-        This is differentiable (for future training use) and inference-only
-        for now (no training loss changes).
+        This is differentiable — used for both training and inference.
 
         Args:
             scores: [B, nc, N_total] — sigmoid-activated cls scores (concatenated across scales).

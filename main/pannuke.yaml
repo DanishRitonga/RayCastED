@@ -131,7 +131,7 @@ training:
   # At inference: upsample P3/P4 cls to P2 resolution, stack, softmax across scale dim,
   # multiply each scale's confidence by its competition weight.
   # Lower temperature = sharper winner-take-more. No NMS needed.
-  inter_scale_competition: true      # enable inter-scale competition at inference
+  inter_scale_competition: true      # cross-scale softmax competition (training + inference)
   inter_scale_temperature: 0.5       # softmax temperature (1.0 = standard, 0.5 = sharper winner-take-more)
 
   # Local (intra-scale) competition: per-scale 3×3 neighborhood softmax.
@@ -149,7 +149,7 @@ training:
 
   # Pixel-Level Balancing: area-based fg weighting to boost small nuclei
   plb_enabled: true             # Enable PLB (area-based weighting)
-  plb_cls_weight: 1.0           # PLB multiplier for cls losses (binary+CE). 1.0 = default, 2.0 = 2x boost
+  plb_cls_weight: 0.0           # PLB multiplier for cls losses (0.0 = disabled)
   bg_cls_decay: 1.0             # Bg cls gradient multiplier. 1.0=full bg gradient, 0.0=no bg gradient
   fg_cls_boost: 0.0             # Fg cls boost by alignment quality: weight = 1 + boost * quality (0.0=disabled)
 
