@@ -277,10 +277,18 @@ class RayCastValidator(DetectionValidator):
         points = preds['pred_points']  # [B, Q, 2]  normalised [0,1]
         radial = preds['pred_radial']  # [B, Q, n_rays]  log-space
 
-        # Exclude no-object class for confidence
-        cls_logits = logits[..., :-1]  # [B, Q, nc]
+        # Use no-object class to suppress bg queries at inference.
+        # The model outputs nc+1 logits where position nc is the no-object class.
+        # Queries where no-object has the highest logit are suppressed.
+        # Matches LSP-DETR inference: argmax(logits) != num_classes.
+        no_object_idx = logits.shape[-1] - 1  # = nc
+        cls_logits = logits[..., :-1]          # [B, Q, nc]
         cls_prob = cls_logits.softmax(dim=-1)
         conf, cls = cls_prob.max(dim=-1)
+
+        _inference_conf = getattr(self.args, 'conf', 0.25)
+        is_object = logits.argmax(dim=-1) != no_object_idx  # [B, Q]
+        keep = (conf > _inference_conf) & is_object
 
         # Convert to pixel space (crop_size = 256)
         imgsz = self.args.imgsz
@@ -291,7 +299,7 @@ class RayCastValidator(DetectionValidator):
 
         outputs = []
         for i in range(bboxes.shape[0]):
-            mask = conf[i] > self.args.conf
+            mask = keep[i]
             outputs.append(
                 {
                     'bboxes': bboxes[i, mask],

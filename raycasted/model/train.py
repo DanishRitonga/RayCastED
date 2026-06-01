@@ -470,7 +470,7 @@ class RayCastTrainer(DetectionTrainer):
                 self.args.lr0 = tcfg.get('lr0', 1e-4)
                 self.args.weight_decay = tcfg.get('weight_decay', 1e-4)
                 self.args.warmup_epochs = tcfg.get('warmup_epochs', 10)
-                self.args.warmup_bias_lr = tcfg.get('warmup_bias_lr', 0.1)
+                self.args.warmup_bias_lr = 0.0  # no special bias lr: all params warm from zero
                 self.args.pretrained = tcfg.get('pretrained', False)
                 # Register backbone freeze callback for hybrid training
                 freeze_epochs = tcfg.get('backbone_freeze_epochs', 0)
