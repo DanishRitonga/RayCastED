@@ -28,6 +28,8 @@ class HybridDetectionModel(DetectionModel):
 
         self.stride = torch.tensor([4.0, 8.0, 16.0])
 
+        self.crop_size = 256
+
         initialize_weights(self)
         if verbose:
             self.info()
@@ -36,15 +38,19 @@ class HybridDetectionModel(DetectionModel):
     def init_criterion(self):
         from raycasted.model.hybrid_loss import HybridHungarianMatcher, HybridSetCriterion
 
+        n_rays = 64
         matcher = HybridHungarianMatcher(
             cost_class=1.0,
             cost_centroid=1.0,
             cost_radial=1.0,
-            cost_inner=1.0,
+            cost_inner=9999.0,
+            n_rays=n_rays,
         )
         return HybridSetCriterion(
             nc=self.nc,
             matcher=matcher,
+            n_rays=n_rays,
+            crop_size=self.crop_size,
         )
 
     def loss(self, batch, preds=None):
@@ -61,10 +67,10 @@ class HybridDetectionModel(DetectionModel):
             mask_i = batch_idx == i
             tgt = {'labels': batch['cls'][mask_i].long()}
             if 'bboxes' in batch:
-                tgt['boxes'] = batch['bboxes'][mask_i][:, :2]
+                tgt['boxes'] = batch['bboxes'][mask_i]
             targets.append(tgt)
 
-        loss_dict = self.criterion(preds, targets)
+        loss_dict = self.criterion(preds, targets, crop_size=self.crop_size)
         return loss_dict['total'], torch.as_tensor(
             [loss_dict.get(k, torch.tensor(0.0)).detach() for k in ['loss_ce', 'loss_centroid', 'loss_radial']],
             device=batch['img'].device,

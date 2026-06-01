@@ -11,9 +11,10 @@ class HybridHungarianMatcher:
         cost_class: float = 1.0,
         cost_centroid: float = 1.0,
         cost_radial: float = 1.0,
-        cost_inner: float = 1.0,
+        cost_inner: float = 9999.0,
         focal_alpha: float = 0.25,
         focal_gamma: float = 2.0,
+        n_rays: int = 64,
     ):
         self.cost_class = cost_class
         self.cost_centroid = cost_centroid
@@ -21,6 +22,7 @@ class HybridHungarianMatcher:
         self.cost_inner = cost_inner
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
+        self.n_rays = n_rays
 
     def _focal_cost(self, prob: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         alpha = self.focal_alpha
@@ -33,7 +35,9 @@ class HybridHungarianMatcher:
         return cost.mean(dim=-1)
 
     @torch.no_grad()
-    def __call__(self, outputs: dict, targets: list[dict]) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    def __call__(
+        self, outputs: dict, targets: list[dict], crop_size: int = 256
+    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         B = outputs['pred_logits'].shape[0]
         device = outputs['pred_logits'].device
         indices = []
@@ -60,11 +64,29 @@ class HybridHungarianMatcher:
             cost_matrix = self.cost_class * self._focal_cost(out_prob[:, :-1], tgt_class[:, :-1])
 
             if 'boxes' in tgt and tgt['boxes'].numel() > 0:
-                out_points = outputs['pred_points'][b, :, :2]
-                tgt_points = tgt['boxes'].to(device=device, dtype=out_points.dtype)[:, :2]
-                cost_matrix = cost_matrix + self.cost_centroid * torch.cdist(
-                    out_points.float(), tgt_points.float(), p=1
-                ).to(out_points.dtype)
+                tgt_boxes = tgt['boxes'].to(device=device, dtype=torch.float32)
+
+                # Cost 2: centroid L1 in normalized [0,1] space
+                out_points = outputs['pred_points'][b, :, :2].float()
+                tgt_points = tgt_boxes[:, :2]
+                cost_matrix = cost_matrix + self.cost_centroid * torch.cdist(out_points, tgt_points, p=1).to(
+                    cost_matrix.dtype
+                )
+
+                # Cost 3: radial distances in log-pixel space
+                if self.cost_radial > 0 and tgt_boxes.shape[1] >= 2 + self.n_rays:
+                    pred_radial = outputs['pred_radial'][b].float()  # [Q, n_rays]
+                    gt_rays_norm = tgt_boxes[:, 2:]  # [T, n_rays] normalized [0,1]
+                    gt_rays_pixel_log = torch.log(gt_rays_norm * crop_size + 1e-7)
+                    cost_radial_mtx = torch.cdist(pred_radial, gt_rays_pixel_log, p=1) / self.n_rays
+                    cost_matrix = cost_matrix + self.cost_radial * cost_radial_mtx.to(cost_matrix.dtype)
+
+                # Cost 4: inner — heavy penalty if query centroid is outside nucleus boundary
+                if self.cost_inner > 0 and tgt_boxes.shape[1] >= 2 + self.n_rays:
+                    dist_mtx = torch.cdist(out_points, tgt_points, p=2) * crop_size
+                    gt_max_radius = tgt_boxes[:, 2:].max(dim=-1).values * crop_size
+                    is_outside = (dist_mtx > gt_max_radius.unsqueeze(0)).to(cost_matrix.dtype)
+                    cost_matrix = cost_matrix + self.cost_inner * is_outside
 
             cost_np = cost_matrix.cpu().detach().numpy()
             cost_np = np.nan_to_num(cost_np, nan=1e6, posinf=1e6, neginf=-1e6)
@@ -91,6 +113,7 @@ class HybridSetCriterion(nn.Module):
         focal_alpha: float = 0.25,
         focal_gamma: float = 2.0,
         n_rays: int = 64,
+        crop_size: int = 256,
     ):
         super().__init__()
         self.nc = nc
@@ -103,6 +126,7 @@ class HybridSetCriterion(nn.Module):
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
         self.n_rays = n_rays
+        self.crop_size = crop_size
 
     def _focal_loss(self, logits, targets, matched):
         alpha = self.focal_alpha
@@ -146,50 +170,52 @@ class HybridSetCriterion(nn.Module):
             count += 1
         return total_loss / max(count, 1)
 
-    def _radial_loss(self, radial_log, targets, matched):
+    def _radial_loss(self, radial_log, points, targets, matched):
         total_loss = torch.tensor(0.0, device=radial_log.device, dtype=radial_log.dtype)
         count = 0
         for b, (pred_idx, tgt_idx) in enumerate(matched):
             if len(tgt_idx) == 0:
                 continue
-            radial_tgts = targets[b].get('radial_targets')
-            if radial_tgts is None or radial_tgts.numel() == 0:
+            tgt_boxes = targets[b].get('boxes')
+            if tgt_boxes is None or tgt_boxes.numel() == 0:
                 continue
-            radial_tgts = radial_tgts.to(device=radial_log.device, dtype=radial_log.dtype)
-            pred = radial_log[b, pred_idx]
-            for local_i, tgt_i in enumerate(tgt_idx):
-                min_b = radial_tgts[tgt_i, 0]
-                max_b = radial_tgts[tgt_i, 1]
-                loss_min = F.relu(min_b.log() - pred[local_i])
-                loss_max = F.relu(pred[local_i] - max_b.log())
-                item_loss = torch.max(loss_min, loss_max)
-                total_loss = total_loss + item_loss.nanmean()
-                count += 1
+            if tgt_boxes.shape[1] < 2 + self.n_rays:
+                continue
+            tgt_boxes = tgt_boxes.to(device=radial_log.device, dtype=torch.float32)
+            gt_rays_norm = tgt_boxes[tgt_idx, 2:]  # [M, n_rays] normalized [0,1]
+            gt_rays_pixel_log = torch.log(gt_rays_norm * self.crop_size + 1e-7)
+            pred = radial_log[b, pred_idx]  # [M, n_rays] log-pixel
+
+            # LSP-DETR interval loss: min=max=gt_rays for non-overlapping PanNuke
+            loss_min = F.relu(gt_rays_pixel_log - pred)
+            loss_max = F.relu(pred - gt_rays_pixel_log)
+            item_loss = torch.max(loss_min, loss_max)
+            total_loss = total_loss + item_loss.nanmean()
+            count += 1
         return total_loss / max(count, 1)
 
-    def forward(self, outputs, targets):
-        matched = self.matcher(outputs, targets)
+    def forward(self, outputs, targets, crop_size=None):
+        _crop_size = crop_size or self.crop_size
+        matched = self.matcher(outputs, targets, crop_size=_crop_size)
         loss_dict = {
             'loss_ce': self._focal_loss(outputs['pred_logits'], targets, matched),
             'loss_centroid': self._centroid_loss(outputs['pred_points'], targets, matched),
-            'loss_radial': self._radial_loss(outputs['pred_radial'], targets, matched),
+            'loss_radial': self._radial_loss(outputs['pred_radial'], outputs['pred_points'], targets, matched),
         }
         total_loss = sum(loss_dict[k] * self.weight_dict.get(k, 1.0) for k in loss_dict)
 
         if 'aux_outputs' in outputs:
             for aux in outputs['aux_outputs']:
-                aux_matched = self.matcher(aux, targets)
-                aux_total = 0.0
-                aux_total = aux_total + self._focal_loss(
+                aux_matched = self.matcher(aux, targets, crop_size=_crop_size)
+                total_loss = total_loss + self._focal_loss(
                     aux['pred_logits'], targets, aux_matched
                 ) * self.weight_dict.get('loss_ce', 1.0)
-                aux_total = aux_total + self._centroid_loss(
+                total_loss = total_loss + self._centroid_loss(
                     aux['pred_points'], targets, aux_matched
                 ) * self.weight_dict.get('loss_centroid', 1.0)
-                aux_total = aux_total + self._radial_loss(
-                    aux['pred_radial'], targets, aux_matched
+                total_loss = total_loss + self._radial_loss(
+                    aux['pred_radial'], aux['pred_points'], targets, aux_matched
                 ) * self.weight_dict.get('loss_radial', 1.0)
-                total_loss = total_loss + aux_total
 
         loss_dict['total'] = total_loss
         return loss_dict

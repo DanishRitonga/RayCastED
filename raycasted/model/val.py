@@ -282,7 +282,7 @@ class RayCastValidator(DetectionValidator):
         # Queries where no-object has the highest logit are suppressed.
         # Matches LSP-DETR inference: argmax(logits) != num_classes.
         no_object_idx = logits.shape[-1] - 1  # = nc
-        cls_logits = logits[..., :-1]          # [B, Q, nc]
+        cls_logits = logits[..., :-1]  # [B, Q, nc]
         cls_prob = cls_logits.softmax(dim=-1)
         conf, cls = cls_prob.max(dim=-1)
 
