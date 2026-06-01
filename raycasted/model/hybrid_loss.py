@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -66,7 +67,11 @@ class HybridHungarianMatcher:
                 ).to(out_points.dtype)
 
             cost_np = cost_matrix.cpu().detach().numpy()
-            pred_idx, tgt_idx = linear_sum_assignment(cost_np)
+            cost_np = np.nan_to_num(cost_np, nan=1e6, posinf=1e6, neginf=-1e6)
+            try:
+                pred_idx, tgt_idx = linear_sum_assignment(cost_np)
+            except ValueError:
+                pred_idx, tgt_idx = np.array([], dtype=np.int64), np.array([], dtype=np.int64)
             indices.append(
                 (
                     torch.as_tensor(pred_idx, dtype=torch.long, device=device),
