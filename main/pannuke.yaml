@@ -55,9 +55,9 @@ training:
 
   # Learning rate
   cos_lr: true               # cosine LR schedule. Was false
-  warm_restarts: false       # SGDR: CosineAnnealingWarmRestarts (true=SGDR, false=single cosine)
-  warm_restarts_T0: 200      # first cycle length in epochs (total = T0 + T0*T_mult + ...)
-  warm_restarts_T_mult: 2    # period multiplier (1=constant, 2=doubling each cycle)
+  warm_restarts: true        # SGDR: CosineAnnealingWarmRestarts 
+  warm_restarts_T0: 133      # first cycle length (3 cycles in 400: 133→266→399)
+  warm_restarts_T_mult: 1    # period multiplier (1=equal cycles, 2=doubling)
   warm_restarts_eta_min: 0.0001  # minimum LR at cycle bottom
 
   # E2E dual-TAL assignment (NMS-free, like YOLO26)
