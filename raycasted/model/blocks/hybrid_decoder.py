@@ -359,7 +359,9 @@ class HybridRayCastDecoder(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        nn.init.constant_(self.class_head.bias, math.log((1 - 0.01) / 0.01))
+        prior_prob = 0.01
+        bias_value = -math.log((1 - prior_prob) / prior_prob)
+        nn.init.constant_(self.class_head.bias, bias_value)
 
         for head_layer in self.point_head:
             last_linear = (
