@@ -957,6 +957,7 @@ class RayCastE2ELoss(E2ELoss):
         nwd_enabled: bool = False,
         nwd_c: float = 0.001,
         cls_only_tal: bool = False,
+        o2o_distill_weight: float = 0.0,
     ):
         # --- GradNorm manager (created before loss_fn so branches can reference it) ---
         self.gradnorm_manager: GradNormManager | None = None
@@ -1137,6 +1138,10 @@ class RayCastE2ELoss(E2ELoss):
         # Prediction refinement weight: BCE loss for inter-prediction attention (0 = disabled)
         self._prediction_refinement_weight = prediction_refinement_weight
 
+        # O2M→O2O knowledge distillation: BCE between detached o2m sigmoid probs
+        # and o2o logits on all anchors. Fixes gradient starvation in o2o cls.
+        self._o2o_distill_weight = o2o_distill_weight
+
     def set_steps_per_epoch(self, steps_per_epoch: int) -> None:
         """Update steps_per_epoch after dataset size becomes known.
 
@@ -1233,6 +1238,41 @@ class RayCastE2ELoss(E2ELoss):
         loss_one2one, loss_detach, _ = self.one2one.loss(one2one_preds, batch)
 
         total_loss = loss_one2many * self.o2m + loss_one2one * self.o2o
+
+        # Knowledge distillation: o2m cls → o2o cls on all anchors.
+        # o2m head has rich gradient (31% anchors) from 420 fg/image.
+        # o2o head is gradient-starved (0.5% anchors) from 28 fg/image.
+        # Distill o2m's sigmoid probs as soft targets for o2o logits on every anchor.
+        if self._o2o_distill_weight > 0:
+            if (
+                'binary_scores' in one2many_preds
+                and 'binary_scores' in one2one_preds
+                and 'class_scores' in one2many_preds
+                and 'class_scores' in one2one_preds
+            ):
+                o2m_bin = one2many_preds['binary_scores'].detach()  # [B, 1, N]
+                o2o_bin = one2one_preds['binary_scores']  # [B, 1, N]
+                d_binary = F.binary_cross_entropy_with_logits(o2o_bin, o2m_bin.sigmoid(), reduction='mean')  # scalar
+
+                o2m_cls = one2many_preds['class_scores'].detach()  # [B, nc, N]
+                o2o_cls = one2one_preds['class_scores']  # [B, nc, N]
+                o2m_cls_probs = o2m_cls.softmax(dim=1)  # [B, nc, N]
+                d_class = F.kl_div(o2o_cls.log_softmax(dim=1), o2m_cls_probs, reduction='batchmean')  # scalar
+
+                d_loss = (d_binary + d_class) * self._o2o_distill_weight
+            else:
+                o2m_logits = one2many_preds['scores'].detach()  # [B, nc, N]
+                o2o_logits = one2one_preds['scores']  # [B, nc, N]
+                o2m_probs = o2m_logits.sigmoid()
+                d_loss = (
+                    F.binary_cross_entropy_with_logits(o2o_logits, o2m_probs, reduction='mean')
+                    * self._o2o_distill_weight
+                )
+
+            total_loss = torch.cat([total_loss, d_loss.unsqueeze(0)])
+            loss_detach = torch.cat([loss_detach, d_loss.detach().unsqueeze(0)])
+        else:
+            loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
 
         has_aux = self.aux_xy_lambda > 0 and 'aux_xy_raw' in one2many_preds
 

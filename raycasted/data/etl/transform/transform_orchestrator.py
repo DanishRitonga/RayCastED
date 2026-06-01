@@ -163,8 +163,10 @@ class TransformOrchestrator:
         n_total = self.registry.height
         n_sampled = sampled.height
         n_strata = len(sampled_frames)
-        print(f'Stage 2: Pareto sampling {n_sampled}/{n_total} tiles '
-              f'({_PARETO_FRACTION:.0%} per stratum across {n_strata} strata)')
+        print(
+            f'Stage 2: Pareto sampling {n_sampled}/{n_total} tiles '
+            f'({_PARETO_FRACTION:.0%} per stratum across {n_strata} strata)'
+        )
 
         # --- Estimate stain profiles on sampled tiles ---
         stain_matrices = []

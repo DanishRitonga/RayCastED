@@ -152,7 +152,7 @@ class TrainingSettings(BaseModel):
     tal_topk: int = 13  # one2many positives per GT
     assigner_alpha: float = 0.5  # cls^alpha in alignment metric
     assigner_beta: float = 6.0  # iou^beta in alignment metric
-    nwd_enabled: bool = False   # replace pIoU with NWD (Wasserstein) similarity
+    nwd_enabled: bool = False  # replace pIoU with NWD (Wasserstein) similarity
     nwd_c: float = 0.001  # NWD normalisation constant (smaller = sharper)
 
     # Auxiliary xy head — bypass backbone→head bottleneck
@@ -167,6 +167,13 @@ class TrainingSettings(BaseModel):
     # bg-dominated anchor features.
     prediction_refinement_weight: float = 0.0  # BCE loss weight (0 = disabled, 1.0 = recommended)
     prediction_refinement_topk: int = 100  # number of top predictions to refine
+
+    # Knowledge distillation: o2m cls heads → o2o cls heads.
+    # BCE loss between detached o2m sigmoid probs and o2o logits on ALL anchors.
+    # Fixes gradient starvation: o2o cls sees ~28 fg with bg_fg_ratio_o2o=0
+    # vs o2m's 420 fg (15x). Self-distillation gives o2o the full 5376-anchor
+    # soft signal from a richer head without changing 1:1 assignment.
+    o2o_distill_weight: float = 0.0  # 0=disabled, 0.5=recommended
 
     # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band for overlaps.
     # loss = max(r_gt*(1-eps) - r_pred, 0) + max(r_pred - r_gt*(1+eps), 0)

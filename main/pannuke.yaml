@@ -120,6 +120,10 @@ training:
   prediction_refinement_weight: 0.0  # disabled for topk2 ablation (train38)
   prediction_refinement_topk: 100    # number of top predictions to refine
 
+  # Knowledge distillation: o2m cls heads → o2o cls heads.
+  # BCE loss between detached o2m sigmoid probs and o2o logits on ALL anchors.
+  o2o_distill_weight: 0.5           # 0=disabled, 0.5=recommended start
+
   # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band for overlaps.
   # loss = max(r_gt*(1-eps) - r_pred, 0) + max(r_pred - r_gt*(1+eps), 0)
   # Zero if prediction falls within [r_gt*(1-eps), r_gt*(1+eps)].

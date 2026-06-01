@@ -245,6 +245,7 @@ class _RayCastCriterionWrapper:
             hierarchical_cls=tcfg.get('hierarchical_cls', False),
             nc_override=tcfg.get('nc_override', None),
             cls_only_tal=tcfg.get('cls_only_tal', False),
+            o2o_distill_weight=tcfg.get('o2o_distill_weight', 0.0),
         )
 
 
@@ -509,6 +510,7 @@ class RayCastTrainer(DetectionTrainer):
         nc_override = tcfg.get('nc_override') if tcfg else None
         if nc_override is not None and nc is not None and nc_override != nc:
             from ultralytics.utils import LOGGER
+
             LOGGER.info(f'nc_override={nc_override}: overriding data nc={nc} → {nc_override}')
             nc = nc_override
             self.data['nc'] = nc_override

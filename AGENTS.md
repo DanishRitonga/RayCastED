@@ -27,6 +27,8 @@ uv run python -m pytest tests/phase_6/ -x -q
 bash clean_cache.sh
 ```
 
+**NEVER launch training on this device.** Training runs happen on a separate GPU machine. Only code changes, config edits, testing, and linting are done locally.
+
 ## Architecture & Data Flow
 
 **Main directories:**
