@@ -20,4 +20,4 @@ backbone:
   - [-1, 2, C2PSA, [512]]                  # 8   (P4 features, 16x16)
 
 head:
-  - [[2, 4, 8], 1, HybridRayCastDecoder, [nc, 64, 384, 6, 1024, 6, 15, 256]]
+  - [[2, 4, 8], 1, HybridRayCastDecoder, [nc, 64, 384, 6, 1024, 6, 14, 256]]

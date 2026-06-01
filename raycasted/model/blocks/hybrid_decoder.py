@@ -162,13 +162,7 @@ class FeedForward(nn.Module):
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        with torch.amp.autocast('cuda', enabled=False):
-            x_f32 = x.float()
-            y = F.silu(F.linear(x_f32, self.w1.weight.float()))
-            y = y * F.linear(x_f32, self.w3.weight.float())
-            y = F.linear(y, self.w2.weight.float())
-            y = y.to(dtype=x.dtype)
-        return self.dropout(y)
+        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
 
 
 # ---------------------------------------------------------------------------
@@ -228,11 +222,9 @@ class DecoderLayer(nn.Module):
         self.cross_attn_kv = nn.Linear(d_model, d_model * 2, bias=False)
         self.cross_attn_o = nn.Linear(d_model, d_model, bias=False)
 
-        self.self_norm1 = nn.LayerNorm(d_model)
-        self.self_norm2 = nn.LayerNorm(d_model)
-        self.cross_norm1 = nn.LayerNorm(d_model)
-        self.cross_norm2 = nn.LayerNorm(d_model)
-        self.ffn_norm1 = nn.LayerNorm(d_model)
+        self.self_attn_norm = nn.LayerNorm(d_model)
+        self.cross_attn_norm = nn.LayerNorm(d_model)
+        self.ffn_norm = nn.LayerNorm(d_model)
 
         self.ffn = FeedForward(d_model, ffn_dim, dropout)
 
@@ -284,9 +276,9 @@ class DecoderLayer(nn.Module):
         self_attn_mask: torch.Tensor | None = None,
         cross_attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = self.self_norm1(tgt + self._self_attention(self.self_norm2(tgt), q_coords, self_attn_mask))
-        x = self.cross_norm1(x + self._cross_attention(self.cross_norm2(x), src, q_coords, k_coords, cross_attn_mask))
-        return self.ffn_norm1(x + self.ffn(x))
+        x = self.self_attn_norm(tgt + self._self_attention(tgt, q_coords, self_attn_mask))
+        x = self.cross_attn_norm(x + self._cross_attention(x, src, q_coords, k_coords, cross_attn_mask))
+        return self.ffn_norm(x + self.ffn(x))
 
 
 # ---------------------------------------------------------------------------
@@ -468,62 +460,60 @@ class HybridRayCastDecoder(nn.Module):
         ref_points = torch.zeros(B, grid_h, grid_w, 2, device=device, dtype=dtype)
         radial_distances = torch.full(
             (B, num_queries, self.n_rays),
-            math.log(self.crop_size / (2 * grid_w)),
+            math.log(self.query_block_size / 2),
             device=device,
             dtype=dtype,
         )
+
+        new_ref_points = ref_points.clone().reshape(B, num_queries, 2)
+        new_radial_distances = radial_distances.clone()
 
         aux_outputs = []
 
         for i, layer in enumerate(self.layers):
             level_idx = self.feature_levels[i]
             src = proj_features[level_idx]
-            src_flat = src.flatten(2).transpose(1, 2)  # [B, H*W, D]
+            src_flat = src.flatten(2).transpose(1, 2)
             k_coords = feature_coords[level_idx]
 
             tgt = tgt.reshape(B, num_queries, self.hidden_dim)
             tgt = layer(tgt, src_flat, query_pos, k_coords)
 
-            delta_point = self.point_head[i](tgt)  # [B, Q, 2]
-            delta_radial = self.radial_head[i](tgt)  # [B, Q, n_rays]
+            delta_point = self.point_head[i](tgt)
+            delta_radial = self.radial_head[i](tgt)
 
-            new_ref = ref_points.reshape(B, num_queries, 2) + delta_point
-            new_radial = radial_distances + delta_radial
+            cur_ref = new_ref_points + delta_point
+            cur_radial = new_radial_distances + delta_radial
 
-            if i < self.num_layers - 1:
-                refined_points = self._relative_to_absolute(
-                    new_ref.reshape(B, grid_h, grid_w, 2), self.query_block_size
-                )
-                query_pos = refined_points.reshape(B, num_queries, 2)
-                if self.training:
-                    ref_points = new_ref.detach().reshape(B, grid_h, grid_w, 2)
-                    radial_distances = new_radial.detach()
-                    tgt = tgt.detach()
-                else:
-                    ref_points = new_ref.reshape(B, grid_h, grid_w, 2)
-                    radial_distances = new_radial
+            abs_points = self._relative_to_absolute(
+                cur_ref.reshape(B, grid_h, grid_w, 2), self.query_block_size
+            ).reshape(B, num_queries, 2)
 
             if self.training:
                 logits = self.class_head(tgt)
-                abs_points = self._relative_to_absolute(
-                    new_ref.reshape(B, grid_h, grid_w, 2), self.query_block_size
-                ).reshape(B, num_queries, 2)
                 aux_outputs.append(
                     {
                         'pred_logits': logits,
                         'pred_points': abs_points / self.crop_size,
-                        'pred_radial': new_radial,
+                        'pred_radial': cur_radial,
                     }
                 )
 
+            new_ref_points = ref_points.reshape(B, num_queries, 2) + delta_point
+            new_radial_distances = radial_distances + delta_radial
+
+            query_pos = abs_points.detach()
+
+            if self.training:
+                ref_points = new_ref_points.detach().reshape(B, grid_h, grid_w, 2)
+                radial_distances = new_radial_distances.detach()
+                tgt = tgt.detach()
+
         if not self.training:
-            final_abs = self._relative_to_absolute(
-                new_ref.reshape(B, grid_h, grid_w, 2), self.query_block_size
-            ).reshape(B, num_queries, 2)
             return {
                 'pred_logits': self.class_head(tgt),
-                'pred_points': final_abs / self.crop_size,
-                'pred_radial': new_radial,
+                'pred_points': abs_points / self.crop_size,
+                'pred_radial': cur_radial,
                 'aux_outputs': [],
             }
 

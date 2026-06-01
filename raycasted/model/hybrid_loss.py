@@ -57,11 +57,12 @@ class HybridHungarianMatcher:
                 continue
 
             out_prob = outputs['pred_logits'][b].sigmoid()
-            tgt_class = torch.zeros(num_tgt, out_prob.shape[-1], device=device)
-            valid = tgt_labels < out_prob.shape[-1] - 1
+            num_classes = out_prob.shape[-1]
+            tgt_class = torch.zeros(num_tgt, num_classes, device=device)
+            valid = tgt_labels < num_classes - 1
             tgt_class[valid, tgt_labels[valid]] = 1
 
-            cost_matrix = self.cost_class * self._focal_cost(out_prob[:, :-1], tgt_class[:, :-1])
+            cost_matrix = self.cost_class * self._focal_cost(out_prob, tgt_class)
 
             if 'boxes' in tgt and tgt['boxes'].numel() > 0:
                 tgt_boxes = tgt['boxes'].to(device=device, dtype=torch.float32)
@@ -131,9 +132,11 @@ class HybridSetCriterion(nn.Module):
     def _focal_loss(self, logits, targets, matched):
         alpha = self.focal_alpha
         gamma = self.focal_gamma
-        src_logits = logits[..., :-1]
+        src_logits = logits
+        num_classes = src_logits.shape[-1]
         device = src_logits.device
-        target_classes = torch.zeros_like(src_logits)
+
+        tgt_classes = torch.full(src_logits.shape[:2], num_classes - 1, dtype=torch.int64, device=device)
 
         for b, (pred_idx, tgt_idx) in enumerate(matched):
             if len(tgt_idx) == 0:
@@ -143,14 +146,16 @@ class HybridSetCriterion(nn.Module):
                 continue
             tgt_labels = tgt_labels.to(device=device)
             matched_labels = tgt_labels[tgt_idx]
-            valid = matched_labels < src_logits.shape[-1]
-            target_classes[b, pred_idx[valid], matched_labels[valid]] = 1
+            valid = matched_labels < num_classes - 1
+            tgt_classes[b, pred_idx[valid]] = matched_labels[valid]
+
+        tgt_one_hot = F.one_hot(tgt_classes, num_classes).type_as(src_logits)
 
         prob = src_logits.sigmoid()
-        ce_loss = F.binary_cross_entropy_with_logits(src_logits, target_classes, reduction='none')
-        p_t = prob * target_classes + (1 - prob) * (1 - target_classes)
+        ce_loss = F.binary_cross_entropy_with_logits(src_logits, tgt_one_hot, reduction='none')
+        p_t = prob * tgt_one_hot + (1 - prob) * (1 - tgt_one_hot)
         modulating = (1 - p_t) ** gamma
-        alpha_weight = target_classes * alpha + (1 - target_classes) * (1 - alpha)
+        alpha_weight = tgt_one_hot * alpha + (1 - tgt_one_hot) * (1 - alpha)
         loss = (alpha_weight * modulating * ce_loss).mean()
         return loss
 
