@@ -215,13 +215,17 @@ class RayCastValidator(DetectionValidator):
     def postprocess(self, preds):
         """Extract polygon predictions from model output (no NMS).
 
-        Handles two output formats:
+        Handles three output formats:
           - Detect head: [B, max_det, raycast_dim+2] where col raycast_dim=max_conf, raycast_dim+1=cls
           - RTDETRDecoder: [B, num_queries, raycast_dim+nc] where cols raycast_dim: are per-class scores
+          - HybridDecoder dict: {'pred_logits':[B,Q,nc+1], 'pred_points':[B,Q,2], 'pred_radial':[B,Q,n_rays]}
 
         Returns:
             list[dict] with keys 'bboxes' [N,raycast_dim], 'conf' [N], 'cls' [N].
         """
+        if isinstance(preds, dict):
+            return self._postprocess_hybrid(preds)
+
         pred_tensor = preds[0] if isinstance(preds, (list, tuple)) else preds
         n_channels = pred_tensor.shape[-1]
 
@@ -254,6 +258,47 @@ class RayCastValidator(DetectionValidator):
                         'cls': cls[i, mask],
                     }
                 )
+        return outputs
+
+    def _postprocess_hybrid(self, preds: dict[str, torch.Tensor]) -> list[dict]:
+        """Convert hybrid decoder output dict to validator format.
+
+        Hybrid decoder returns:
+          - pred_logits: [B, Q, nc+1]  no-object at last position
+          - pred_points: [B, Q, 2]     centroids in [0,1] normalised
+          - pred_radial: [B, Q, n_rays]  log-space ray distances
+
+        Converts to pixel-space polygon vectors and extracts class confidences.
+
+        Returns:
+            list[dict] with keys 'bboxes' [N,raycast_dim], 'conf' [N], 'cls' [N].
+        """
+        logits = preds['pred_logits']  # [B, Q, nc+1]
+        points = preds['pred_points']  # [B, Q, 2]  normalised [0,1]
+        radial = preds['pred_radial']  # [B, Q, n_rays]  log-space
+
+        # Exclude no-object class for confidence
+        cls_logits = logits[..., :-1]  # [B, Q, nc]
+        cls_prob = cls_logits.softmax(dim=-1)
+        conf, cls = cls_prob.max(dim=-1)
+
+        # Convert to pixel space (crop_size = 256)
+        imgsz = self.args.imgsz
+        points_px = points * imgsz  # [B, Q, 2]
+        rays_px = radial.exp() * imgsz  # [B, Q, n_rays]
+
+        bboxes = torch.cat([points_px, rays_px], dim=-1)  # [B, Q, 2+n_rays]
+
+        outputs = []
+        for i in range(bboxes.shape[0]):
+            mask = conf[i] > self.args.conf
+            outputs.append(
+                {
+                    'bboxes': bboxes[i, mask],
+                    'conf': conf[i, mask],
+                    'cls': cls[i, mask],
+                }
+            )
         return outputs
 
     def _prepare_batch(self, si, batch):
