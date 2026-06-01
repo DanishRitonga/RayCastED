@@ -149,6 +149,7 @@ training:
 
   # Pixel-Level Balancing: area-based fg weighting to boost small nuclei
   plb_enabled: true             # Enable PLB (area-based weighting)
+  plb_cls_weight: 1.0           # PLB multiplier for cls losses (binary+CE). 1.0 = default, 2.0 = 2x boost
   bg_cls_decay: 1.0             # Bg cls gradient multiplier. 1.0=full bg gradient, 0.0=no bg gradient
   fg_cls_boost: 0.0             # Fg cls boost by alignment quality: weight = 1 + boost * quality (0.0=disabled)
 

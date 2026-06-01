@@ -336,6 +336,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         bg_fg_ratio: int = 3,
         ohem_bg_ratio: float = 0.0,
         plb_enabled: bool = False,
+        plb_cls_weight: float = 1.0,
         bg_cls_decay: float = 1.0,
         fg_cls_boost: float = 0.0,
         fg_cls_quality_scale: float = 0.0,
@@ -375,6 +376,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # Pixel-Level Balancing — area-based fg weighting to boost small nuclei
         self.plb_enabled = plb_enabled
+        self.plb_cls_weight = plb_cls_weight
 
         # Classification loss weighting:
         #   bg_cls_decay: downweight bg anchor cls gradient (e.g., 0.5)
@@ -708,7 +710,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
             else:
                 loss_binary = self.bce(pred_binary.float(), binary_target)
             if plb_weights is not None:
-                loss_binary = loss_binary * (1.0 + plb_weights.unsqueeze(-1))
+                loss_binary = loss_binary * (1.0 + self.plb_cls_weight * plb_weights.unsqueeze(-1))
             loss[1] = loss_binary.sum() / max(fg_mask.sum(), 1)
 
             # Class loss: CE on fg anchors only — inter-class discrimination
@@ -719,7 +721,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 loss_class = F.cross_entropy(fg_pred_class, fg_class_labels, reduction='none')
                 if plb_weights is not None:
                     fg_plb_cls = plb_weights[fg_mask]  # [K]
-                    loss_class = loss_class * (1.0 + fg_plb_cls)
+                    loss_class = loss_class * (1.0 + self.plb_cls_weight * fg_plb_cls)
                 loss[1] += loss_class.sum() / n_fg
 
             _cls_fg_sum = 0.0
@@ -917,6 +919,7 @@ class RayCastE2ELoss(E2ELoss):
         bg_fg_ratio: int = 3,
         ohem_bg_ratio: float = 0.0,
         plb_enabled: bool = False,
+        plb_cls_weight: float = 1.0,
         bg_cls_decay: float = 1.0,
         fg_cls_boost: float = 0.0,
         soft_targets: bool = False,
@@ -981,6 +984,7 @@ class RayCastE2ELoss(E2ELoss):
             bg_fg_ratio=bg_fg_ratio,
             ohem_bg_ratio=ohem_bg_ratio,
             plb_enabled=plb_enabled,
+            plb_cls_weight=plb_cls_weight,
             bg_cls_decay=bg_cls_decay,
             fg_cls_boost=fg_cls_boost,
             soft_targets=soft_targets,
