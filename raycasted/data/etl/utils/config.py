@@ -59,6 +59,18 @@ class TrainingSettings(BaseModel):
     warm_restarts_T_mult: int = 2  # noqa: N815 — matches PyTorch API. Period multiplier after each restart
     warm_restarts_eta_min: float = 0.0001  # minimum LR at cycle bottom
 
+    # Optimizer (overrides ultralytics defaults when set)
+    optimizer: str = 'MuSGD'  # MuSGD (default for FCN), AdamW (for transformer decoders)
+    lr0: float = 0.03  # base learning rate
+    weight_decay: float = 5e-4  # weight decay (MuSGD default)
+    warmup_epochs: int = 3  # linear LR warmup epochs
+
+    # Backbone freeze (hybrid decoder only) — freeze backbone now, unfreeze after N epochs.
+    # LSP-DETR freezes for 30 epochs so the decoder learns query specialization first.
+    backbone_freeze_epochs: int = 0  # 0 = never freeze, 30 = recommended for hybrid
+
+    pretrained: bool = False  # load pretrained backbone weights (hybrid requires True)
+
     # Assigner
     assigner_radius_scale: float = 2.0  # containment radius multiplier. Was 1.5
 

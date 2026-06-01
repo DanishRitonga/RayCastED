@@ -386,6 +386,27 @@ def _lr_log_callback(trainer):
     LOGGER.info(f'Epoch {trainer.epoch + 1} LR: {lr_str}')
 
 
+def _hybrid_freeze_callback(trainer):
+    """Freeze backbone for first N epochs (LSP-DETR-style decoder warmup).
+
+    The transformer decoder needs to learn query specialization before the
+    backbone co-adapts.  Freezing the backbone gives the decoder clean
+    gradients for the first ``backbone_freeze_epochs`` epochs, then
+    unfreezes for joint fine-tuning.
+
+    Called via ``on_train_epoch_start``.
+    """
+    n_freeze = getattr(trainer, '_hybrid_freeze_epochs', 0)
+    epoch = trainer.epoch
+
+    if epoch < n_freeze:
+        for param in trainer.model.model[:9].parameters():
+            param.requires_grad_(False)
+    elif epoch == n_freeze:
+        for param in trainer.model.model[:9].parameters():
+            param.requires_grad_(True)
+
+
 def _is_rtdetr_yaml(cfg) -> bool:
     """Check if a model YAML specifies RayCastRTDETRDecoder as the head."""
     from ultralytics.nn.tasks import yaml_model_load
@@ -436,6 +457,26 @@ class RayCastTrainer(DetectionTrainer):
         self.args.mosaic = 0.0
         self.args.mixup = 0.0
         self.training_config = training_config  # dict or None
+
+        # --- Hybrid model: override optimizer for transformer decoder ---
+        tcfg = self.training_config or {}
+        model_yaml = overrides.get('model', '')
+        if model_yaml:
+            from ultralytics.nn.tasks import yaml_model_load
+
+            yaml_dict = yaml_model_load(model_yaml)
+            if _is_hybrid_yaml(yaml_dict):
+                self.args.optimizer = tcfg.get('optimizer', 'AdamW')
+                self.args.lr0 = tcfg.get('lr0', 1e-4)
+                self.args.weight_decay = tcfg.get('weight_decay', 1e-4)
+                self.args.warmup_epochs = tcfg.get('warmup_epochs', 10)
+                self.args.warmup_bias_lr = tcfg.get('warmup_bias_lr', 0.1)
+                self.args.pretrained = tcfg.get('pretrained', False)
+                # Register backbone freeze callback for hybrid training
+                freeze_epochs = tcfg.get('backbone_freeze_epochs', 0)
+                if freeze_epochs > 0:
+                    self._hybrid_freeze_epochs = freeze_epochs
+                    self.add_callback('on_train_epoch_start', _hybrid_freeze_callback)
 
         # Register GradNorm callback — updates dynamic loss weights after each step
         self.add_callback('on_train_batch_end', _gradnorm_update_callback)

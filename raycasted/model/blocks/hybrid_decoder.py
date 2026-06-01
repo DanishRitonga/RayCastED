@@ -162,7 +162,10 @@ class FeedForward(nn.Module):
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+        with torch.cuda.amp.autocast(enabled=False):
+            y = self.w2(F.silu(self.w1(x.float())) * self.w3(x.float()))
+            y = y.to(dtype=x.dtype)
+        return self.dropout(y)
 
 
 # ---------------------------------------------------------------------------
