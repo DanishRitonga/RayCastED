@@ -196,7 +196,7 @@ def _diagnose_recall(results, num_classes):
     if unmatched_dists:
         ud = np.array(unmatched_dists)
         finite = ud[np.isfinite(ud)]
-        print(f'\n  Unmatched GT — Distance to nearest prediction:')
+        print('\n  Unmatched GT — Distance to nearest prediction:')
         print(
             f'    <5px (near miss): {int(np.sum(finite < 5))}/{len(unmatched_dists)} ({100 * sum(finite < 5) / len(unmatched_dists):.1f}%)'
         )
@@ -216,7 +216,7 @@ def _diagnose_recall(results, num_classes):
     if unmatched_max_conf_12:
         umc = np.array(unmatched_max_conf_12)
         nonzero = umc[umc > 0]
-        print(f'\n  Unmatched GT — Max conf within 12px:')
+        print('\n  Unmatched GT — Max conf within 12px:')
         if len(nonzero) > 0:
             print(f'    Mean conf:          {nonzero.mean():.4f}')
             print(f'    Median conf:        {float(np.median(nonzero)):.4f}')

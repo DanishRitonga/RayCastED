@@ -28,7 +28,6 @@ from shapely.geometry import Polygon
 
 from raycasted.data.etl.ops import polygon_to_raycast, raycast_to_polygon
 from raycasted.data.etl.utils.constants import (
-    CLASS_IDX,
     CX_IDX,
     CY_IDX,
     RAY_END_IDX,
@@ -38,7 +37,6 @@ from raycasted.data.etl.utils.constants import (
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 from raycasted.data.etl.ingestors.file_handlers.raycast_gpu import RayCastGPU
-
 
 N_RAYS = 32
 configure_rays(N_RAYS)

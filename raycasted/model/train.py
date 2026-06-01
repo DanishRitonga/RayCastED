@@ -37,6 +37,7 @@ from ultralytics.utils.torch_utils import initialize_weights
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.data.etl.utils import constants as _const
 from raycasted.model.blocks.head import RayCastDetect
+from raycasted.model.blocks.hybrid_decoder import HybridRayCastDecoder
 from raycasted.model.blocks.rtdetr_head import RayCastRTDETRDecoder
 from raycasted.model.builder import raycasted_parse_model
 from raycasted.model.loss import RayCastE2ELoss
@@ -395,6 +396,16 @@ def _is_rtdetr_yaml(cfg) -> bool:
     return any(len(layer) >= 3 and layer[2] == 'RayCastRTDETRDecoder' for layer in yaml_dict.get('head', []))
 
 
+def _is_hybrid_yaml(cfg) -> bool:
+    """Check if a model YAML specifies HybridRayCastDecoder as the head."""
+    from ultralytics.nn.tasks import yaml_model_load
+
+    if cfg is None:
+        return False
+    yaml_dict = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
+    return any(len(layer) >= 3 and layer[2] == 'HybridRayCastDecoder' for layer in yaml_dict.get('head', []))
+
+
 class RayCastTrainer(DetectionTrainer):
     """Training pipeline for RayCastED polygon detection model.
 
@@ -519,10 +530,16 @@ class RayCastTrainer(DetectionTrainer):
         # Detect RT-DETR YAML — if head contains RayCastRTDETRDecoder,
         # use the RT-DETR model class (different loss, no E2E head patching)
         is_rtdetr = _is_rtdetr_yaml(cfg)
+        is_hybrid = _is_hybrid_yaml(cfg)
 
         _const.configure_rays(self.training_config.get('n_rays', 64) if self.training_config else 64)
 
-        if is_rtdetr:
+        if is_hybrid:
+            from raycasted.model.hybrid_model import HybridDetectionModel
+
+            model = HybridDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
+            return model
+        elif is_rtdetr:
             from raycasted.model.rtdetr_model import RayCastRTDETRDetectionModel
 
             model = RayCastRTDETRDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
@@ -761,7 +778,9 @@ class RayCastTrainer(DetectionTrainer):
     def get_validator(self):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
         head = self.model.model[-1] if hasattr(self, 'model') and hasattr(self.model, 'model') else None
-        if isinstance(head, RayCastRTDETRDecoder):
+        if isinstance(head, HybridRayCastDecoder):
+            self.loss_names = ('ce_loss', 'centroid_loss', 'radial_loss')
+        elif isinstance(head, RayCastRTDETRDecoder):
             self.loss_names = ('cls_loss', 'ray_loss', 'piou_loss')
         else:
             self.loss_names = (

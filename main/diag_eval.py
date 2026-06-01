@@ -2,6 +2,7 @@
 
 import numpy as np
 import torch
+
 from raycasted.model.register import register_raycast_head
 
 WEIGHTS = 'runs/detect/train5/weights/best.pt'
@@ -35,12 +36,12 @@ print(f'Conf distribution: min={confs.min():.4f}, median={np.median(confs):.4f},
 # Class distribution
 cls_ids = decoded[0, :, raycast_dim + 1].numpy().astype(int)
 unique, counts = np.unique(cls_ids, return_counts=True)
-print(f'\nClass distribution (top-10):')
+print('\nClass distribution (top-10):')
 for c, n in sorted(zip(unique, counts), key=lambda x: -x[1])[:10]:
     print(f'  class {c}: {n} predictions')
 
 # Show first 5 predictions
-print(f'\nFirst 5 predictions (cx, cy, conf, cls):')
+print('\nFirst 5 predictions (cx, cy, conf, cls):')
 for i in range(min(5, decoded.shape[1])):
     row = decoded[0, i].numpy()
     print(f'  [{i}] cx={row[0]:.1f}, cy={row[1]:.1f}, conf={row[raycast_dim]:.4f}, cls={int(row[raycast_dim + 1])}')

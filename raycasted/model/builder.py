@@ -44,6 +44,7 @@ from ultralytics.nn.modules.transformer import AIFI
 from ultralytics.utils.ops import make_divisible
 
 from raycasted.model.blocks.head import RayCastDetect
+from raycasted.model.blocks.hybrid_decoder import HybridRayCastDecoder
 from raycasted.model.blocks.lk_block import C3k2_LK
 from raycasted.model.blocks.resoconv import (
     DWT_HF,
@@ -165,11 +166,36 @@ def _handle_aifi(ch_list, f, args, layers):
     return AIFI(*args), c1
 
 
+def _handle_hybrid_decoder(ch_list, f, args, layers):
+    feat_channels = [ch_list[x] for x in f]
+    nc = args[0] if len(args) > 0 else 5
+    n_rays = args[1] if len(args) > 1 else None
+    hidden_dim = args[2] if len(args) > 2 else 384
+    n_heads = args[3] if len(args) > 3 else 6
+    ffn_dim = args[4] if len(args) > 4 else 1024
+    num_layers = args[5] if len(args) > 5 else 6
+    query_block_size = args[6] if len(args) > 6 else 15
+    crop_size = args[7] if len(args) > 7 else 256
+    m_ = HybridRayCastDecoder(
+        feat_channels=tuple(feat_channels),
+        nc=nc,
+        n_rays=n_rays,
+        hidden_dim=hidden_dim,
+        n_heads=n_heads,
+        ffn_dim=ffn_dim,
+        num_layers=num_layers,
+        query_block_size=query_block_size,
+        crop_size=crop_size,
+    )
+    return m_, nc + m_.raycast_dim
+
+
 _SPECIAL_HANDLERS = {
     AIFI: _handle_aifi,
     HGStem: _handle_hgstem,
     HGBlock: _handle_hgblock,
     RayCastRTDETRDecoder: _handle_rtdetr_decoder,
+    HybridRayCastDecoder: _handle_hybrid_decoder,
     DWT_LL: _handle_dwt_ll,
     DWT_HF: _handle_dwt_hf,
     HFResidual: _handle_hf_residual,
@@ -217,6 +243,8 @@ def raycasted_parse_model(d, ch, verbose=True):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError, SyntaxError):
                     args[j] = ast.literal_eval(a)
+            if args[j] == 'nc' and nc is not None:
+                args[j] = nc
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n
         m_ = None

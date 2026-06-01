@@ -1,7 +1,7 @@
 global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
-  variant: "s"
-  model: "raycasted/cfg/rtdetr-l-raycast.yaml"
+  variant: "s"        # YOLO26 variant: n, s, m, l, x
+  model: "raycasted/cfg/yolo26-hybrid-p234.yaml"
   n_rays: 64
   max_size: 256
   crop_size: 256
@@ -37,6 +37,7 @@ global_settings:
     "Thyroid": 17
     "Uterus": 18
 
+# Training settings for LSP-DETR-style hybrid decoder
 training:
   patience: 100
 
