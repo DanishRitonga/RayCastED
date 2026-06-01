@@ -56,7 +56,7 @@ class HybridHungarianMatcher:
                 )
                 continue
 
-            out_prob = outputs['pred_logits'][b].softmax(-1)
+            out_prob = outputs['pred_logits'][b].sigmoid()
             tgt_class = torch.zeros(num_tgt, out_prob.shape[-1], device=device)
             valid = tgt_labels < out_prob.shape[-1] - 1
             tgt_class[valid, tgt_labels[valid]] = 1

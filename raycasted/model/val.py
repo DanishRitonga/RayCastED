@@ -293,7 +293,7 @@ class RayCastValidator(DetectionValidator):
         # Convert to pixel space (crop_size = 256)
         imgsz = self.args.imgsz
         points_px = points * imgsz  # [B, Q, 2]
-        rays_px = radial.exp() * imgsz  # [B, Q, n_rays]
+        rays_px = radial.exp()  # log-pixel → pixel
 
         bboxes = torch.cat([points_px, rays_px], dim=-1)  # [B, Q, 2+n_rays]
 

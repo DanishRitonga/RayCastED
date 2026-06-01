@@ -139,8 +139,8 @@ class FeatureSampling(nn.Module):
         feat = proj_features[neck_idx]
         B, D, H, W = feat.shape
         grid = query_positions.to(device=feat.device, dtype=feat.dtype).clone()
-        grid[:, :, 0] = 2.0 * grid[:, :, 0] / (W - 1) - 1.0
-        grid[:, :, 1] = 2.0 * grid[:, :, 1] / (H - 1) - 1.0
+        grid[:, :, 0] = 2.0 * (grid[:, :, 0] + 0.5) / W - 1.0
+        grid[:, :, 1] = 2.0 * (grid[:, :, 1] + 0.5) / H - 1.0
         grid = grid.unsqueeze(2)  # [B, Q, 1, 2]
         query_embeds = F.grid_sample(feat, grid, mode='bilinear', align_corners=False)
         return query_embeds.squeeze(2).transpose(1, 2)  # [B, Q, D]
@@ -490,14 +490,18 @@ class HybridRayCastDecoder(nn.Module):
             new_ref = ref_points.reshape(B, num_queries, 2) + delta_point
             new_radial = radial_distances + delta_radial
 
-            if self.training and i < self.num_layers - 1:
+            if i < self.num_layers - 1:
                 refined_points = self._relative_to_absolute(
                     new_ref.reshape(B, grid_h, grid_w, 2), self.query_block_size
                 )
                 query_pos = refined_points.reshape(B, num_queries, 2)
-                ref_points = new_ref.detach().reshape(B, grid_h, grid_w, 2)
-                radial_distances = new_radial.detach()
-                tgt = tgt.detach()
+                if self.training:
+                    ref_points = new_ref.detach().reshape(B, grid_h, grid_w, 2)
+                    radial_distances = new_radial.detach()
+                    tgt = tgt.detach()
+                else:
+                    ref_points = new_ref.reshape(B, grid_h, grid_w, 2)
+                    radial_distances = new_radial
 
             if self.training:
                 logits = self.class_head(tgt)
@@ -507,20 +511,19 @@ class HybridRayCastDecoder(nn.Module):
                 aux_outputs.append(
                     {
                         'pred_logits': logits,
-                        'pred_points': abs_points / self.crop_size,  # normalise to [0,1]
+                        'pred_points': abs_points / self.crop_size,
                         'pred_radial': new_radial,
                     }
                 )
 
         if not self.training:
-            final_ref = ref_points.reshape(B, num_queries, 2)
             final_abs = self._relative_to_absolute(
-                final_ref.reshape(B, grid_h, grid_w, 2), self.query_block_size
+                new_ref.reshape(B, grid_h, grid_w, 2), self.query_block_size
             ).reshape(B, num_queries, 2)
             return {
                 'pred_logits': self.class_head(tgt),
                 'pred_points': final_abs / self.crop_size,
-                'pred_radial': radial_distances,
+                'pred_radial': new_radial,
                 'aux_outputs': [],
             }
 

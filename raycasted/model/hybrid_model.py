@@ -38,7 +38,8 @@ class HybridDetectionModel(DetectionModel):
     def init_criterion(self):
         from raycasted.model.hybrid_loss import HybridHungarianMatcher, HybridSetCriterion
 
-        n_rays = 64
+        head = self.model[-1]
+        n_rays = head.n_rays
         matcher = HybridHungarianMatcher(
             cost_class=1.0,
             cost_centroid=1.0,
