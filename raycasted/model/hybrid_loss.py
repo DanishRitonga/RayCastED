@@ -27,12 +27,9 @@ class HybridHungarianMatcher:
     def _focal_cost(self, prob: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         alpha = self.focal_alpha
         gamma = self.focal_gamma
-        prob = prob.unsqueeze(1)
-        targets = targets.unsqueeze(0)
-        neg_cost = alpha * (1 - prob) ** gamma * prob.log()
-        pos_cost = (1 - alpha) * prob**gamma * (1 - prob).log()
-        cost = torch.where(targets == 1, -pos_cost, -neg_cost)
-        return cost.mean(dim=-1)
+        neg_cost = (1 - alpha) * prob**gamma * (-(1 - prob + 1e-8).log())
+        pos_cost = alpha * ((1 - prob) ** gamma) * (-(prob + 1e-8).log())
+        return pos_cost[:, targets] - neg_cost[:, targets]
 
     @torch.no_grad()
     def __call__(
@@ -57,12 +54,8 @@ class HybridHungarianMatcher:
                 continue
 
             out_prob = outputs['pred_logits'][b].sigmoid()
-            num_classes = out_prob.shape[-1]
-            tgt_class = torch.zeros(num_tgt, num_classes, device=device)
-            valid = tgt_labels < num_classes - 1
-            tgt_class[valid, tgt_labels[valid]] = 1
 
-            cost_matrix = self.cost_class * self._focal_cost(out_prob, tgt_class)
+            cost_matrix = self.cost_class * self._focal_cost(out_prob, tgt_labels)
 
             if 'boxes' in tgt and tgt['boxes'].numel() > 0:
                 tgt_boxes = tgt['boxes'].to(device=device, dtype=torch.float32)
@@ -74,12 +67,17 @@ class HybridHungarianMatcher:
                     cost_matrix.dtype
                 )
 
-                # Cost 3: radial distances in log-pixel space
+                # Cost 3: radial distances in log-pixel space (interval cost matching LSP-DETR)
                 if self.cost_radial > 0 and tgt_boxes.shape[1] >= 2 + self.n_rays:
-                    pred_radial = outputs['pred_radial'][b].float()  # [Q, n_rays]
+                    pred_radial = outputs['pred_radial'][b].float()  # [Q, n_rays] log-pixel
                     gt_rays_norm = tgt_boxes[:, 2:]  # [T, n_rays] normalized [0,1]
                     gt_rays_pixel_log = torch.log(gt_rays_norm * crop_size + 1e-7)
-                    cost_radial_mtx = torch.cdist(pred_radial, gt_rays_pixel_log, p=1) / self.n_rays
+
+                    pred_expanded = pred_radial.unsqueeze(1)  # [Q, 1, n_rays]
+                    gt_expanded = gt_rays_pixel_log.unsqueeze(0)  # [1, T, n_rays]
+                    loss_min = F.relu(gt_expanded - pred_expanded)
+                    loss_max = F.relu(pred_expanded - gt_expanded)
+                    cost_radial_mtx = torch.max(loss_min, loss_max).mean(dim=-1)
                     cost_matrix = cost_matrix + self.cost_radial * cost_radial_mtx.to(cost_matrix.dtype)
 
                 # Cost 4: inner — heavy penalty if query centroid is outside nucleus boundary
