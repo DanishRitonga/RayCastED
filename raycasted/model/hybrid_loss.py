@@ -61,7 +61,9 @@ class HybridHungarianMatcher:
             if 'boxes' in tgt and tgt['boxes'].numel() > 0:
                 out_points = outputs['pred_points'][b, :, :2]
                 tgt_points = tgt['boxes'].to(device=device, dtype=out_points.dtype)[:, :2]
-                cost_matrix = cost_matrix + self.cost_centroid * torch.cdist(out_points, tgt_points, p=1)
+                cost_matrix = cost_matrix + self.cost_centroid * torch.cdist(
+                    out_points.float(), tgt_points.float(), p=1
+                ).to(out_points.dtype)
 
             cost_np = cost_matrix.cpu().detach().numpy()
             pred_idx, tgt_idx = linear_sum_assignment(cost_np)
