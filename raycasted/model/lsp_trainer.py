@@ -31,6 +31,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset, collate_fn
 from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
@@ -68,7 +69,7 @@ def _validate(
     total_bpq = total_bsq = total_bdq = 0.0
     count = 0
 
-    for images, targets in val_loader:
+    for images, targets in tqdm(val_loader, desc='Val', unit='step', leave=False):
         images = images.to(device, non_blocking=True)
 
         with torch.amp.autocast('cuda', enabled=False):
@@ -259,7 +260,8 @@ def train_lsp(
         epoch_ce = 0.0
         t0 = time.perf_counter()
 
-        for images, targets in train_loader:
+        train_pbar = tqdm(train_loader, desc=f'Epoch {epoch}', unit='step', leave=False)
+        for step, (images, targets) in enumerate(train_pbar):
             images = images.to(_device, non_blocking=True)
             batch_dict = {
                 'img': images,
@@ -280,6 +282,9 @@ def train_lsp(
 
             epoch_loss += loss.item()
             epoch_ce += loss_items[0].item()
+
+            if step % 10 == 0:
+                train_pbar.set_postfix(loss=f'{loss.item():.3f}', ce=f'{loss_items[0].item():.3f}')
 
         train_time = time.perf_counter() - t0
 
