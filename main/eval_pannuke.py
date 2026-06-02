@@ -291,7 +291,9 @@ def _build_model_from_state_dict(state_dict: dict, device: torch.device):
     )
 
 
-def _decode_lsp_output(outputs: dict, crop_size: int, conf_threshold: float, device: torch.device) -> list[dict]:
+def _decode_lsp_output(
+    outputs: dict, crop_size: int, conf_threshold: float, device: torch.device, debug: bool = False
+) -> list[dict]:
     logits = outputs['pred_logits']  # [B, Q, nc+1]
     points = outputs['pred_points']  # [B, Q, 2]
     radial = outputs['pred_radial']  # [B, Q, n_rays]
@@ -302,6 +304,20 @@ def _decode_lsp_output(outputs: dict, crop_size: int, conf_threshold: float, dev
     conf, cls_id = cls_prob.max(dim=-1)  # [B, Q]
     is_object = logits.argmax(dim=-1) != nc  # [B, Q]
     keep = (conf > conf_threshold) & is_object
+
+    if debug:
+        obj_rate = is_object.float().mean().item()
+        kept_rate = keep.float().mean().item()
+        avg_conf_masked = conf[keep].mean().item() if keep.any() else 0.0
+        avg_radial = radial[keep].exp().mean().item() if keep.any() else 0.0
+        cls_dist = torch.bincount(cls_id[keep], minlength=nc).cpu().tolist() if keep.any() else [0] * nc
+        print(
+            f'  [DEBUG] nq={nq}, is_object_rate={obj_rate:.4f}, '
+            f'keep_rate={kept_rate:.4f} (thresh={conf_threshold}), '
+            f'avg_conf={avg_conf_masked:.4f}, avg_ray={avg_radial:.1f}px, '
+            f'cls_dist={cls_dist}',
+            flush=True,
+        )
 
     points_px = points * crop_size  # [B, Q, 2]
     rays_px = radial.exp()  # [B, Q, n_rays]
@@ -343,7 +359,7 @@ def _decode_fcn_output(decoded: torch.Tensor, raycast_dim: int, conf_threshold: 
     return results
 
 
-def run_inference(model, dataloader, device, conf_threshold=0.20):
+def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
     """Run inference over all tiles, collecting predictions and GT.
 
     Returns:
@@ -362,7 +378,7 @@ def run_inference(model, dataloader, device, conf_threshold=0.20):
             raw_out = model(images)
 
             if isinstance(raw_out, dict):
-                preds = _decode_lsp_output(raw_out, crop_size, conf_threshold, device)
+                preds = _decode_lsp_output(raw_out, crop_size, conf_threshold, device, debug=debug)
             else:
                 decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
                 preds = _decode_fcn_output(decoded, raycast_dim, conf_threshold)
@@ -722,6 +738,8 @@ def main():
     parser.add_argument('--device', type=str, default='0')
     parser.add_argument('--conf', type=float, default=0.20)
     parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--max-images', type=int, default=0, help='Limit to N images (0=all)')
+    parser.add_argument('--debug', action='store_true', help='Print per-batch decode stats')
     args = parser.parse_args()
 
     try:
@@ -784,6 +802,11 @@ def _main(args):
 
     # Build dataset
     dataset = RayCastTileDataset(data_dir=str(data_dir), crop_size=crop_size, augment=False)
+    if args.max_images > 0:
+        import torch.utils.data as _tud
+
+        dataset = _tud.Subset(dataset, range(min(args.max_images, len(dataset))))
+        print(f'  Limited to {len(dataset)} images', flush=True)
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch,
@@ -794,7 +817,7 @@ def _main(args):
 
     # --- Run inference ---
     print('Running inference...', flush=True)
-    results = run_inference(model, dataloader, device, conf_threshold=args.conf)
+    results = run_inference(model, dataloader, device, conf_threshold=args.conf, debug=args.debug)
     n_pred_total = sum(len(r['pred_polys']) for r in results)
     n_gt_total = sum(len(r['gt_polys']) for r in results)
     print(f'  Processed {len(results)} images: {n_pred_total} predictions, {n_gt_total} GT', flush=True)
