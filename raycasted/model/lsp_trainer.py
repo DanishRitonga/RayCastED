@@ -88,7 +88,7 @@ def _validate(
             pred_bboxes = torch.cat([points[i, mask] * crop_size, radial[i, mask].exp()], dim=-1)
 
             img_mask = targets[:, 0].long() == i
-            gt_bboxes = targets[img_mask, 2:] * crop_size
+            gt_bboxes = (targets[img_mask, 2:] * crop_size).to(device)
 
             n_pred = pred_bboxes.shape[0]
             n_gt = gt_bboxes.shape[0]
