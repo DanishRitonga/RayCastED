@@ -194,6 +194,7 @@ class Layer(nn.Module):
 #  LSPTransformer — full decoder
 # ---------------------------------------------------------------------------
 
+@torch.amp.autocast('cuda', enabled=False)
 def relative_to_absolute_pos(pos: Tensor, step_x: float, step_y: float) -> Tensor:
     pos = pos.sigmoid()
     h, w = pos.shape[1:3]
