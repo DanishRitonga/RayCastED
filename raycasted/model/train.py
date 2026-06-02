@@ -606,6 +606,8 @@ class RayCastTrainer(DetectionTrainer):
             from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
 
             if weights is not None and isinstance(weights, LSPDetrDetectionModel):
+                weights.end2end = False
+                weights.yaml = weights.yaml if hasattr(weights, 'yaml') else {'nc': nc, 'head': [[[2, 4, 8], 1, 'LSPDetrModel', ['nc', 64]]]}
                 return weights  # resume: keep the loaded checkpoint with trained weights
             model = LSPDetrDetectionModel(nc=nc, n_rays=_const.N_RAYS)
             return model

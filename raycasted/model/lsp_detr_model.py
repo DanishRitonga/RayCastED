@@ -259,8 +259,3 @@ class LSPDetrDetectionModel(nn.Module):
             with torch.no_grad(), torch.amp.autocast('cuda', enabled=False):
                 return self.predict(x)
         return self.predict(x)
-
-    def __getattr__(self, name):
-        if name == 'yaml':
-            return getattr(self, '_yaml', {'nc': self.nc, 'head': [[[2, 4, 8], 1, 'LSPDetrModel', ['nc', 64]]]})
-        return super().__getattr__(name)
