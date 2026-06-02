@@ -159,6 +159,7 @@ class LSPDetrDetectionModel(nn.Module):
         self.crop_size = crop_size
         self.query_block_size = query_block_size
         self.raycast_dim = 2 + n_rays
+        self.yaml = {'nc': nc, 'head': [[[2, 4, 8], 1, 'LSPDetrModel', ['nc', 64]]]}
 
         from transformers import AutoBackbone
 

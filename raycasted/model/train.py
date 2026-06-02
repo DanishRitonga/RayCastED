@@ -605,6 +605,8 @@ class RayCastTrainer(DetectionTrainer):
         if is_lsp:
             from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
 
+            if weights is not None and isinstance(weights, LSPDetrDetectionModel):
+                return weights  # resume: keep the loaded checkpoint with trained weights
             model = LSPDetrDetectionModel(nc=nc, n_rays=_const.N_RAYS)
             return model
         elif is_hybrid:
