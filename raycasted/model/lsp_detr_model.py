@@ -8,6 +8,7 @@ sigmoid focal loss matching the original LSP-DETR implementation exactly.
 from __future__ import annotations
 
 import math
+import warnings
 from typing import TYPE_CHECKING
 
 import torch
@@ -24,6 +25,11 @@ from raycasted.model.hybrid_loss import HybridHungarianMatcher
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+# grid_sample backward is non-deterministic.  Ultralytics sets
+# deterministic=True which makes PyTorch warn on every forward.
+warnings.filterwarnings('ignore', message='grid_sampler_2d_backward_cuda does not have a deterministic')
+warnings.filterwarnings('ignore', message='flex_attention called without torch.compile')
 
 
 class LSPSetCriterion(nn.Module):

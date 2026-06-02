@@ -309,5 +309,6 @@ class FeatureSampling(nn.Module):
         self.norm = nn.LayerNorm(out_dim)
 
     def forward(self, points: Tensor, feature: Tensor) -> Tensor:
-        x = F.grid_sample(self.reduction(feature), points * 2 - 1, align_corners=False)
+        points = (points * 2 - 1).to(dtype=feature.dtype)
+        x = F.grid_sample(self.reduction(feature), points, align_corners=False)
         return self.norm(rearrange(x, "b c h w -> b h w c"))
