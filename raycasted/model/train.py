@@ -448,16 +448,14 @@ def _hybrid_freeze_callback(trainer):
         if trainer.optimizer is not None:
             n_groups = len(trainer.optimizer.param_groups)
             current_lr = trainer.optimizer.param_groups[0]['lr'] if n_groups else 1e-4
-            wd = trainer.optimizer.param_groups[0].get('weight_decay', 1e-4)
-            optimizer = torch.optim.AdamW(
-                filter(lambda p: p.requires_grad, model.parameters()),
-                lr=current_lr, weight_decay=wd,
-            )
-            backbone_ids = {id(p) for p in backbone_params}
-            for pg in optimizer.param_groups:
-                if any(id(p) in backbone_ids for p in pg['params']):
-                    pg['initial_lr'] = current_lr * backbone_lr_ratio
-            trainer.optimizer = optimizer
+            backbone_lr = current_lr * backbone_lr_ratio
+
+            # Add backbone as new param group (preserves decoder momentum state)
+            trainer.optimizer.add_param_group({
+                'params': backbone_params,
+                'lr': backbone_lr,
+                'weight_decay': trainer.optimizer.param_groups[0].get('weight_decay', 1e-4),
+            })
 
             tcfg = trainer.training_config or {}
             lr0 = tcfg.get('lr0', 1e-4)
@@ -466,7 +464,7 @@ def _hybrid_freeze_callback(trainer):
             remaining_epochs = max_epochs - epoch
 
             trainer.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=remaining_epochs, eta_min=lr_min, last_epoch=-1,
+                trainer.optimizer, T_max=remaining_epochs, eta_min=lr_min, last_epoch=-1,
             )
 
 
