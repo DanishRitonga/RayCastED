@@ -29,7 +29,7 @@ from raycasted.data.etl.ingestors.ingestion_orchestrator import IngestionOrchest
 from raycasted.data.etl.transform.transform_orchestrator import TransformOrchestrator
 from raycasted.data.etl.utils.config import ETLConfig
 from raycasted.data.etl.utils.constants import configure_rays
-from raycasted.model.train import RayCastTrainer
+from raycasted.model.train import RayCastTrainer, _is_lsp_yaml
 
 
 class RayCastPipeline:
@@ -173,10 +173,15 @@ class RayCastPipeline:
     # ------------------------------------------------------------------
 
     def train(self) -> None:
-        """Auto-generate training YAML and launch RayCastTrainer."""
+        """Auto-generate training YAML and launch trainer."""
         print('\n' + '=' * 60)
         print('Stage 3: Training')
         print('=' * 60)
+
+        model_yaml = self.training_overrides.get('model', '')
+        if _is_lsp_yaml(model_yaml):
+            self._train_lsp()
+            return
 
         yaml_path = self._generate_training_yaml()
 
@@ -185,7 +190,6 @@ class RayCastPipeline:
             **self.training_overrides,
         }
 
-        # Apply training config to Ultralytics overrides
         if self.training_config is not None and self.training_config.get('cos_lr', True):
             overrides['cos_lr'] = True
         if self.training_config is not None and 'patience' in self.training_config:
@@ -193,6 +197,38 @@ class RayCastPipeline:
 
         trainer = RayCastTrainer(overrides=overrides, training_config=self.training_config)
         trainer.train()
+
+    def _train_lsp(self) -> None:
+        """Route training to the standalone LSP-DETR trainer."""
+        from raycasted.model.lsp_trainer import train_lsp
+
+        tcfg = self.training_config or {}
+        train_dir = str(self.transformed_dir / 'train')
+        val_dir = str(self.transformed_dir / 'val')
+
+        for label, d in [('train', train_dir), ('val', val_dir)]:
+            if not Path(d).exists() or not any(Path(d).glob('*.npz')):
+                raise RuntimeError(f'No {label} tiles found in {d}.')
+
+        train_lsp(
+            train_dir=train_dir,
+            val_dir=val_dir,
+            output_dir=str(self.output_dir),
+            epochs=self.training_overrides.get('epochs', tcfg.get('epochs', 130)),
+            batch_size=self.training_overrides.get('batch', tcfg.get('batch', 16)),
+            lr=tcfg.get('lr0', 1e-4),
+            wd=tcfg.get('weight_decay', 1e-4),
+            warmup=tcfg.get('warmup_epochs', 10),
+            freeze_epochs=tcfg.get('backbone_freeze_epochs', 30),
+            backbone_lr_ratio=tcfg.get('backbone_lr_ratio', 0.1),
+            clip_grad=tcfg.get('clip_grad', 0.1),
+            n_rays=self.n_rays,
+            nc=self.config.global_settings.get('nc', 5),
+            crop_size=self.config.global_settings.get('crop_size', 256),
+            conf=tcfg.get('inference_conf', 0.25),
+            resume=self.training_overrides.get('resume'),
+            workers=self.training_overrides.get('workers', 4),
+        )
 
     def _generate_training_yaml(self) -> str:
         """Auto-generate data.yaml from ETL config for RayCastTrainer.
