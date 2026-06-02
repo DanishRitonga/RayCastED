@@ -243,6 +243,56 @@ def load_model(weights_path: str, device: torch.device):
     return model
 
 
+def _decode_lsp_output(outputs: dict, crop_size: int, conf_threshold: float, device: torch.device) -> list[dict]:
+    logits = outputs['pred_logits']  # [B, Q, nc+1]
+    points = outputs['pred_points']  # [B, Q, 2]
+    radial = outputs['pred_radial']  # [B, Q, n_rays]
+    bs, nq, ncp1 = logits.shape
+    nc = ncp1 - 1
+
+    cls_prob = logits[:, :, :nc].softmax(dim=-1)  # [B, Q, nc]
+    conf, cls_id = cls_prob.max(dim=-1)  # [B, Q]
+    is_object = logits.argmax(dim=-1) != nc  # [B, Q]
+    keep = (conf > conf_threshold) & is_object
+
+    points_px = points * crop_size  # [B, Q, 2]
+    rays_px = radial.exp()  # [B, Q, n_rays]
+    polys = torch.cat([points_px, rays_px], dim=-1)  # [B, Q, 2+n_rays]
+
+    results = []
+    for i in range(bs):
+        k = keep[i]
+        results.append({
+            'polys': polys[i, k].cpu().numpy(),
+            'confs': conf[i, k].cpu().numpy(),
+            'classes': cls_id[i, k].cpu().numpy().astype(int),
+        })
+    return results
+
+
+def _decode_fcn_output(decoded: torch.Tensor, raycast_dim: int, conf_threshold: float) -> list[dict]:
+    results = []
+    for si in range(decoded.shape[0]):
+        det = decoded[si].cpu().numpy()
+        n_cols = det.shape[1] if det.ndim == 2 else 0
+
+        if det.ndim == 2 and n_cols >= raycast_dim + 2:
+            pred_confs = det[:, raycast_dim]
+            pred_cls = det[:, raycast_dim + 1].astype(int)
+            conf_mask = pred_confs > conf_threshold
+            det = det[conf_mask]
+            pred_confs = pred_confs[conf_mask]
+            pred_cls = pred_cls[conf_mask]
+        else:
+            det = det[:0] if det.ndim == 2 else np.zeros((0, raycast_dim + 2), dtype=np.float32)
+            pred_confs = np.array([], dtype=np.float32)
+            pred_cls = np.array([], dtype=int)
+
+        pred_poly = det[:, :raycast_dim] if det.shape[0] > 0 else np.zeros((0, raycast_dim), dtype=np.float32)
+        results.append({'polys': pred_poly, 'confs': pred_confs, 'classes': pred_cls})
+    return results
+
+
 def run_inference(model, dataloader, device, conf_threshold=0.20):
     """Run inference over all tiles, collecting predictions and GT.
 
@@ -252,19 +302,22 @@ def run_inference(model, dataloader, device, conf_threshold=0.20):
     """
     results = []
     training_args = getattr(model, 'training_args', {})
-    crop_size = training_args.get('crop_size', 640)
-    n_rays = training_args.get('n_rays', 32)
+    crop_size = training_args.get('crop_size', getattr(model, 'crop_size', 640))
+    n_rays = training_args.get('n_rays', getattr(model, 'n_rays', 32))
     raycast_dim = 2 + n_rays
 
     with torch.no_grad():
         for _batch_idx, batch in enumerate(dataloader):
             images = batch['img'].to(device)
             raw_out = model(images)
-            decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
-            batch_size = images.shape[0]
 
-            for si in range(batch_size):
-                # --- GT ---
+            if isinstance(raw_out, dict):
+                preds = _decode_lsp_output(raw_out, crop_size, conf_threshold, device)
+            else:
+                decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
+                preds = _decode_fcn_output(decoded, raycast_dim, conf_threshold)
+
+            for si in range(images.shape[0]):
                 mask = batch['batch_idx'] == si
                 gt_cls = batch['cls'][mask].numpy().flatten()
                 gt_poly = batch['bboxes'][mask].numpy()
@@ -275,23 +328,9 @@ def run_inference(model, dataloader, device, conf_threshold=0.20):
                     gt_poly[:, 1] *= crop_size
                     gt_poly[:, 2:] *= crop_size
 
-                # --- Predictions ---
-                det = decoded[si].cpu().numpy()
-                n_cols = det.shape[1] if det.ndim == 2 else 0
-
-                if det.ndim == 2 and n_cols >= raycast_dim + 2:
-                    pred_confs = det[:, raycast_dim]
-                    pred_cls = det[:, raycast_dim + 1].astype(int)
-                    conf_mask = pred_confs > conf_threshold
-                    det = det[conf_mask]
-                    pred_confs = pred_confs[conf_mask]
-                    pred_cls = pred_cls[conf_mask]
-                else:
-                    det = det[:0] if det.ndim == 2 else np.zeros((0, raycast_dim + 2), dtype=np.float32)
-                    pred_confs = np.array([], dtype=np.float32)
-                    pred_cls = np.array([], dtype=int)
-
-                pred_poly = det[:, :raycast_dim] if det.shape[0] > 0 else np.zeros((0, raycast_dim), dtype=np.float32)
+                pred_poly = preds[si]['polys']
+                pred_confs = preds[si]['confs']
+                pred_cls = preds[si]['classes']
 
                 results.append(
                     {
