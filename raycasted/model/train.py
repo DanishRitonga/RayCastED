@@ -392,11 +392,13 @@ def _hybrid_freeze_callback(trainer):
     The transformer decoder needs to learn query specialization before the
     backbone co-adapts.  Freezing the backbone gives the decoder clean
     gradients for the first ``backbone_freeze_epochs`` epochs, then
-    unfreezes for joint fine-tuning.
+    unfreezes for joint fine-tuning with a reduced learning rate
+    (``backbone_lr_ratio``) matching PyTorch Lightning BackboneFinetuning.
 
     Called via ``on_train_epoch_start``.
     """
     n_freeze = getattr(trainer, '_hybrid_freeze_epochs', 0)
+    backbone_lr_ratio = getattr(trainer, '_hybrid_backbone_lr_ratio', 0.1)
     epoch = trainer.epoch
 
     if epoch < n_freeze:
@@ -405,6 +407,14 @@ def _hybrid_freeze_callback(trainer):
     elif epoch == n_freeze:
         for param in trainer.model.model[:9].parameters():
             param.requires_grad_(True)
+
+        if trainer.optimizer is not None:
+            backbone_ids = {id(p) for p in trainer.model.model[:9].parameters() if p.requires_grad}
+            for pg in trainer.optimizer.param_groups:
+                if 'lr_scale' not in pg:
+                    backbone_params_in_group = any(id(p) in backbone_ids for p in pg['params'])
+                    if backbone_params_in_group:
+                        pg['initial_lr'] *= backbone_lr_ratio
 
 
 def _is_rtdetr_yaml(cfg) -> bool:
@@ -476,6 +486,7 @@ class RayCastTrainer(DetectionTrainer):
                 freeze_epochs = tcfg.get('backbone_freeze_epochs', 0)
                 if freeze_epochs > 0:
                     self._hybrid_freeze_epochs = freeze_epochs
+                    self._hybrid_backbone_lr_ratio = tcfg.get('backbone_lr_ratio', 0.1)
                     self.add_callback('on_train_epoch_start', _hybrid_freeze_callback)
 
         # Register GradNorm callback — updates dynamic loss weights after each step
