@@ -446,16 +446,10 @@ def _hybrid_freeze_callback(trainer):
             param.requires_grad_(True)
 
         if trainer.optimizer is not None:
-            n_groups = len(trainer.optimizer.param_groups)
-            current_lr = trainer.optimizer.param_groups[0]['lr'] if n_groups else 1e-4
-            backbone_lr = current_lr * backbone_lr_ratio
-
-            # Add backbone as new param group (preserves decoder momentum state)
-            trainer.optimizer.add_param_group({
-                'params': backbone_params,
-                'lr': backbone_lr,
-                'weight_decay': trainer.optimizer.param_groups[0].get('weight_decay', 1e-4),
-            })
+            backbone_ids = {id(p) for p in backbone_params}
+            for pg in trainer.optimizer.param_groups:
+                if any(id(p) in backbone_ids for p in pg['params']):
+                    pg['lr'] = pg['lr'] * backbone_lr_ratio
 
             tcfg = trainer.training_config or {}
             lr0 = tcfg.get('lr0', 1e-4)
