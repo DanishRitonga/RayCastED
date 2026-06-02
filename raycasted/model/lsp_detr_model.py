@@ -31,6 +31,9 @@ if TYPE_CHECKING:
 warnings.filterwarnings('ignore', message='grid_sampler_2d_backward_cuda does not have a deterministic')
 warnings.filterwarnings('ignore', message='flex_attention called without torch.compile')
 
+IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).reshape(3, 1, 1)
+IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).reshape(3, 1, 1)
+
 
 class LSPSetCriterion(nn.Module):
     """Exact LSP-DETR loss: sigmoid_focal_loss + L1 centroid + L1 log-space radial."""
@@ -188,7 +191,7 @@ class LSPDetrDetectionModel(nn.Module):
         )
 
         matcher = HybridHungarianMatcher(
-            cost_class=1.0, cost_centroid=1.0, cost_radial=1.0, cost_inner=0.0,
+            cost_class=1.0, cost_centroid=1.0, cost_radial=1.0, cost_inner=9999.0,
             focal_alpha=0.25, focal_gamma=2.0, n_rays=n_rays,
         )
         self.criterion = LSPSetCriterion(
@@ -200,7 +203,11 @@ class LSPDetrDetectionModel(nn.Module):
     def predict(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         b, _, h, w = x.shape
 
-        out = self.backbone(x, output_hidden_states=True)
+        mean = IMAGENET_MEAN.to(device=x.device, dtype=x.dtype)
+        std = IMAGENET_STD.to(device=x.device, dtype=x.dtype)
+        x_norm = (x - mean) / std
+
+        out = self.backbone(x_norm, output_hidden_states=True)
         hs = out.hidden_states  # [patch_embed, stage1, stage2, stage3, stage4]
 
         stage1_H, stage1_W = h // 4, w // 4
