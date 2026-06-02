@@ -1027,6 +1027,18 @@ class RayCastTrainer(DetectionTrainer):
                 batch[k] = v.to(self.device, non_blocking=self.device.type == 'cuda')
         return batch
 
+    def setup_model(self):
+        """Patch LSP-DETR checkpoint attributes before Ultralytics setup_model."""
+        ckpt = self.model
+        from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
+
+        if isinstance(ckpt, LSPDetrDetectionModel):
+            if not hasattr(ckpt, 'yaml'):
+                ckpt.yaml = {'nc': ckpt.nc, 'head': [[[2, 4, 8], 1, 'LSPDetrModel', ['nc', 64]]]}
+            if not hasattr(ckpt, 'end2end'):
+                ckpt.end2end = False
+        return super().setup_model()
+
     def set_model_attributes(self):
         """Set model attributes and training metadata.
 
