@@ -244,11 +244,59 @@ def load_model(weights_path: str, device: torch.device):
         if 'model' in ckpt and isinstance(ckpt['model'], dict):
             state_dict = ckpt['model']
             model = _build_model_from_state_dict(state_dict, device)
-            model.load_state_dict(state_dict)
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            if missing:
+                print(f'  WARNING: {len(missing)} missing keys in state_dict', flush=True)
+                for m in missing[:5]:
+                    print(f'    missing: {m}', flush=True)
+                if len(missing) > 5:
+                    print(f'    ... and {len(missing) - 5} more', flush=True)
+            if unexpected:
+                print(f'  WARNING: {len(unexpected)} unexpected keys in state_dict', flush=True)
+                for u in unexpected[:5]:
+                    print(f'    unexpected: {u}', flush=True)
+                if len(unexpected) > 5:
+                    print(f'    ... and {len(unexpected) - 5} more', flush=True)
+            backbone_keys = [k for k in state_dict if 'backbone' in k and 'weight' in k]
+            if backbone_keys:
+                bk = backbone_keys[len(backbone_keys) // 2]
+                loaded_val = state_dict[bk]
+                model_val = model.state_dict()[bk]
+                if loaded_val.device != model_val.device:
+                    loaded_val = loaded_val.to(device)
+                max_diff = (model_val - loaded_val).abs().max().item()
+                if max_diff > 1e-6:
+                    print(f'  WARNING: backbone weight mismatch! {bk}: max_diff={max_diff:.2e}', flush=True)
+                else:
+                    print(f'  Backbone verified: {bk} (max_diff={max_diff:.2e})', flush=True)
         elif 'ema' in ckpt and isinstance(ckpt['ema'], dict):
             state_dict = ckpt['ema']
             model = _build_model_from_state_dict(state_dict, device)
-            model.load_state_dict(state_dict)
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            if missing:
+                print(f'  WARNING: {len(missing)} missing keys in state_dict', flush=True)
+                for m in missing[:5]:
+                    print(f'    missing: {m}', flush=True)
+                if len(missing) > 5:
+                    print(f'    ... and {len(missing) - 5} more', flush=True)
+            if unexpected:
+                print(f'  WARNING: {len(unexpected)} unexpected keys in state_dict', flush=True)
+                for u in unexpected[:5]:
+                    print(f'    unexpected: {u}', flush=True)
+                if len(unexpected) > 5:
+                    print(f'    ... and {len(unexpected) - 5} more', flush=True)
+            backbone_keys = [k for k in state_dict if 'backbone' in k and 'weight' in k]
+            if backbone_keys:
+                bk = backbone_keys[len(backbone_keys) // 2]
+                loaded_val = state_dict[bk]
+                model_val = model.state_dict()[bk]
+                if loaded_val.device != model_val.device:
+                    loaded_val = loaded_val.to(device)
+                max_diff = (model_val - loaded_val).abs().max().item()
+                if max_diff > 1e-6:
+                    print(f'  WARNING: backbone weight mismatch! {bk}: max_diff={max_diff:.2e}', flush=True)
+                else:
+                    print(f'  Backbone verified: {bk} (max_diff={max_diff:.2e})', flush=True)
         else:
             # Ultralytics checkpoint: {'model': nn.Module, ...}
             model = ckpt.get('model') or ckpt.get('ema')
@@ -305,6 +353,9 @@ def _decode_lsp_output(
     is_object = logits.argmax(dim=-1) != nc  # [B, Q]
     keep = (conf > conf_threshold) & is_object
 
+    points_px = points * crop_size  # [B, Q, 2]
+    rays_px = radial.exp()  # [B, Q, n_rays]
+
     if debug:
         obj_rate = is_object.float().mean().item()
         kept_rate = keep.float().mean().item()
@@ -318,9 +369,20 @@ def _decode_lsp_output(
             f'cls_dist={cls_dist}',
             flush=True,
         )
+        if keep.any():
+            k = keep[0]
+            n_show = min(5, k.sum().item())
+            idx = torch.where(k)[0][:n_show]
+            print(f'  [DEBUG] First {n_show} preds:')
+            for j, qi in enumerate(idx):
+                qi = qi.item()
+                print(
+                    f'    Q{qi}: cls={cls_id[0, qi].item()} conf={conf[0, qi].item():.4f} '
+                    f'cx={points_px[0, qi, 0].item():.1f} cy={points_px[0, qi, 1].item():.1f} '
+                    f'r_min={rays_px[0, qi].min().item():.1f} r_max={rays_px[0, qi].max().item():.1f}',
+                    flush=True,
+                )
 
-    points_px = points * crop_size  # [B, Q, 2]
-    rays_px = radial.exp()  # [B, Q, n_rays]
     polys = torch.cat([points_px, rays_px], dim=-1)  # [B, Q, 2+n_rays]
 
     results = []
@@ -397,6 +459,19 @@ def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
                 pred_poly = preds[si]['polys']
                 pred_confs = preds[si]['confs']
                 pred_cls = preds[si]['classes']
+
+                if debug and _batch_idx == 0 and si == 0:
+                    print('  [DEBUG] First image GT (first 5):', flush=True)
+                    for j in range(min(5, len(gt_poly))):
+                        cx = gt_poly[j, 0]
+                        cy = gt_poly[j, 1]
+                        rays = gt_poly[j, 2:]
+                        print(
+                            f'    GT[{j}]: cls={int(gt_cls[j])} '
+                            f'cx={cx:.1f} cy={cy:.1f} '
+                            f'r_min={rays.min():.1f} r_max={rays.max():.1f}',
+                            flush=True,
+                        )
 
                 results.append(
                     {
