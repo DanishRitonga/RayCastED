@@ -230,10 +230,10 @@ class LSPDetrDetectionModel(nn.Module):
         out = self.decode_head(tgt, ref_points, features, h, w)
         return {
             'pred_logits': out['logits'],
-            'pred_points': out['points'] / self.crop_size,
+            'pred_points': out['points'],
             'pred_radial': out['radial_distances'],
             'aux_outputs': [
-                {'pred_logits': a['logits'], 'pred_points': a['points'] / self.crop_size,
+                {'pred_logits': a['logits'], 'pred_points': a['points'],
                  'pred_radial': a['radial_distances']}
                 for a in out['aux_outputs']
             ],
