@@ -389,11 +389,10 @@ def _lr_log_callback(trainer):
 def _hybrid_freeze_callback(trainer):
     """Freeze backbone for first N epochs (LSP-DETR-style decoder warmup).
 
-    The transformer decoder needs to learn query specialization before the
-    backbone co-adapts.  Freezing the backbone gives the decoder clean
-    gradients for the first ``backbone_freeze_epochs`` epochs, then
-    unfreezes for joint fine-tuning with a reduced learning rate
-    (``backbone_lr_ratio``) matching PyTorch Lightning BackboneFinetuning.
+    Handles both YOLO-style sequential models (model.model[:9]) and
+    LSP-DETR-style models (model.backbone).  When unfreezing, applies
+    a reduced LR (``backbone_lr_ratio``) matching PyTorch Lightning's
+    BackboneFinetuning.
 
     Called via ``on_train_epoch_start``.
     """
@@ -401,20 +400,26 @@ def _hybrid_freeze_callback(trainer):
     backbone_lr_ratio = getattr(trainer, '_hybrid_backbone_lr_ratio', 0.1)
     epoch = trainer.epoch
 
+    model = trainer.model
+    if hasattr(model, 'backbone') and not hasattr(model, 'model'):
+        backbone_params = list(model.backbone.parameters())
+    elif hasattr(model, 'model') and hasattr(model.model, '__getitem__'):
+        backbone_params = list(model.model[:9].parameters())
+    else:
+        return
+
     if epoch < n_freeze:
-        for param in trainer.model.model[:9].parameters():
+        for param in backbone_params:
             param.requires_grad_(False)
     elif epoch == n_freeze:
-        for param in trainer.model.model[:9].parameters():
+        for param in backbone_params:
             param.requires_grad_(True)
 
         if trainer.optimizer is not None:
-            backbone_ids = {id(p) for p in trainer.model.model[:9].parameters() if p.requires_grad}
+            backbone_ids = {id(p) for p in backbone_params if p.requires_grad}
             for pg in trainer.optimizer.param_groups:
-                if 'lr_scale' not in pg:
-                    backbone_params_in_group = any(id(p) in backbone_ids for p in pg['params'])
-                    if backbone_params_in_group:
-                        pg['initial_lr'] *= backbone_lr_ratio
+                if any(id(p) in backbone_ids for p in pg['params']):
+                    pg['initial_lr'] *= backbone_lr_ratio
 
 
 def _is_rtdetr_yaml(cfg) -> bool:
@@ -435,6 +440,16 @@ def _is_hybrid_yaml(cfg) -> bool:
         return False
     yaml_dict = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
     return any(len(layer) >= 3 and layer[2] == 'HybridRayCastDecoder' for layer in yaml_dict.get('head', []))
+
+
+def _is_lsp_yaml(cfg) -> bool:
+    """Check if a model YAML specifies LSP-DETR (LSPDetrModel as the head)."""
+    from ultralytics.nn.tasks import yaml_model_load
+
+    if cfg is None:
+        return False
+    yaml_dict = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
+    return any(len(layer) >= 3 and layer[2] == 'LSPDetrModel' for layer in yaml_dict.get('head', []))
 
 
 class RayCastTrainer(DetectionTrainer):
@@ -475,14 +490,14 @@ class RayCastTrainer(DetectionTrainer):
             from ultralytics.nn.tasks import yaml_model_load
 
             yaml_dict = yaml_model_load(model_yaml)
-            if _is_hybrid_yaml(yaml_dict):
+            if _is_hybrid_yaml(yaml_dict) or _is_lsp_yaml(yaml_dict):
                 self.args.optimizer = tcfg.get('optimizer', 'AdamW')
                 self.args.lr0 = tcfg.get('lr0', 1e-4)
                 self.args.weight_decay = tcfg.get('weight_decay', 1e-4)
                 self.args.warmup_epochs = tcfg.get('warmup_epochs', 10)
                 self.args.warmup_bias_lr = 0.0  # no special bias lr: all params warm from zero
                 self.args.pretrained = tcfg.get('pretrained', False)
-                # Register backbone freeze callback for hybrid training
+                # Register backbone freeze callback for hybrid/lsp training
                 freeze_epochs = tcfg.get('backbone_freeze_epochs', 0)
                 if freeze_epochs > 0:
                     self._hybrid_freeze_epochs = freeze_epochs
@@ -583,10 +598,16 @@ class RayCastTrainer(DetectionTrainer):
         # use the RT-DETR model class (different loss, no E2E head patching)
         is_rtdetr = _is_rtdetr_yaml(cfg)
         is_hybrid = _is_hybrid_yaml(cfg)
+        is_lsp = _is_lsp_yaml(cfg)
 
         _const.configure_rays(self.training_config.get('n_rays', 64) if self.training_config else 64)
 
-        if is_hybrid:
+        if is_lsp:
+            from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
+
+            model = LSPDetrDetectionModel(nc=nc, n_rays=_const.N_RAYS)
+            return model
+        elif is_hybrid:
             from raycasted.model.hybrid_model import HybridDetectionModel
 
             model = HybridDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
@@ -829,9 +850,21 @@ class RayCastTrainer(DetectionTrainer):
 
     def get_validator(self):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
-        head = self.model.model[-1] if hasattr(self, 'model') and hasattr(self.model, 'model') else None
-        if isinstance(head, HybridRayCastDecoder):
+        model_obj = self.model if hasattr(self, 'model') else None
+        head = None
+        if model_obj is not None:
+            if hasattr(model_obj, 'model') and hasattr(model_obj.model, '__getitem__'):
+                head = model_obj.model[-1]
+            elif hasattr(model_obj, 'decode_head'):
+                head = model_obj.decode_head
+
+        if isinstance(head, (HybridRayCastDecoder,)):
             self.loss_names = ('ce_loss', 'centroid_loss', 'radial_loss')
+        elif hasattr(model_obj, 'decode_head') and head is not None:
+            from raycasted.model.blocks.lsp_detr_arch import LSPTransformer
+
+            if isinstance(head, LSPTransformer):
+                self.loss_names = ('ce_loss', 'centroid_loss', 'radial_loss')
         elif isinstance(head, RayCastRTDETRDecoder):
             self.loss_names = ('cls_loss', 'ray_loss', 'piou_loss')
         else:

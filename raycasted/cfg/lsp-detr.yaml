@@ -1,0 +1,6 @@
+# LSP-DETR model marker — SwinV2 backbone + LSPTransformer decoder
+# This YAML exists only to satisfy Ultralytics' model arg; the actual model
+# is built by LSPDetrDetectionModel in lsp_detr_model.py, not from this YAML.
+nc: 5
+head:
+  - [[2, 4, 8], 1, LSPDetrModel, [nc, 64]]
