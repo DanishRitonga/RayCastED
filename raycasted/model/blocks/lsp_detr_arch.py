@@ -29,11 +29,12 @@ class CayleySTRING(nn.Module):
         orthogonal_(self.P.weight)
 
     def forward(self, x: Tensor, positions: Tensor) -> Tensor:
-        px = F.linear(x.float(), self.P.weight.float(), self.P.bias)
-        freqs = positions.float() @ self.freqs.float()
-        freqs_cis = rearrange(torch.polar(torch.ones_like(freqs), freqs), "b n c -> b 1 n c")
-        px_ = torch.view_as_complex(rearrange(px, "... (d two) -> ... d two", two=2))
-        out = rearrange(torch.view_as_real(px_ * freqs_cis), "... d two -> ... (d two)")
+        with torch.amp.autocast('cuda', enabled=False):
+            px = F.linear(x.float(), self.P.weight.float(), self.P.bias)
+            freqs = positions.float() @ self.freqs.float()
+            freqs_cis = rearrange(torch.polar(torch.ones_like(freqs), freqs), "b n c -> b 1 n c")
+            px_ = torch.view_as_complex(rearrange(px, "... (d two) -> ... d two", two=2))
+            out = rearrange(torch.view_as_real(px_ * freqs_cis), "... d two -> ... (d two)")
         return out.to(dtype=x.dtype)
 
 
