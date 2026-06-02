@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import logging
 import math
-import time
 from pathlib import Path
 
 import numpy as np
@@ -232,6 +231,9 @@ def train_lsp(
 
     steps_per_epoch = len(train_loader)
 
+    _gpu_mem = '0G'
+    _header_printed = False
+
     for epoch in range(start_epoch, epochs):
         _lr = _get_lr(epoch, warmup, epochs, lr)
         for pg in optimizer.param_groups:
@@ -258,10 +260,16 @@ def train_lsp(
         model.train()
         epoch_loss = 0.0
         epoch_ce = 0.0
-        t0 = time.perf_counter()
+        total_instances = 0
 
-        train_pbar = tqdm(train_loader, desc=f'Epoch {epoch}', unit='step', leave=False)
-        for step, (images, targets) in enumerate(train_pbar):
+        train_pbar = tqdm(
+            train_loader,
+            desc=f'{epoch:>6d}/{epochs}',
+            unit='batch',
+            bar_format='{desc}{percentage:3.0f}%|{bar:10}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}{postfix}]',
+            leave=False,
+        )
+        for images, targets in train_pbar:
             images = images.to(_device, non_blocking=True)
             batch_dict = {
                 'img': images,
@@ -269,6 +277,7 @@ def train_lsp(
                 'cls': targets[:, 1].long(),
                 'bboxes': targets[:, 2:],
             }
+            total_instances += targets.shape[0]
 
             with torch.amp.autocast('cuda'):
                 loss, loss_items = model.loss(batch_dict)
@@ -283,10 +292,23 @@ def train_lsp(
             epoch_loss += loss.item()
             epoch_ce += loss_items[0].item()
 
-            if step % 10 == 0:
-                train_pbar.set_postfix(loss=f'{loss.item():.3f}', ce=f'{loss_items[0].item():.3f}')
+        _gpu_mem = f'{torch.cuda.max_memory_reserved(_device) / 1e9:.1f}G' if _device.type == 'cuda' else '0G'
 
-        train_time = time.perf_counter() - t0
+        if not _header_printed:
+            _logger.info('')
+            _logger.info('%10s %10s %10s %10s %10s %10s', 'Epoch', 'GPU_mem', 'loss', 'ce', 'Instances', 'Size')
+            _header_printed = True
+
+        train_pbar.set_description(f'{epoch:>6d}/{epochs}')
+        _logger.info(
+            '%10s %10s %10.4f %10.4f %10d %10d',
+            f'{epoch}/{epochs}',
+            _gpu_mem,
+            epoch_loss / steps_per_epoch,
+            epoch_ce / steps_per_epoch,
+            total_instances,
+            crop_size,
+        )
 
         val_m = _validate(model, val_loader, _device, nc, n_rays, crop_size, conf)
         bpq, bsq, bdq = val_m['bPQ'], val_m['bSQ'], val_m['bDQ']
@@ -295,16 +317,14 @@ def train_lsp(
         lr_bbn = next((pg['lr'] for pg in optimizer.param_groups if pg.get('name') == 'backbone'), 0.0)
 
         _logger.info(
-            'Epoch %3d | loss=%.4f ce=%.4f | bPQ=%.4f bSQ=%.4f bDQ=%.4f | LR dec=%.2e bbn=%.2e | %.1fs',
-            epoch,
-            epoch_loss / steps_per_epoch,
-            epoch_ce / steps_per_epoch,
+            '%10s %10s %10.4f %10.4f %10s | LR dec=%.2e bbn=%.2e',
+            '',
+            '',
             bpq,
             bsq,
             bdq,
             lr_dec,
             lr_bbn,
-            train_time,
         )
 
         if bpq > best_bpq:
@@ -318,7 +338,7 @@ def train_lsp(
                 },
                 out_dir / 'best.pt',
             )
-            _logger.info('  ⭐ New best bPQ=%.4f', bpq)
+            _logger.info('%10s ⭐ New best bPQ=%.4f', '', bpq)
 
         if epoch % 20 == 0:
             torch.save(
