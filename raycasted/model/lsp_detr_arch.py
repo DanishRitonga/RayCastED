@@ -58,16 +58,16 @@ class CayleySTRING(nn.Module):
     def __init__(self, dim: int, pos_dim: int = 2, theta: float = 100.0) -> None:
         super().__init__()
         freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
-        self.freqs = nn.Parameter(repeat(freqs, "d -> p d", p=pos_dim).clone())
-        self.P = orthogonal(nn.Linear(dim, dim, bias=False), orthogonal_map="cayley")
+        self.freqs = nn.Parameter(repeat(freqs, 'd -> p d', p=pos_dim).clone())
+        self.P = orthogonal(nn.Linear(dim, dim, bias=False), orthogonal_map='cayley')
 
-    @torch.autocast("cuda", enabled=False)
+    @torch.autocast('cuda', enabled=False)
     def forward(self, x: Tensor, positions: Tensor) -> Tensor:
         px = self.P(x.float())
         freqs = positions @ self.freqs
-        freqs_cis = rearrange(torch.polar(torch.ones_like(freqs), freqs), "b n c -> b 1 n c")
-        px_ = torch.view_as_complex(rearrange(px, "... (d two) -> ... d two", two=2))
-        out = rearrange(torch.view_as_real(px_ * freqs_cis), "... d two -> ... (d two)")
+        freqs_cis = rearrange(torch.polar(torch.ones_like(freqs), freqs), 'b n c -> b 1 n c')
+        px_ = torch.view_as_complex(rearrange(px, '... (d two) -> ... d two', two=2))
+        out = rearrange(torch.view_as_real(px_ * freqs_cis), '... d two -> ... (d two)')
         return out.type_as(x)
 
 
@@ -118,7 +118,7 @@ def create_sta_block_mask(
         generate_sta_mask(q_width, (kv_len // kv_width, kv_width), kernel, q_tile, kv_tile),
         B=None,
         H=None,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device='cuda' if torch.cuda.is_available() else 'cpu',
         Q_LEN=q_len,
         KV_LEN=kv_len,
         _compile=True,
@@ -154,32 +154,44 @@ class STAttention(nn.Module):
         return F.pad(x, (0, 0, 0, pad_right, 0, pad_bottom))
 
     def tile(self, x: Tensor, height: int, tile: int) -> tuple[Tensor, int, int]:
-        x = rearrange(x, "b head (h w) dim -> b h w (head dim)", h=height)
+        x = rearrange(x, 'b head (h w) dim -> b h w (head dim)', h=height)
         x = self.maybe_pad(x, tile)
         h, w = x.shape[1:3]
         x = rearrange(
-            x, "b (n_h ts_h) (n_w ts_w) (h d) -> b h (n_h n_w ts_h ts_w) d",
-            ts_h=tile, ts_w=tile, h=self.num_heads,
+            x,
+            'b (n_h ts_h) (n_w ts_w) (h d) -> b h (n_h n_w ts_h ts_w) d',
+            ts_h=tile,
+            ts_w=tile,
+            h=self.num_heads,
         )
         return x, h, w
 
     def forward(self, tgt: Tensor, src: Tensor, q_coords: Tensor, k_coords: Tensor) -> Tensor:
         h, w = tgt.shape[1:3]
-        q = rearrange(self.q(tgt), "b h w (head d) -> b head (h w) d", head=self.num_heads)
-        k, v = rearrange(self.kv(src), "b h w (two head d) -> two b head (h w) d", two=2, head=self.num_heads)
+        q = rearrange(self.q(tgt), 'b h w (head d) -> b head (h w) d', head=self.num_heads)
+        k, v = rearrange(self.kv(src), 'b h w (two head d) -> two b head (h w) d', two=2, head=self.num_heads)
         q = self.pe(q, q_coords)
         k = self.pe(k, k_coords)
         q, q_h, q_w = self.tile(q, h, self.q_tile)
         k, _, kv_w = self.tile(k, src.shape[1], self.kv_tile)
         v, _, _ = self.tile(v, src.shape[1], self.kv_tile)
         block_mask = create_sta_block_mask(
-            q_len=q.shape[2], kv_len=k.shape[2], q_width=q_w, kv_width=kv_w,
-            kernel=self.kernel, q_tile=self.q_tile, kv_tile=self.kv_tile,
+            q_len=q.shape[2],
+            kv_len=k.shape[2],
+            q_width=q_w,
+            kv_width=kv_w,
+            kernel=self.kernel,
+            q_tile=self.q_tile,
+            kv_tile=self.kv_tile,
         )
         x = flex_attention(q, k, v, block_mask=block_mask)
         x = rearrange(
-            x, "b h (n_h n_w ts_h ts_w) d -> b (n_h ts_h) (n_w ts_w) (h d)",
-            n_h=q_h // self.q_tile, n_w=q_w // self.q_tile, ts_h=self.q_tile, ts_w=self.q_tile,
+            x,
+            'b h (n_h n_w ts_h ts_w) d -> b (n_h ts_h) (n_w ts_w) (h d)',
+            n_h=q_h // self.q_tile,
+            n_w=q_w // self.q_tile,
+            ts_h=self.q_tile,
+            ts_w=self.q_tile,
         )
         x = x[:, :h, :w, :].contiguous()
         return self.wo(x)
@@ -205,8 +217,13 @@ class FeedForward(nn.Module):
 
 class MLP(nn.Sequential):
     def __init__(
-        self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int,
-        act_layer: type[nn.Module] = nn.GELU, dropout: float = 0.0,
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        output_dim: int,
+        num_layers: int,
+        act_layer: type[nn.Module] = nn.GELU,
+        dropout: float = 0.0,
     ) -> None:
         assert num_layers > 1
         layers = []
@@ -227,8 +244,12 @@ class MLP(nn.Sequential):
 
 class DecoderLayer(nn.Module):
     def __init__(
-        self, dim: int, src_dim: int, num_heads: int,
-        self_sta: STAConfig, cross_sta: STAConfig,
+        self,
+        dim: int,
+        src_dim: int,
+        num_heads: int,
+        self_sta: STAConfig,
+        cross_sta: STAConfig,
     ) -> None:
         super().__init__()
         self.self_attn = STAttention(dim, dim, num_heads, self_sta.kernel, self_sta.q_tile, self_sta.kv_tile)
@@ -256,15 +277,18 @@ class LSPTransformer(nn.Module):
 
         self.layers = nn.ModuleList()
         for level in config.feature_levels:
-            self.layers.append(DecoderLayer(
-                dim=config.dim, src_dim=feature_channels[level], num_heads=config.num_heads,
-                self_sta=config.self_sta_config, cross_sta=config.cross_sta_config[level],
-            ))
+            self.layers.append(
+                DecoderLayer(
+                    dim=config.dim,
+                    src_dim=feature_channels[level],
+                    num_heads=config.num_heads,
+                    self_sta=config.self_sta_config,
+                    cross_sta=config.cross_sta_config[level],
+                )
+            )
 
         self.class_head = nn.Linear(config.dim, self.num_classes)
-        self.point_head = nn.ModuleList(
-            MLP(config.dim, config.dim, 2, 3) for _ in config.feature_levels
-        )
+        self.point_head = nn.ModuleList(MLP(config.dim, config.dim, 2, 3) for _ in config.feature_levels)
         self.radial_distances_head = nn.ModuleList(
             MLP(config.dim, config.dim, config.num_radial_distances, 3) for _ in config.feature_levels
         )
@@ -282,7 +306,12 @@ class LSPTransformer(nn.Module):
             nn.init.constant_(head[-1].bias, 0)
 
     def forward(
-        self, tgt: Tensor, ref_points: Tensor, features: list[Tensor], height: int, width: int,
+        self,
+        tgt: Tensor,
+        ref_points: Tensor,
+        features: list[Tensor],
+        height: int,
+        width: int,
     ) -> dict[str, Tensor | list[dict[str, Tensor]]]:
         src = []
         src_coords = []
@@ -290,13 +319,14 @@ class LSPTransformer(nn.Module):
             b, _, h, w = feature.shape
             coords = torch.zeros(b, h, w, 2, dtype=torch.float32, device=feature.device)
             coords = relative_to_absolute_pos(coords, step_x=math.ceil(width / w), step_y=math.ceil(height / h))
-            src.append(rearrange(feature, "b c h w -> b h w c"))
-            src_coords.append(rearrange(coords, "b h w pos -> b (h w) pos"))
+            src.append(rearrange(feature, 'b c h w -> b h w c'))
+            src_coords.append(rearrange(coords, 'b h w pos -> b (h w) pos'))
 
         radial_distances = torch.full(
             (*tgt.shape[:3], self.num_radial_distances),
             math.log(self.query_block_size / 2),
-            dtype=torch.float32, device=tgt.device,
+            dtype=torch.float32,
+            device=tgt.device,
         )
 
         logits_list = []
@@ -310,7 +340,9 @@ class LSPTransformer(nn.Module):
             tgt = layer(
                 tgt=tgt,
                 src=src[self.feature_levels[i]],
-                tgt_coords=relative_to_absolute_pos(ref_points, self.query_block_size, self.query_block_size).flatten(1, 2),
+                tgt_coords=relative_to_absolute_pos(ref_points, self.query_block_size, self.query_block_size).flatten(
+                    1, 2
+                ),
                 src_coords=src_coords[self.feature_levels[i]],
             )
 
@@ -334,13 +366,15 @@ class LSPTransformer(nn.Module):
             radial_distances = new_radial_distances.detach()
 
         return {
-            "logits": logits_list[-1],
-            "points": ref_points_list[-1],
-            "radial_distances": radial_distances_list[-1],
-            "absolute_points": relative_to_absolute_pos(ref_points, self.query_block_size, self.query_block_size).flatten(1, 2),
-            "embeddings": tgt.flatten(1, 2),
-            "aux_outputs": [
-                {"logits": a, "points": b, "radial_distances": c}
+            'logits': logits_list[-1],
+            'points': ref_points_list[-1],
+            'radial_distances': radial_distances_list[-1],
+            'absolute_points': relative_to_absolute_pos(
+                ref_points, self.query_block_size, self.query_block_size
+            ).flatten(1, 2),
+            'embeddings': tgt.flatten(1, 2),
+            'aux_outputs': [
+                {'logits': a, 'points': b, 'radial_distances': c}
                 for a, b, c in zip(logits_list[:-1], ref_points_list[:-1], radial_distances_list[:-1], strict=True)
             ],
         }
@@ -354,4 +388,4 @@ class FeatureSampling(nn.Module):
 
     def forward(self, points: Tensor, feature: Tensor) -> Tensor:
         x = F.grid_sample(self.reduction(feature), points * 2 - 1, align_corners=False)
-        return self.norm(rearrange(x, "b c h w -> b h w c"))
+        return self.norm(rearrange(x, 'b c h w -> b h w c'))

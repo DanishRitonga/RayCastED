@@ -458,7 +458,10 @@ def _hybrid_freeze_callback(trainer):
             remaining_epochs = max_epochs - epoch
 
             trainer.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                trainer.optimizer, T_max=remaining_epochs, eta_min=lr_min, last_epoch=-1,
+                trainer.optimizer,
+                T_max=remaining_epochs,
+                eta_min=lr_min,
+                last_epoch=-1,
             )
 
 

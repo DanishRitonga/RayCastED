@@ -237,10 +237,58 @@ def load_model(weights_path: str, device: torch.device):
     """Load trained RayCastED model from checkpoint."""
     register_raycast_head()
     ckpt = torch.load(weights_path, map_location=device, weights_only=False)
-    model = ckpt.get('model') or ckpt.get('ema') if isinstance(ckpt, dict) else ckpt
-    model = model.float().to(device)
+
+    if isinstance(ckpt, dict):
+        # LSP-DETR checkpoint: {'model': state_dict, ...}
+        # Try to build model from state_dict keys, then load weights
+        if 'model' in ckpt and isinstance(ckpt['model'], dict):
+            state_dict = ckpt['model']
+            model = _build_model_from_state_dict(state_dict, device)
+            model.load_state_dict(state_dict)
+        elif 'ema' in ckpt and isinstance(ckpt['ema'], dict):
+            state_dict = ckpt['ema']
+            model = _build_model_from_state_dict(state_dict, device)
+            model.load_state_dict(state_dict)
+        else:
+            # Ultralytics checkpoint: {'model': nn.Module, ...}
+            model = ckpt.get('model') or ckpt.get('ema')
+            model = model.float().to(device)
+    else:
+        # Full model object saved directly
+        model = ckpt.float().to(device)
+
     model.eval()
     return model
+
+
+def _build_model_from_state_dict(state_dict: dict, device: torch.device):
+    """Detect model architecture from state_dict keys and construct it."""
+    keys = list(state_dict.keys())
+
+    # LSP-DETR: has backbone.swinv2 and decode_head keys
+    if any('backbone.swinv2' in k for k in keys):
+        from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
+
+        # Infer n_rays from radial head shape
+        radial_key = 'decode_head.radial_head.0.weight'
+        n_rays = state_dict[radial_key].shape[0] if radial_key in state_dict else 64
+
+        # Infer nc from class head shape
+        cls_key = 'decode_head.class_head.0.weight'
+        nc = state_dict[cls_key].shape[0] - 1 if cls_key in state_dict else 5  # nc+1 classes
+
+        # Infer crop_size: LSP-DETR default for PanNuke is 256.
+        # Can be overridden by state_dict metadata if present.
+        crop_size = 256
+
+        model = LSPDetrDetectionModel(nc=nc, n_rays=n_rays, crop_size=crop_size)
+        return model.float().to(device)
+
+    # FCN checkpoint (Ultralytics-style): return ckpt directly
+    raise ValueError(
+        'Cannot auto-detect model architecture from checkpoint keys. '
+        'Ensure the checkpoint contains LSP-DETR or FCN model state_dict.'
+    )
 
 
 def _decode_lsp_output(outputs: dict, crop_size: int, conf_threshold: float, device: torch.device) -> list[dict]:
@@ -262,11 +310,13 @@ def _decode_lsp_output(outputs: dict, crop_size: int, conf_threshold: float, dev
     results = []
     for i in range(bs):
         k = keep[i]
-        results.append({
-            'polys': polys[i, k].cpu().numpy(),
-            'confs': conf[i, k].cpu().numpy(),
-            'classes': cls_id[i, k].cpu().numpy().astype(int),
-        })
+        results.append(
+            {
+                'polys': polys[i, k].cpu().numpy(),
+                'confs': conf[i, k].cpu().numpy(),
+                'classes': cls_id[i, k].cpu().numpy().astype(int),
+            }
+        )
     return results
 
 
@@ -302,8 +352,8 @@ def run_inference(model, dataloader, device, conf_threshold=0.20):
     """
     results = []
     training_args = getattr(model, 'training_args', {})
-    crop_size = training_args.get('crop_size', getattr(model, 'crop_size', 640))
-    n_rays = training_args.get('n_rays', getattr(model, 'n_rays', 32))
+    crop_size = getattr(model, 'crop_size', None) or training_args.get('crop_size', 256)
+    n_rays = getattr(model, 'n_rays', None) or training_args.get('n_rays', 64)
     raycast_dim = 2 + n_rays
 
     with torch.no_grad():
@@ -722,9 +772,9 @@ def _main(args):
     print(f'Loading model: {args.weights}', flush=True)
     model = load_model(args.weights, device)
     training_args = getattr(model, 'training_args', {})
-    crop_size = training_args.get('crop_size', 640)
-    nc = training_args.get('nc', 1)
-    n_rays = training_args.get('n_rays', 32)
+    crop_size = getattr(model, 'crop_size', None) or training_args.get('crop_size', 256)
+    nc = getattr(model, 'nc', None) or training_args.get('nc', 5)
+    n_rays = getattr(model, 'n_rays', None) or training_args.get('n_rays', 64)
     print(f'  crop_size={crop_size}, nc={nc}, n_rays={n_rays}', flush=True)
 
     # Configure ray geometry
