@@ -193,7 +193,16 @@ class LSPDetrDetectionModel(nn.Module):
     def predict(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         b, _, h, w = x.shape
 
-        *features, neck = self.backbone(x).feature_maps
+        out = self.backbone(x, output_hidden_states=True)
+        hs = out.hidden_states  # [patch_embed, stage1, stage2, stage3, stage4]
+
+        stage1_H, stage1_W = h // 4, w // 4
+        features = [
+            hs[1].transpose(1, 2).reshape(b, -1, stage1_H, stage1_W),       # stage1: 96ch, 64x64
+            hs[2].transpose(1, 2).reshape(b, -1, stage1_H // 2, stage1_W // 2),  # stage2: 192ch, 32x32
+            hs[3].transpose(1, 2).reshape(b, -1, stage1_H // 4, stage1_W // 4),  # stage3: 384ch, 16x16
+        ]
+        neck = hs[4].transpose(1, 2).reshape(b, -1, stage1_H // 8, stage1_W // 8)  # stage4: 768ch, 8x8
 
         ref_points = torch.zeros(
             b, math.ceil(h / self.query_block_size), math.ceil(w / self.query_block_size), 2,
