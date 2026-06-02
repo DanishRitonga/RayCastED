@@ -212,7 +212,9 @@ class LSPTransformer(nn.Module):
         self.query_block_size = query_block_size
         self.num_radial_distances = num_radial_distances
         self.feature_levels = feature_levels
-        self.num_classes = num_classes + 1
+        self.num_classes = num_classes + 1  # internal: nc + 1 (including no-object)
+        self.nc = num_classes  # external: foreground classes, used by trainer
+        self.n_rays = num_radial_distances  # for trainer compatibility
 
         self.layers = nn.ModuleList()
         for level in feature_levels:

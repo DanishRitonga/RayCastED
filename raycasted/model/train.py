@@ -1030,7 +1030,12 @@ class RayCastTrainer(DetectionTrainer):
         calling set_head_attr which doesn't exist. Adds training_args
         dict needed by RayCastPredictor and ONNX export.
         """
-        head = self.model.model[-1]
+        model = self.model
+        if hasattr(model, 'decode_head'):
+            head = model.decode_head
+        else:
+            head = model.model[-1]
+
         self.model.nc = self.data.get('nc', getattr(self.model, 'nc', head.nc))
         assert head.nc == self.model.nc, (
             f'Head nc ({head.nc}) != data nc ({self.model.nc}). '
