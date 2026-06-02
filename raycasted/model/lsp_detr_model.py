@@ -69,7 +69,7 @@ class LSPSetCriterion(nn.Module):
             labels = targets[b].get('labels')
             if labels is None or len(labels) == 0:
                 continue
-            matched_labels = labels[tgt_idx].to(device=device)
+            matched_labels = labels.to(device=device)[tgt_idx]
             valid = matched_labels < num_classes - 1
             tgt_classes[b, pred_idx[valid]] = matched_labels[valid]
 
@@ -87,7 +87,7 @@ class LSPSetCriterion(nn.Module):
             boxes = targets[b].get('boxes')
             if boxes is None or boxes.numel() == 0:
                 continue
-            tgt_pts = boxes[tgt_idx, :2].to(points)
+            tgt_pts = boxes.to(points.device)[tgt_idx, :2].to(points)
             pred_pts = points[b, pred_idx, :2]
             total = total + F.l1_loss(pred_pts, tgt_pts)
             count += 1
@@ -102,7 +102,7 @@ class LSPSetCriterion(nn.Module):
             boxes = targets[b].get('boxes')
             if boxes is None or boxes.numel() == 0 or boxes.shape[1] < 2 + self.n_rays:
                 continue
-            gt_rays_norm = boxes[tgt_idx, 2:]
+            gt_rays_norm = boxes.to(radial_log.device)[tgt_idx, 2:]
             gt_log = torch.log(gt_rays_norm * self.crop_size + 1e-7).to(radial_log)
             pred = radial_log[b, pred_idx]
             item = torch.max(F.relu(gt_log - pred), F.relu(pred - gt_log))
