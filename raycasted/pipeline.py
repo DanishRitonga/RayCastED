@@ -325,8 +325,9 @@ def main():  # noqa: D103
         training_overrides['name'] = args.name
     if args.resume:
         training_overrides['resume'] = True
-        # When resuming, Ultralytics expects model= to point to the checkpoint
-        training_overrides['model'] = args.resume
+        # Do NOT override model= with resume path — RayCastTrainer.__init__
+        # needs the original YAML to detect model type (hybrid/lsp/rtdetr).
+        # Ultralytics reads the checkpoint from resume=, not model=.
 
     pipeline = RayCastPipeline(
         config_path=args.config,
