@@ -30,11 +30,12 @@ class CayleySTRING(nn.Module):
 
     def forward(self, x: Tensor, positions: Tensor) -> Tensor:
         px = self.P(x)
-        freqs = positions @ self.freqs
-        freqs_cis = rearrange(torch.polar(torch.ones_like(freqs), freqs), "b n c -> b 1 n c")
-        px_ = torch.view_as_complex(rearrange(px, "... (d two) -> ... d two", two=2))
+        freqs_f32 = (positions.to(dtype=torch.float32) @ self.freqs.to(dtype=torch.float32))
+        freqs_cis = rearrange(torch.polar(torch.ones_like(freqs_f32), freqs_f32), "b n c -> b 1 n c")
+        px_ = rearrange(px.to(dtype=torch.float32), "... (d two) -> ... d two", two=2)
+        px_ = torch.view_as_complex(px_)
         out = rearrange(torch.view_as_real(px_ * freqs_cis), "... d two -> ... (d two)")
-        return out.type_as(x)
+        return out.to(dtype=x.dtype)
 
 
 # ---------------------------------------------------------------------------
