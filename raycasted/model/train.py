@@ -386,6 +386,39 @@ def _lr_log_callback(trainer):
     LOGGER.info(f'Epoch {trainer.epoch + 1} LR: {lr_str}')
 
 
+def _lsp_lr_callback(trainer):
+    """Replace Ultralytics' one_cycle scheduler with LSP-DETR exact schedule.
+
+    LSP-DETR uses timm CosineLRScheduler: warmup 1e-7→1e-4 over 10 epochs,
+    then pure cosine decay 1e-4→1e-6 over remaining epochs.  Ultralytics'
+    one_cycle schedule has a different trajectory (~10 % lower mid-training).
+    This callback creates a PyTorch SequentialLR matching LSP-DETR exactly.
+
+    Called via ``on_pretrain_routine_start`` (after optimizer exists).
+    """
+    tcfg = trainer.training_config or {}
+    lr0 = tcfg.get('lr0', 1e-4)
+    lr_min = tcfg.get('lrf', 0.01) * lr0  # default 1e-6
+    warmup_epochs = tcfg.get('warmup_epochs', 10)
+    max_epochs = getattr(trainer.args, 'epochs', 130)
+    steps_per_epoch = max(1, len(trainer.train_loader))
+
+    warmup_steps = warmup_epochs * steps_per_epoch
+    decay_steps = (max_epochs - warmup_epochs) * steps_per_epoch
+
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        trainer.optimizer, start_factor=1e-7 / lr0, end_factor=1.0,
+        total_iters=warmup_steps,
+    )
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+        trainer.optimizer, T_max=decay_steps, eta_min=lr_min,
+    )
+    trainer.scheduler = torch.optim.lr_scheduler.SequentialLR(
+        trainer.optimizer, schedulers=[warmup, cosine],
+        milestones=[warmup_steps],
+    )
+
+
 def _hybrid_freeze_callback(trainer):
     """Freeze backbone for first N epochs (LSP-DETR-style decoder warmup).
 
@@ -416,10 +449,29 @@ def _hybrid_freeze_callback(trainer):
             param.requires_grad_(True)
 
         if trainer.optimizer is not None:
-            backbone_ids = {id(p) for p in backbone_params if p.requires_grad}
-            for pg in trainer.optimizer.param_groups:
+            n_groups = len(trainer.optimizer.param_groups)
+            current_lr = trainer.optimizer.param_groups[0]['lr'] if n_groups else 1e-4
+            wd = trainer.optimizer.param_groups[0].get('weight_decay', 1e-4)
+            optimizer = torch.optim.AdamW(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                lr=current_lr, weight_decay=wd,
+            )
+            backbone_ids = {id(p) for p in backbone_params}
+            for pg in optimizer.param_groups:
                 if any(id(p) in backbone_ids for p in pg['params']):
-                    pg['initial_lr'] *= backbone_lr_ratio
+                    pg['initial_lr'] = current_lr * backbone_lr_ratio
+            trainer.optimizer = optimizer
+
+            tcfg = trainer.training_config or {}
+            lr0 = tcfg.get('lr0', 1e-4)
+            lr_min = tcfg.get('lrf', 0.01) * lr0
+            max_epochs = getattr(trainer.args, 'epochs', 130)
+            steps_per_epoch = max(1, len(trainer.train_loader))
+            remaining = (max_epochs - epoch) * steps_per_epoch
+
+            trainer.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=remaining, eta_min=lr_min,
+            )
 
 
 def _is_rtdetr_yaml(cfg) -> bool:
@@ -503,6 +555,11 @@ class RayCastTrainer(DetectionTrainer):
                     self._hybrid_freeze_epochs = freeze_epochs
                     self._hybrid_backbone_lr_ratio = tcfg.get('backbone_lr_ratio', 0.1)
                     self.add_callback('on_train_epoch_start', _hybrid_freeze_callback)
+
+            # LSP-DETR: replace Ultralytics one_cycle with exact LSP-DETR cosine schedule
+            if _is_lsp_yaml(yaml_dict):
+                self.args.cos_lr = False  # disable one_cycle; _lsp_lr_callback handles it
+                self.add_callback('on_pretrain_routine_end', _lsp_lr_callback)
 
         # Register GradNorm callback — updates dynamic loss weights after each step
         self.add_callback('on_train_batch_end', _gradnorm_update_callback)
@@ -607,7 +664,8 @@ class RayCastTrainer(DetectionTrainer):
 
             if weights is not None and isinstance(weights, LSPDetrDetectionModel):
                 weights.end2end = False
-                weights.yaml = weights.yaml if hasattr(weights, 'yaml') else {'nc': nc, 'head': [[[2, 4, 8], 1, 'LSPDetrModel', ['nc', 64]]]}
+                lsp_yaml = {'nc': nc, 'head': [[[2, 4, 8], 1, 'LSPDetrModel', ['nc', 64]]]}
+                weights.yaml = weights.yaml if hasattr(weights, 'yaml') else lsp_yaml
                 return weights  # resume: keep the loaded checkpoint with trained weights
             model = LSPDetrDetectionModel(nc=nc, n_rays=_const.N_RAYS)
             return model
