@@ -392,31 +392,28 @@ def _lsp_lr_callback(trainer):
     LSP-DETR uses timm CosineLRScheduler: warmup 1e-7→1e-4 over 10 epochs,
     then pure cosine decay 1e-4→1e-6 over remaining epochs.  Ultralytics'
     one_cycle schedule has a different trajectory (~10 % lower mid-training).
-    This callback creates a PyTorch SequentialLR matching LSP-DETR exactly.
 
-    Called via ``on_pretrain_routine_start`` (after optimizer exists).
+    Uses a single LambdaLR with epoch-based formula — avoids SequentialLR
+    milestone/off-by-one issues with Ultralytics' per-epoch stepping.
+
+    Called via ``on_pretrain_routine_end`` (after optimizer exists).
     """
     tcfg = trainer.training_config or {}
     lr0 = tcfg.get('lr0', 1e-4)
     lr_min = tcfg.get('lrf', 0.01) * lr0  # default 1e-6
     warmup_epochs = tcfg.get('warmup_epochs', 10)
     max_epochs = getattr(trainer.args, 'epochs', 130)
-    steps_per_epoch = max(1, len(trainer.train_loader))
+    decay_epochs = max_epochs - warmup_epochs
 
-    warmup_steps = warmup_epochs * steps_per_epoch
-    decay_steps = (max_epochs - warmup_epochs) * steps_per_epoch
+    import math as _math
 
-    warmup = torch.optim.lr_scheduler.LinearLR(
-        trainer.optimizer, start_factor=1e-7 / lr0, end_factor=1.0,
-        total_iters=warmup_steps,
-    )
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-        trainer.optimizer, T_max=decay_steps, eta_min=lr_min,
-    )
-    trainer.scheduler = torch.optim.lr_scheduler.SequentialLR(
-        trainer.optimizer, schedulers=[warmup, cosine],
-        milestones=[warmup_steps],
-    )
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            return float(1e-7 / lr0 + epoch * (1.0 - 1e-7 / lr0) / warmup_epochs)
+        t = (epoch - warmup_epochs) / decay_epochs
+        return float((_math.cos(_math.pi * t) + 1) / 2 * (1.0 - lr_min / lr0) + lr_min / lr0)
+
+    trainer.scheduler = torch.optim.lr_scheduler.LambdaLR(trainer.optimizer, lr_lambda)
 
 
 def _hybrid_freeze_callback(trainer):
@@ -466,11 +463,10 @@ def _hybrid_freeze_callback(trainer):
             lr0 = tcfg.get('lr0', 1e-4)
             lr_min = tcfg.get('lrf', 0.01) * lr0
             max_epochs = getattr(trainer.args, 'epochs', 130)
-            steps_per_epoch = max(1, len(trainer.train_loader))
-            remaining = (max_epochs - epoch) * steps_per_epoch
+            remaining_epochs = max_epochs - epoch
 
             trainer.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=remaining, eta_min=lr_min,
+                optimizer, T_max=remaining_epochs, eta_min=lr_min, last_epoch=-1,
             )
 
 
