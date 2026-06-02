@@ -38,6 +38,7 @@ from raycasted.data.etl.utils.constants import configure_rays
 from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
 from raycasted.model.metrics import compute_bpq_from_iou
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)-8s | %(message)s', datefmt='%H:%M:%S')
 _logger = logging.getLogger('lsp_trainer')
 
 
@@ -229,8 +230,6 @@ def train_lsp(
         best_bpq = ckpt.get('best_bpq', 0.0)
         _logger.info('Resumed from epoch %d (best bPQ=%.4f)', start_epoch, best_bpq)
 
-    steps_per_epoch = len(train_loader)
-
     _gpu_mem = '0G'
     _header_printed = False
 
@@ -260,7 +259,10 @@ def train_lsp(
         model.train()
         epoch_loss = 0.0
         epoch_ce = 0.0
+        epoch_centroid = 0.0
+        epoch_radial = 0.0
         total_instances = 0
+        n_batches = 0
 
         train_pbar = tqdm(
             train_loader,
@@ -291,40 +293,41 @@ def train_lsp(
 
             epoch_loss += loss.item()
             epoch_ce += loss_items[0].item()
+            epoch_centroid += loss_items[1].item()
+            epoch_radial += loss_items[2].item()
+            n_batches += 1
+
+            train_pbar.set_postfix(
+                loss=f'{loss.item():.3f}', ce=f'{loss_items[0].item():.3f}',
+                cent=f'{loss_items[1].item():.3f}', rad=f'{loss_items[2].item():.3f}',
+            )
 
         _gpu_mem = f'{torch.cuda.max_memory_reserved(_device) / 1e9:.1f}G' if _device.type == 'cuda' else '0G'
 
-        if not _header_printed:
-            _logger.info('')
-            _logger.info('%10s %10s %10s %10s %10s %10s', 'Epoch', 'GPU_mem', 'loss', 'ce', 'Instances', 'Size')
-            _header_printed = True
+        avg_loss = epoch_loss / n_batches if n_batches else 0
+        avg_ce = epoch_ce / n_batches if n_batches else 0
+        avg_centroid = epoch_centroid / n_batches if n_batches else 0
+        avg_radial = epoch_radial / n_batches if n_batches else 0
 
-        train_pbar.set_description(f'{epoch:>6d}/{epochs}')
-        _logger.info(
-            '%10s %10s %10.4f %10.4f %10d %10d',
-            f'{epoch}/{epochs}',
-            _gpu_mem,
-            epoch_loss / steps_per_epoch,
-            epoch_ce / steps_per_epoch,
-            total_instances,
-            crop_size,
-        )
+        if not _header_printed:
+            print()
+            print(
+                f'{"Epoch":>6s} {"GPU":>5s} {"loss":>8s} {"ce":>8s} {"cent":>8s} {"rad":>8s} '
+                f'{"Inst":>6s} {"Size":>5s} {"bPQ":>8s} {"bSQ":>8s} {"bDQ":>8s} {"LR":>10s}'
+            )
+            _header_printed = True
 
         val_m = _validate(model, val_loader, _device, nc, n_rays, crop_size, conf)
         bpq, bsq, bdq = val_m['bPQ'], val_m['bSQ'], val_m['bDQ']
 
         lr_dec = optimizer.param_groups[0]['lr']
         lr_bbn = next((pg['lr'] for pg in optimizer.param_groups if pg.get('name') == 'backbone'), 0.0)
+        lr_str = f'dec={lr_dec:.2e}' if lr_bbn == 0 else f'dec={lr_dec:.2e}/bbn={lr_bbn:.2e}'
 
-        _logger.info(
-            '%10s %10s %10.4f %10.4f %10s | LR dec=%.2e bbn=%.2e',
-            '',
-            '',
-            bpq,
-            bsq,
-            bdq,
-            lr_dec,
-            lr_bbn,
+        star = ' ⭐' if bpq > best_bpq else ''
+        print(
+            f'{epoch:>6d} {_gpu_mem:>5s} {avg_loss:>8.4f} {avg_ce:>8.4f} {avg_centroid:>8.4f} {avg_radial:>8.4f} '
+            f'{total_instances:>6d} {crop_size:>5d} {bpq:>8.4f} {bsq:>8.4f} {bdq:>8.4f} {lr_str:>10s}{star}'
         )
 
         if bpq > best_bpq:
@@ -338,7 +341,6 @@ def train_lsp(
                 },
                 out_dir / 'best.pt',
             )
-            _logger.info('%10s ⭐ New best bPQ=%.4f', '', bpq)
 
         if epoch % 20 == 0:
             torch.save(
