@@ -13,7 +13,7 @@ from torch.nn.attention.flex_attention import (
     create_block_mask,
     flex_attention,
 )
-from torch.nn.utils.parametrizations import orthogonal
+from torch.nn.init import orthogonal_
 
 
 # ---------------------------------------------------------------------------
@@ -25,7 +25,8 @@ class CayleySTRING(nn.Module):
         super().__init__()
         freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
         self.freqs = nn.Parameter(repeat(freqs, "d -> p d", p=pos_dim).clone())
-        self.P = orthogonal(nn.Linear(dim, dim, bias=False), orthogonal_map="cayley")
+        self.P = nn.Linear(dim, dim, bias=False)
+        orthogonal_(self.P.weight)
 
     @torch.autocast("cuda", enabled=False)
     def forward(self, x: Tensor, positions: Tensor) -> Tensor:
