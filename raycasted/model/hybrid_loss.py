@@ -127,14 +127,11 @@ class HybridSetCriterion(nn.Module):
         self.n_rays = n_rays
         self.crop_size = crop_size
 
-    def _focal_loss(self, logits, targets, matched):
-        alpha = self.focal_alpha
-        gamma = self.focal_gamma
-        src_logits = logits
-        num_classes = src_logits.shape[-1]
-        device = src_logits.device
+    def _cls_loss(self, logits, targets, matched):
+        num_classes = logits.shape[-1]
+        device = logits.device
 
-        tgt_classes = torch.full(src_logits.shape[:2], num_classes - 1, dtype=torch.int64, device=device)
+        tgt_classes = torch.full(logits.shape[:2], num_classes - 1, dtype=torch.int64, device=device)
 
         for b, (pred_idx, tgt_idx) in enumerate(matched):
             if len(tgt_idx) == 0:
@@ -147,15 +144,7 @@ class HybridSetCriterion(nn.Module):
             valid = matched_labels < num_classes - 1
             tgt_classes[b, pred_idx[valid]] = matched_labels[valid]
 
-        tgt_one_hot = F.one_hot(tgt_classes, num_classes).type_as(src_logits)
-
-        prob = src_logits.sigmoid()
-        ce_loss = F.binary_cross_entropy_with_logits(src_logits, tgt_one_hot, reduction='none')
-        p_t = prob * tgt_one_hot + (1 - prob) * (1 - tgt_one_hot)
-        modulating = (1 - p_t) ** gamma
-        alpha_weight = tgt_one_hot * alpha + (1 - tgt_one_hot) * (1 - alpha)
-        loss = (alpha_weight * modulating * ce_loss).mean()
-        return loss
+        return F.cross_entropy(logits.flatten(0, 1), tgt_classes.flatten(0, 1))
 
     def _centroid_loss(self, points, targets, matched):
         total_loss = torch.tensor(0.0, device=points.device, dtype=points.dtype)
@@ -201,7 +190,7 @@ class HybridSetCriterion(nn.Module):
         _crop_size = crop_size or self.crop_size
         matched = self.matcher(outputs, targets, crop_size=_crop_size)
         loss_dict = {
-            'loss_ce': self._focal_loss(outputs['pred_logits'], targets, matched),
+            'loss_ce': self._cls_loss(outputs['pred_logits'], targets, matched),
             'loss_centroid': self._centroid_loss(outputs['pred_points'], targets, matched),
             'loss_radial': self._radial_loss(outputs['pred_radial'], outputs['pred_points'], targets, matched),
         }
@@ -210,7 +199,7 @@ class HybridSetCriterion(nn.Module):
         if 'aux_outputs' in outputs:
             for aux in outputs['aux_outputs']:
                 aux_matched = self.matcher(aux, targets, crop_size=_crop_size)
-                total_loss = total_loss + self._focal_loss(
+                total_loss = total_loss + self._cls_loss(
                     aux['pred_logits'], targets, aux_matched
                 ) * self.weight_dict.get('loss_ce', 1.0)
                 total_loss = total_loss + self._centroid_loss(

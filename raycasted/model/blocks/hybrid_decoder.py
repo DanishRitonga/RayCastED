@@ -360,8 +360,9 @@ class HybridRayCastDecoder(nn.Module):
 
     def _init_weights(self):
         prior_prob = 0.01
-        bias_value = -math.log((1 - prior_prob) / prior_prob)
-        nn.init.constant_(self.class_head.bias, bias_value)
+        nn.init.zeros_(self.class_head.bias)
+        with torch.no_grad():
+            self.class_head.bias[-1] = math.log((1 - prior_prob) / prior_prob)
 
         for head_layer in self.point_head:
             last_linear = (
