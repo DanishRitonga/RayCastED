@@ -22,6 +22,7 @@ API (used by pipeline.py):
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import math
 from pathlib import Path
@@ -213,8 +214,22 @@ def train_lsp(
     for p in model.backbone.parameters():
         p.requires_grad_(False)
 
-    decoder_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.AdamW(decoder_params, lr=lr, weight_decay=wd)
+    decay_p, no_decay_p = [], []
+    for n, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.ndim <= 1 or 'norm' in n.lower():
+            no_decay_p.append(p)
+        else:
+            decay_p.append(p)
+
+    pgs = []
+    if decay_p:
+        pgs.append({'params': decay_p, 'weight_decay': wd, 'lr': lr, 'name': 'decoder'})
+    if no_decay_p:
+        pgs.append({'params': no_decay_p, 'weight_decay': 0.0, 'lr': lr, 'name': 'decoder'})
+
+    optimizer = torch.optim.AdamW(pgs)
     scaler = torch.amp.GradScaler('cuda')
 
     start_epoch = 0
@@ -233,27 +248,64 @@ def train_lsp(
     _gpu_mem = '0G'
     _header_printed = False
 
+    csv_path = out_dir / 'results.csv'
+    csv_exists = csv_path.exists()
+
+    with open(csv_path, 'a', newline='') as csv_file:
+        csv_writer = csv.writer(csv_file)
+        if not csv_exists:
+            csv_writer.writerow(
+                [
+                    'epoch',
+                    'train/loss',
+                    'train/ce',
+                    'train/centroid',
+                    'train/radial',
+                    'val/bPQ',
+                    'val/bSQ',
+                    'val/bDQ',
+                    'lr',
+                ]
+            )
+
     for epoch in range(start_epoch, epochs):
         _lr = _get_lr(epoch, warmup, epochs, lr)
         for pg in optimizer.param_groups:
-            btn_name = pg.get('name', '')
-            pg['lr'] = _lr * backbone_lr_ratio if btn_name == 'backbone' else _lr
+            pg['lr'] = _lr * backbone_lr_ratio if 'backbone' in pg.get('name', '') else _lr
 
         if epoch == freeze_epochs and not backbone_unfrozen:
-            already = any(pg.get('name') == 'backbone' for pg in optimizer.param_groups)
+            already = any('backbone' in pg.get('name', '') for pg in optimizer.param_groups)
             if not already:
                 for p in model.backbone.parameters():
                     p.requires_grad_(True)
                 n_bbn = sum(p.numel() for p in model.backbone.parameters())
                 _logger.info('Unfreezing backbone (%.1fM params) at epoch %d', n_bbn / 1e6, epoch)
-                optimizer.add_param_group(
-                    {
-                        'params': model.backbone.parameters(),
-                        'lr': _lr * backbone_lr_ratio,
-                        'weight_decay': wd,
-                        'name': 'backbone',
-                    }
-                )
+
+                bbn_decay, bbn_nodecay = [], []
+                for n, p in model.backbone.named_parameters():
+                    if p.ndim <= 1 or 'norm' in n.lower():
+                        bbn_nodecay.append(p)
+                    else:
+                        bbn_decay.append(p)
+
+                if bbn_decay:
+                    optimizer.add_param_group(
+                        {
+                            'params': bbn_decay,
+                            'weight_decay': wd,
+                            'lr': _lr * backbone_lr_ratio,
+                            'name': 'backbone',
+                        }
+                    )
+                if bbn_nodecay:
+                    optimizer.add_param_group(
+                        {
+                            'params': bbn_nodecay,
+                            'weight_decay': 0.0,
+                            'lr': _lr * backbone_lr_ratio,
+                            'name': 'backbone',
+                        }
+                    )
             backbone_unfrozen = True
 
         model.train()
@@ -298,8 +350,10 @@ def train_lsp(
             n_batches += 1
 
             train_pbar.set_postfix(
-                loss=f'{loss.item():.3f}', ce=f'{loss_items[0].item():.3f}',
-                cent=f'{loss_items[1].item():.3f}', rad=f'{loss_items[2].item():.3f}',
+                loss=f'{loss.item():.3f}',
+                ce=f'{loss_items[0].item():.3f}',
+                cent=f'{loss_items[1].item():.3f}',
+                rad=f'{loss_items[2].item():.3f}',
             )
 
         _gpu_mem = f'{torch.cuda.max_memory_reserved(_device) / 1e9:.1f}G' if _device.type == 'cuda' else '0G'
@@ -321,7 +375,7 @@ def train_lsp(
         bpq, bsq, bdq = val_m['bPQ'], val_m['bSQ'], val_m['bDQ']
 
         lr_dec = optimizer.param_groups[0]['lr']
-        lr_bbn = next((pg['lr'] for pg in optimizer.param_groups if pg.get('name') == 'backbone'), 0.0)
+        lr_bbn = next((pg['lr'] for pg in optimizer.param_groups if 'backbone' in pg.get('name', '')), 0.0)
         lr_str = f'dec={lr_dec:.2e}' if lr_bbn == 0 else f'dec={lr_dec:.2e}/bbn={lr_bbn:.2e}'
 
         star = ' ⭐' if bpq > best_bpq else ''
@@ -329,6 +383,21 @@ def train_lsp(
             f'{epoch:>6d} {_gpu_mem:>5s} {avg_loss:>8.4f} {avg_ce:>8.4f} {avg_centroid:>8.4f} {avg_radial:>8.4f} '
             f'{total_instances:>6d} {crop_size:>5d} {bpq:>8.4f} {bsq:>8.4f} {bdq:>8.4f} {lr_str:>10s}{star}'
         )
+
+        with open(csv_path, 'a', newline='') as csv_file:
+            csv.writer(csv_file).writerow(
+                [
+                    epoch,
+                    avg_loss,
+                    avg_ce,
+                    avg_centroid,
+                    avg_radial,
+                    bpq,
+                    bsq,
+                    bdq,
+                    lr_dec,
+                ]
+            )
 
         if bpq > best_bpq:
             best_bpq = bpq
