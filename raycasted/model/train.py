@@ -1028,15 +1028,22 @@ class RayCastTrainer(DetectionTrainer):
         return batch
 
     def setup_model(self):
-        """Patch LSP-DETR checkpoint attributes before Ultralytics setup_model."""
-        ckpt = self.model
+        """Patch old LSP-DETR checkpoints before Ultralytics setup_model."""
+        ckpt_path = self.model if isinstance(self.model, str) else None
         from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
 
-        if isinstance(ckpt, LSPDetrDetectionModel):
-            if not hasattr(ckpt, 'yaml'):
-                ckpt.yaml = {'nc': ckpt.nc, 'head': [[[2, 4, 8], 1, 'LSPDetrModel', ['nc', 64]]]}
-            if not hasattr(ckpt, 'end2end'):
-                ckpt.end2end = False
+        if ckpt_path and ckpt_path.endswith('.pt'):
+            try:
+                ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+                model = ckpt.get('model', ckpt) if isinstance(ckpt, dict) else ckpt
+                if isinstance(model, LSPDetrDetectionModel):
+                    if not hasattr(model, 'yaml'):
+                        model.yaml = {'nc': model.nc, 'head': [[[2, 4, 8], 1, 'LSPDetrModel', ['nc', 64]]]}
+                    if not hasattr(model, 'end2end'):
+                        model.end2end = False
+                    torch.save(ckpt, ckpt_path)
+            except Exception:
+                pass
         return super().setup_model()
 
     def set_model_attributes(self):
