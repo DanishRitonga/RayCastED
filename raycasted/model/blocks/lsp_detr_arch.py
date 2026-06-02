@@ -15,6 +15,8 @@ from torch.nn.attention.flex_attention import (
 )
 from torch.nn.init import orthogonal_
 
+flex_attention = torch.compile(flex_attention, dynamic=True)
+
 
 # ---------------------------------------------------------------------------
 #  CayleySTRING PE
