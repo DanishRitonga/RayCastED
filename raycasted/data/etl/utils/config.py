@@ -68,6 +68,7 @@ class TrainingSettings(BaseModel):
     # Backbone freeze (hybrid decoder only) — freeze backbone now, unfreeze after N epochs.
     # LSP-DETR freezes for 30 epochs so the decoder learns query specialization first.
     backbone_freeze_epochs: int = 0  # 0 = never freeze, 30 = recommended for hybrid
+    backbone_lr_ratio: float = 0.1  # LR ratio for backbone after unfreeze (LSP-DETR=0.1)
 
     pretrained: bool = False  # load pretrained backbone weights (hybrid requires True)
 
