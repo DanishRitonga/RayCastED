@@ -254,4 +254,7 @@ class LSPDetrDetectionModel(nn.Module):
     def forward(self, x, *args, **kwargs):
         if isinstance(x, dict):
             return self.loss(x)
+        if not self.training:
+            with torch.no_grad(), torch.amp.autocast('cuda', enabled=False):
+                return self.predict(x)
         return self.predict(x)
