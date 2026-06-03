@@ -15,6 +15,23 @@ def _decode_pil_to_numpy(batch):
     return batch
 
 
+def load_pannuke_folds(data_paths: list[str], folds: list[int] | None = None) -> Dataset:
+    """Load PanNuke parquet files, optionally filtering by fold."""
+    import re
+    from pathlib import Path
+
+    datasets_list = []
+    for p in data_paths:
+        ds = Dataset.from_parquet(p)
+        match = re.search(r'fold(\d+)', Path(p).name)
+        if match is None:
+            raise ValueError(f'Cannot extract fold from filename: {p}')
+        fold_num = int(match[1])
+        if folds is None or fold_num in folds:
+            datasets_list.append(ds)
+    return concatenate_datasets(datasets_list) if datasets_list else Dataset.from_dict({})
+
+
 class LSPDataset(torch.utils.data.Dataset[tuple[Tensor, dict]]):
     """PanNuke dataset for LSP-DETR training with GPU augmentation.
 
