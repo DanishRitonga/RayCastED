@@ -42,33 +42,24 @@ class LSPCollateFn:
             padded_masks = padded_masks.clamp(0, 1)
             padded_masks = (padded_masks > 0.5).float()
 
-        # Batch star_distances: one call for entire batch
-        from stardist import star_distances
-        import numpy as np
+        # GPU star_distances: one call per image in the batch
+        from .star_distances_triton import star_distances_triton
 
-        counts = [len(t['labels']) for t in targets]
-        has_any = [n for n in counts if n > 0]
-        if has_any:
-            all_masks = np.concatenate(
-                [padded_masks[i, : counts[i]].cpu().numpy().astype(np.uint8) for i in range(B) if counts[i] > 0],
-                axis=0,
-            )
-            lower_bound, upper_bound = star_distances(all_masks, self.n_rays)
-            if not self.allow_overlaps:
-                upper_bound = lower_bound
-            all_radial = np.stack((lower_bound, upper_bound), axis=0)
-
-            offset = 0
-            for i, t in enumerate(targets):
-                n = counts[i]
-                if n == 0:
-                    t['radial_distances'] = torch.zeros(2, self.n_rays, H, W)
-                    t['centroids'] = torch.empty(0, 2)
-                else:
-                    t['radial_distances'] = torch.from_numpy(all_radial[:, offset : offset + n]).float()
-                    t['centroids'] = masks2centroids(padded_masks[i, :n], normalize=True)
-                    offset += n
+        for i, t in enumerate(targets):
+            n = len(t['labels'])
+            if n == 0:
+                t['radial_distances'] = torch.zeros(2, self.n_rays, H, W, device=device)
+                t['centroids'] = torch.empty(0, 2, device=device)
                 t['labels'] = t['labels'].to(device)
+                continue
+
+            masks_i = padded_masks[i, :n]
+            lower, upper = star_distances_triton(masks_i, self.n_rays)
+            if not self.allow_overlaps:
+                upper = lower
+            t['radial_distances'] = torch.stack([lower, upper], dim=0)
+            t['centroids'] = masks2centroids(masks_i, normalize=True)
+            t['labels'] = t['labels'].to(device)
         else:
             for t in targets:
                 t['radial_distances'] = torch.zeros(2, self.n_rays, H, W)
