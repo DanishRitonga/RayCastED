@@ -108,15 +108,14 @@ def _validate(
                 continue
 
             # Grid-sample upper-bound rays at GT centroid positions
-            # gt_radial: (2, n_rays, H, W), centroids: (N, 2) normalized [0,1]
             grid = gt_centroids.to(device) * 2 - 1  # (N, 2) → [-1, 1]
             grid = grid.view(1, -1, 1, 2)  # (1, N, 1, 2)
-            gr = gt_radial.to(device).float()  # (2, n_rays, H, W)
+            gr = gt_radial[1:2].to(device).float()  # (1, n_rays, H, W) — upper bound only
             sampled = torch.nn.functional.grid_sample(
-                gr[1:2], grid, mode='bilinear', align_corners=False
+                gr, grid, mode='bilinear', align_corners=False, padding_mode='border'
             )  # (1, n_rays, 1, N)
             sampled = sampled.squeeze(0).squeeze(2).t()  # (N, n_rays)
-            gt_rays_px = sampled
+            gt_rays_px = sampled.clamp(min=1.0)
 
             n_pred = pred_bboxes.shape[0]
             n_gt = len(gt_labels)
