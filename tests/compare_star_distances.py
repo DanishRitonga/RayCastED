@@ -53,12 +53,12 @@ def test_single_instance(name, mask_fn, h=64, w=64):
     triton_lower_np = triton_lower.cpu().numpy()
     triton_upper_np = triton_upper.cpu().numpy()
 
-    lower_diff = np.abs(rust_lower[0] - triton_lower_np.reshape(32, h, w)[0])
-    upper_diff = np.abs(rust_upper[0] - triton_upper_np.reshape(32, h, w)[0])
+    lower_diff = np.abs(rust_lower[0] - triton_lower_np)
+    upper_diff = np.abs(rust_upper[0] - triton_upper_np)
 
     inside = mask > 0
-    lower_err_inside = lower_diff[inside].mean() if inside.any() else 0.0
-    upper_err_inside = upper_diff[inside].mean() if inside.any() else 0.0
+    lower_err_inside = lower_diff[:, inside].mean() if inside.any() else 0.0
+    upper_err_inside = upper_diff[:, inside].mean() if inside.any() else 0.0
     lower_max = lower_diff.max()
     upper_max = upper_diff.max()
 
@@ -92,15 +92,15 @@ def test_multi_instance(name, masks_fn, h=64, w=64):
     torch.cuda.synchronize()
     triton_time = (time.perf_counter() - t0) * 1000
 
-    triton_lower_np = triton_lower.cpu().numpy().reshape(32, h, w)
-    triton_upper_np = triton_upper.cpu().numpy().reshape(32, h, w)
+    triton_lower_np = triton_lower.cpu().numpy()
+    triton_upper_np = triton_upper.cpu().numpy()
 
     lower_diff = np.abs(rust_lower[0] - triton_lower_np)
     upper_diff = np.abs(rust_upper[0] - triton_upper_np)
 
     any_mask = masks.sum(axis=0) > 0
-    lower_err = lower_diff[any_mask].mean() if any_mask.any() else 0.0
-    upper_err = upper_diff[any_mask].mean() if any_mask.any() else 0.0
+    lower_err = lower_diff[:, any_mask].mean() if any_mask.any() else 0.0
+    upper_err = upper_diff[:, any_mask].mean() if any_mask.any() else 0.0
     lower_max = lower_diff.max()
     upper_max = upper_diff.max()
 

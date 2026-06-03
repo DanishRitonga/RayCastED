@@ -3,8 +3,6 @@
 Replaces the Rust star_distances module for training (kept for eval).
 Computes (2, n_rays, H, W) distance maps from binary instance masks
 entirely on GPU with zero CPU round-trips.
-
-Algorithm: pixel-walking ray cast from every mask pixel in every direction.
 """
 
 from __future__ import annotations
@@ -19,80 +17,65 @@ import triton.language as tl
 def _distance_transform_kernel(
     mask_ptr,
     out_ptr,
-    cos_ptr,
-    sin_ptr,
+    cos_val: tl.constexpr,
+    sin_val: tl.constexpr,
+    ray_idx: tl.constexpr,
     H: tl.constexpr,
     W: tl.constexpr,
-    n_rays: tl.constexpr,
-    STEP_SIZE: tl.constexpr,
+    MAX_STEPS: tl.constexpr,
     TILE_H: tl.constexpr,
     TILE_W: tl.constexpr,
-    RAYS_PER_BLOCK: tl.constexpr,
 ):
-    MAX_STEPS: tl.constexpr = 400
+    """Ray-cast distance from each pixel to mask boundary for ONE ray angle.
+
+    Grid: (tiles_h * tiles_w,)  — one block per (TILE_H, TILE_W) tile.
+    Each thread walks along (cos_val, sin_val) until boundary.
+    """
     pid = tl.program_id(0)
     tiles_per_row = (H + TILE_H - 1) // TILE_H
-    num_ray_groups = (n_rays + RAYS_PER_BLOCK - 1) // RAYS_PER_BLOCK
-
-    ray_grp = pid % num_ray_groups
-    tile_idx = pid // num_ray_groups
-    tile_h = tile_idx // tiles_per_row
-    tile_w = tile_idx % tiles_per_row
+    tile_h = pid // tiles_per_row
+    tile_w = pid % tiles_per_row
 
     h_base = tile_h * TILE_H
     w_base = tile_w * TILE_W
 
-    off_h = tl.arange(0, TILE_H)[:, None, None]
-    off_w = tl.arange(0, TILE_W)[None, :, None]
-    off_r = tl.arange(0, RAYS_PER_BLOCK)[None, None, :]
+    off_h = tl.arange(0, TILE_H)
+    off_w = tl.arange(0, TILE_W)
+    h = h_base + off_h[:, None]
+    w = w_base + off_w[None, :]
 
-    h = h_base + off_h
-    w = w_base + off_w
-    r = ray_grp * RAYS_PER_BLOCK + off_r
-
-    h_mask = (h < H)[:, :, :]
-    w_mask = (w < W)[:, :, :]
-    r_mask = (r < n_rays)[:, :, :]
-    valid = h_mask & w_mask
-
+    valid = (h < H) & (w < W)
     flat_idx = h * W + w
     mask_val = tl.load(mask_ptr + flat_idx, mask=valid, other=0.0)
     is_inside = mask_val > 0.0
 
-    cos = tl.load(cos_ptr + r, mask=r_mask, other=0.0)
-    sin = tl.load(sin_ptr + r, mask=r_mask, other=0.0)
-
-    dist = tl.zeros([TILE_H, TILE_W, RAYS_PER_BLOCK], dtype=tl.float32)
-
-    for step in range(1, MAX_STEPS + 1):
-        cur_h = h + step * STEP_SIZE * sin
-        cur_w = w + step * STEP_SIZE * cos
-        cur_h_int = cur_h.to(tl.int32)
-        cur_w_int = cur_w.to(tl.int32)
+    best_dist = tl.zeros([TILE_H, TILE_W], dtype=tl.float32)
+    for step in tl.static_range(1, MAX_STEPS + 1):
+        cur_h_f = (h_base + off_h[:, None]).to(tl.float32) + step.to(tl.float32) * sin_val
+        cur_w_f = (w_base + off_w[None, :]).to(tl.float32) + step.to(tl.float32) * cos_val
+        cur_h_int = tl.math.floor(cur_h_f).to(tl.int32)
+        cur_w_int = tl.math.floor(cur_w_f).to(tl.int32)
         in_bounds = (cur_h_int >= 0) & (cur_h_int < H) & (cur_w_int >= 0) & (cur_w_int < W)
         cur_idx = cur_h_int * W + cur_w_int
         boundary_val = tl.load(mask_ptr + cur_idx, mask=valid & in_bounds, other=0.0)
-        hit = is_inside & (boundary_val == 0.0) & (dist == 0.0)
-        dist_val = (step - 1) * STEP_SIZE
-        dist = tl.where(hit, dist_val, dist)
+        hit = is_inside & (boundary_val == 0.0) & (best_dist == 0.0)
+        dist_val = (step - 1).to(tl.float32)
+        best_dist = tl.where(hit, dist_val, best_dist)
 
-    dist = tl.where(is_inside & (dist == 0.0), float(MAX_STEPS) * STEP_SIZE, dist)
-
-    out_idx = r * H * W + h * W + w
-    tl.store(out_ptr + out_idx, dist, mask=valid & r_mask)
+    best_dist = tl.where(is_inside & (best_dist == 0.0), MAX_STEPS.to(tl.float32), best_dist)
+    out_idx = ray_idx * H * W + h * W + w
+    tl.store(out_ptr + out_idx, best_dist, mask=valid)
 
 
 def star_distances_triton(
     masks: torch.Tensor,
     n_rays: int,
-    step_size: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """GPU star distance transform from binary instance masks.
 
     Args:
-        masks: (N, H, W) float32 tensor, binary [0/1].
+        masks: (N, H, W) float32 tensor, binary [0/1] or {0, 1}.
         n_rays: Number of radial rays.
-        step_size: Pixel step size for ray walking (1.0 = 1px accuracy).
 
     Returns:
         lower: (n_rays, H, W) float32 — tight instance-level lower bound.
@@ -108,32 +91,30 @@ def star_distances_triton(
     device = masks.device
 
     angles = torch.linspace(0, 2 * math.pi, n_rays + 1, device=device)[:n_rays]
-    cos_rays = torch.cos(angles)
-    sin_rays = torch.sin(angles)
 
     TILE_H = 16
     TILE_W = 16
-    RAYS_PER_BLOCK = 4
-    MAX_STEPS = 400  # enough for 256×256 diagonal with 1px step
-    num_tiles = ((H + TILE_H - 1) // TILE_H) * ((W + TILE_W - 1) // TILE_W)
-    num_ray_groups = (n_rays + RAYS_PER_BLOCK - 1) // RAYS_PER_BLOCK
-    grid = (num_tiles * num_ray_groups,)
+    MAX_STEPS = 400
+    tiles_per_row = (H + TILE_H - 1) // TILE_H
+    tiles_per_col = (W + TILE_W - 1) // TILE_W
+    grid = (tiles_per_row * tiles_per_col,)
 
     def _run_kernel(mask: torch.Tensor) -> torch.Tensor:
         out = torch.zeros(n_rays, H, W, dtype=torch.float32, device=device)
-        _distance_transform_kernel[grid](
-            mask,
-            out,
-            cos_rays,
-            sin_rays,
-            H,
-            W,
-            n_rays,
-            step_size,
-            TILE_H,
-            TILE_W,
-            RAYS_PER_BLOCK,
-        )
+        for r in range(n_rays):
+            angle = angles[r]
+            _distance_transform_kernel[grid](
+                mask,
+                out,
+                math.cos(angle.item()),
+                math.sin(angle.item()),
+                r,
+                H,
+                W,
+                MAX_STEPS,
+                TILE_H,
+                TILE_W,
+            )
         return out
 
     any_mask = masks.any(dim=0).float()
