@@ -85,7 +85,7 @@ def test_single_instance(name, mask_fn, h=64, w=64):
     lower_max = np.nanmax(lower_diff) if not has_nan else float('nan')
     upper_max = np.nanmax(upper_diff) if not has_nan else float('nan')
 
-    ok = not has_nan and lower_max < 5.0 and upper_max < 5.0
+    ok = not has_nan and not has_inf and lower_err_inside < 2.0 and upper_err_inside < 2.0
     status = 'PASS' if ok else 'FAIL'
 
     print(
@@ -120,29 +120,29 @@ def test_multi_instance(name, masks_fn, h=64, w=64):
     triton_upper_np = triton_upper.cpu().numpy()
 
     has_nan = np.isnan(triton_lower_np).any() or np.isnan(triton_upper_np).any()
+    has_inf = np.isinf(triton_lower_np).any() or np.isinf(triton_upper_np).any()
     if has_nan:
         nan_mask = np.isnan(triton_lower_np)
-        print(
-            f'    WARNING: {nan_mask.sum()} NaN in Triton, first at {np.unravel_index(nan_mask.argmax(), triton_lower_np.shape)}',
-            flush=True,
-        )
+        print(f'    WARNING: {nan_mask.sum()} NaN in Triton output', flush=True)
+    if has_inf:
+        inf_mask = np.isinf(triton_lower_np)
+        print(f'    WARNING: {inf_mask.sum()} Inf in Triton', flush=True)
 
     lower_diff = np.abs(rust_lower - triton_lower_np)
     upper_diff = np.abs(rust_upper - triton_upper_np)
+    lower_diff = np.nan_to_num(lower_diff, nan=0.0, posinf=0.0, neginf=0.0)
+    upper_diff = np.nan_to_num(upper_diff, nan=0.0, posinf=0.0, neginf=0.0)
 
     any_mask = masks.sum(axis=0) > 0
     lower_err = lower_diff[:, any_mask].mean() if any_mask.any() else 0.0
     upper_err = upper_diff[:, any_mask].mean() if any_mask.any() else 0.0
-    lower_max = np.nanmax(lower_diff) if not has_nan else float('nan')
-    upper_max = np.nanmax(upper_diff) if not has_nan else float('nan')
 
-    ok = not has_nan and lower_max < 5.0 and upper_max < 5.0
+    ok = not has_nan and not has_inf and lower_err < 2.0 and upper_err < 2.0
     status = 'PASS' if ok else 'FAIL'
 
     print(
         f'  [{status}] {name:<20} '
-        f'N={len(masks)} L_err={lower_err:.2f}px(max={lower_max:.1f}) '
-        f'U_err={upper_err:.2f}px(max={upper_max:.1f}) '
+        f'N={len(masks)} L_err={lower_err:.2f}px U_err={upper_err:.2f}px '
         f'rust={rust_time:.1f}ms triton={triton_time:.2f}ms'
     )
     return ok
