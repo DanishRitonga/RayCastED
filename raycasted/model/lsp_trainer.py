@@ -166,12 +166,19 @@ def train_lsp(
     crop_size: int = 256,
     conf: float = 0.25,
     resume: str | None = None,
-    workers: int = 4,
+    workers: int = 8,
     seed: int = 42,
     device: torch.device | str = 'cuda',
     allow_overlaps: bool = True,
 ) -> None:
     """Train LSP-DETR model on PanNuke using exact LSP-DETR recipe."""
+    import os
+
+    os.environ.setdefault('RAYON_NUM_THREADS', '1')
+    import cv2
+
+    cv2.setNumThreads(0)  # noqa: F811
+
     torch.manual_seed(seed)
     np.random.seed(seed)
     from glob import glob
@@ -227,6 +234,8 @@ def train_lsp(
         num_workers=workers,
         pin_memory=True,
         drop_last=True,
+        persistent_workers=workers > 0,
+        prefetch_factor=4 if workers > 0 else None,
     )
     val_loader = DataLoader(
         val_ds,
@@ -465,7 +474,7 @@ def main():  # noqa: D103
     parser.add_argument('--crop-size', type=int, default=256)
     parser.add_argument('--conf', type=float, default=0.25)
     parser.add_argument('--resume')
-    parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--workers', type=int, default=8)
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
