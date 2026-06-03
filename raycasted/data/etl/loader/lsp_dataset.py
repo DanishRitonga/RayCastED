@@ -5,29 +5,14 @@ import torch
 from datasets import Dataset, concatenate_datasets
 from torch import Tensor
 
-from .masks2centroids import masks2centroids
 
+def _decode_pil_to_numpy(batch):
+    """Dataset transform: pre-decode PIL images/masks to numpy arrays."""
+    import numpy as np
 
-def load_pannuke_folds(data_paths: list[str], folds: list[int] | None = None) -> Dataset:
-    """Load PanNuke parquet files, optionally filtering by fold.
-
-    Each parquet file must have columns: image (RGB bytes), instances (list of mask bytes),
-    categories (list of int labels), tissue (int). Fold is extracted from the
-    filename pattern 'fold{N}-...parquet'.
-    """
-    import re
-    from pathlib import Path
-
-    datasets_list = []
-    for p in data_paths:
-        ds = Dataset.from_parquet(p)
-        match = re.search(r'fold(\d+)', Path(p).name)
-        if match is None:
-            raise ValueError(f'Cannot extract fold from filename: {p}')
-        fold_num = int(match[1])
-        if folds is None or fold_num in folds:
-            datasets_list.append(ds)
-    return concatenate_datasets(datasets_list) if datasets_list else Dataset.from_dict({})
+    batch['image'] = [np.array(img, dtype=np.float32) for img in batch['image']]
+    batch['instances'] = [[np.array(mask, dtype=np.float32) for mask in masks] for masks in batch['instances']]
+    return batch
 
 
 class LSPDataset(torch.utils.data.Dataset[tuple[Tensor, dict]]):
@@ -43,15 +28,7 @@ class LSPDataset(torch.utils.data.Dataset[tuple[Tensor, dict]]):
         data: Dataset,
         n_rays: int = 64,
     ) -> None:
-        # Pre-decode PIL images to numpy arrays (cached on first access)
-        import numpy as np
-
-        def _decode_to_numpy(batch):
-            batch['image'] = [np.array(img, dtype=np.float32) for img in batch['image']]
-            batch['instances'] = [[np.array(mask, dtype=np.float32) for mask in masks] for masks in batch['instances']]
-            return batch
-
-        data.set_transform(_decode_to_numpy, columns=['image', 'instances'], output_all_columns=True)
+        data.set_transform(_decode_pil_to_numpy, columns=['image', 'instances'], output_all_columns=True)
         self.data = data
         self.n_rays = n_rays
 
