@@ -9,7 +9,7 @@ from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
 
 def test_backbone_unfreeze():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Device: {device}')
+    print(f'Device: {device}', flush=True)
     nc = 5
     n_rays = 64
     crop_size = 256
@@ -17,12 +17,13 @@ def test_backbone_unfreeze():
     freeze_epochs = 30
     backbone_lr_ratio = 0.1
 
+    print('Creating model...', flush=True)
     model = LSPDetrDetectionModel(nc=nc, n_rays=n_rays, crop_size=crop_size).to(device)
-    model = torch.compile(model, dynamic=True)
+    print('Model created.', flush=True)
 
     total_params = sum(p.numel() for p in model.parameters())
     bb_params = sum(p.numel() for p in model.backbone.parameters())
-    print(f'Total params: {total_params / 1e6:.2f}M, Backbone: {bb_params / 1e6:.2f}M')
+    print(f'Total params: {total_params / 1e6:.2f}M, Backbone: {bb_params / 1e6:.2f}M', flush=True)
 
     # Freeze backbone (as done at init)
     for p in model.backbone.parameters():
@@ -30,9 +31,9 @@ def test_backbone_unfreeze():
 
     frozen_count = sum(1 for p in model.parameters() if not p.requires_grad)
     trainable_count = sum(1 for p in model.parameters() if p.requires_grad)
-    print(f'\n=== BEFORE UNFREEZE ===')
-    print(f'Frozen params: {frozen_count}, Trainable params: {trainable_count}')
-    print(f'Backbone trainable: {any(p.requires_grad for p in model.backbone.parameters())}')
+    print(f'\n=== BEFORE UNFREEZE ===', flush=True)
+    print(f'Frozen params: {frozen_count}, Trainable params: {trainable_count}', flush=True)
+    print(f'Backbone trainable: {any(p.requires_grad for p in model.backbone.parameters())}', flush=True)
 
     # Optimizer with decoder-only params (matches trainer init)
     wd = 1e-4
@@ -53,11 +54,10 @@ def test_backbone_unfreeze():
         pgs.append({'params': no_decay_p, 'weight_decay': 0.0, 'lr': lr, 'name': 'decoder'})
 
     optimizer = torch.optim.AdamW(pgs)
-    scaler = torch.amp.GradScaler('cuda')
-
-    print(f'\nOptimizer param groups: {len(pgs)}')
+    print(f'\nOptimizer param groups: {len(optimizer.param_groups)}', flush=True)
 
     # --- Synthetic batch ---
+    print('Creating synthetic batch...', flush=True)
     img = torch.rand(batch_size, 3, crop_size, crop_size, device=device) * 255
     H, W = crop_size, crop_size
     targets = []
@@ -75,21 +75,22 @@ def test_backbone_unfreeze():
         })
 
     # Forward + backward (simulate epoch > 0 but < freeze_epochs)
-    print(f'\n--- Forward pass (backbone frozen) ---')
+    print(f'\n--- Forward pass (backbone frozen) ---', flush=True)
     model.train()
-    with torch.amp.autocast('cuda'):
+    use_amp = device.type == 'cuda'
+    with torch.amp.autocast('cuda', enabled=use_amp):
         loss, loss_items = model.loss({'img': img, 'targets': targets})
-    print(f'Loss: {loss.item():.4f}, CE={loss_items[0]:.4f}, Cent={loss_items[1]:.4f}, Rad={loss_items[2]:.4f}')
+    print(f'Loss: {loss.item():.4f}, CE={loss_items[0]:.4f}, Cent={loss_items[1]:.4f}, Rad={loss_items[2]:.4f}', flush=True)
 
-    scaler.scale(loss).backward()
+    loss.backward()
     bb_grad_before = sum(
         p.grad is not None and p.grad.abs().sum().item() > 0 for p in model.backbone.parameters()
     )
-    print(f'Backbone params with non-zero grad: {bb_grad_before} (expected 0)')
+    print(f'Backbone params with non-zero grad: {bb_grad_before} (expected 0)', flush=True)
     optimizer.zero_grad()
 
     # --- Unfreeze backbone (simulate epoch >= freeze_epochs) ---
-    print(f'\n=== AFTER UNFREEZE (simulated epoch {freeze_epochs}) ===')
+    print(f'\n=== AFTER UNFREEZE (simulated epoch {freeze_epochs}) ===', flush=True)
     for p in model.backbone.parameters():
         p.requires_grad_(True)
 
@@ -109,27 +110,27 @@ def test_backbone_unfreeze():
             'params': bb_nodecay, 'weight_decay': 0.0, 'lr': lr * backbone_lr_ratio, 'name': 'backbone',
         })
 
-    print(f'Optimizer param groups after unfreeze: {len(optimizer.param_groups)}')
+    print(f'Optimizer param groups after unfreeze: {len(optimizer.param_groups)}', flush=True)
     for pg in optimizer.param_groups:
-        print(f'  {pg["name"]}: lr={pg["lr"]:.2e}, params={len(pg["params"])}')
+        print(f'  {pg["name"]}: lr={pg["lr"]:.2e}, params={len(pg["params"])}', flush=True)
 
     # Forward + backward after unfreeze
-    print(f'\n--- Forward pass (backbone unfrozen) ---')
+    print(f'\n--- Forward pass (backbone unfrozen) ---', flush=True)
     img2 = torch.rand(batch_size, 3, crop_size, crop_size, device=device) * 255
-    with torch.amp.autocast('cuda'):
+    with torch.amp.autocast('cuda', enabled=use_amp):
         loss2, loss_items2 = model.loss({'img': img2, 'targets': targets})
-    print(f'Loss: {loss2.item():.4f}, CE={loss_items2[0]:.4f}, Cent={loss_items2[1]:.4f}, Rad={loss_items2[2]:.4f}')
+    print(f'Loss: {loss2.item():.4f}, CE={loss_items2[0]:.4f}, Cent={loss_items2[1]:.4f}, Rad={loss_items2[2]:.4f}', flush=True)
 
-    scaler.scale(loss2).backward()
+    loss2.backward()
     bb_grad_after = sum(
         p.grad is not None and p.grad.abs().sum().item() > 0 for p in model.backbone.parameters()
     )
     total_bb = sum(1 for _ in model.backbone.parameters())
-    print(f'Backbone params with non-zero grad: {bb_grad_after}/{total_bb} (expected all non-zero)')
+    print(f'Backbone params with non-zero grad: {bb_grad_after}/{total_bb} (expected all non-zero)', flush=True)
 
     # Check no grad explosion
     max_grad = max(p.grad.abs().max().item() for p in model.parameters() if p.grad is not None)
-    print(f'Max gradient: {max_grad:.4f}')
+    print(f'Max gradient: {max_grad:.4f}', flush=True)
 
     # Verify param groups have correct LRs
     decoder_lr = optimizer.param_groups[0]['lr']
@@ -140,8 +141,8 @@ def test_backbone_unfreeze():
     assert abs(backbone_lr - lr * backbone_lr_ratio) < 1e-10, \
         f'Expected backbone lr={lr*backbone_lr_ratio}, got {backbone_lr}'
 
-    print(f'\nPASSED: Backbone unfreeze works correctly.')
-    print(f'  Decoder LR: {decoder_lr:.2e}, Backbone LR: {backbone_lr:.2e}')
+    print(f'\nPASSED: Backbone unfreeze works correctly.', flush=True)
+    print(f'  Decoder LR: {decoder_lr:.2e}, Backbone LR: {backbone_lr:.2e}', flush=True)
 
 
 if __name__ == '__main__':
