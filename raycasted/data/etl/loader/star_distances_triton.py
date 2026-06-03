@@ -64,7 +64,7 @@ def _distance_transform_kernel(
         in_bounds = (cur_h_int >= 0) & (cur_h_int < H) & (cur_w_int >= 0) & (cur_w_int < W)
         cur_idx = cur_h_int * W + cur_w_int
         boundary_val = tl.load(mask_ptr + cur_idx, mask=valid & in_bounds, other=0.0)
-        hit = is_inside & in_bounds & (boundary_val == 0.0) & (best_dist == 0.0)
+        hit = is_inside & (boundary_val == 0.0) & (best_dist == 0.0)
         best_dist = tl.where(hit, step.to(tl.float32) * step_size, best_dist)
 
     best_dist = tl.where(is_inside & (best_dist == 0.0), float(MAX_STEPS) * step_size, best_dist)
@@ -135,6 +135,7 @@ def star_distances_triton(
         if inst_mask.sum() == 0:
             continue
         inst_dist = _run_kernel(inst_mask)
+        inst_dist = torch.where(inst_mask.unsqueeze(0) > 0, inst_dist, torch.tensor(float('inf'), device=device))
         lower = torch.min(lower, inst_dist)
 
     lower = torch.where(torch.isinf(lower), torch.zeros_like(lower), lower)
