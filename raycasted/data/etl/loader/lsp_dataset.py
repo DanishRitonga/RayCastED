@@ -15,26 +15,22 @@ def load_pannuke_folds(data_paths: list[str], folds: list[int] | None = None) ->
     """Load PanNuke parquet files, optionally filtering by fold.
 
     Each parquet file must have columns: image (RGB bytes), instances (list of mask bytes),
-    categories (list of int labels), tissue (int or string). Fold is extracted from the
+    categories (list of int labels), tissue (int). Fold is extracted from the
     filename pattern 'fold{N}-...parquet'.
     """
+    import re
+    from pathlib import Path
+
     datasets_list = []
     for p in data_paths:
         ds = Dataset.from_parquet(p)
-        # Extract fold number from filename
-        import re
-        from pathlib import Path
-
         match = re.search(r'fold(\d+)', Path(p).name)
-        if match:
-            fold_num = int(match[1])
-            ds = ds.add_column('fold', [fold_num] * len(ds))
-        datasets_list.append(ds)
-    ds = concatenate_datasets(datasets_list)
-    if folds is not None:
-        folds_set = set(folds)
-        ds = ds.filter(lambda x: x['fold'] in folds_set)
-    return ds
+        if match is None:
+            raise ValueError(f'Cannot extract fold from filename: {p}')
+        fold_num = int(match[1])
+        if folds is None or fold_num in folds:
+            datasets_list.append(ds)
+    return concatenate_datasets(datasets_list) if datasets_list else Dataset.from_dict({})
 
 
 class LSPDataset(torch.utils.data.Dataset[tuple[Tensor, dict[str, Tensor]]]):
