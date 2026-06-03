@@ -49,7 +49,7 @@ class LSPCollateFn:
         counts = [len(t['labels']) for t in targets]
         has_any = [n for n in counts if n > 0]
         if has_any:
-            all_masks = torch.cat(
+            all_masks = np.concatenate(
                 [padded_masks[i, : counts[i]].cpu().numpy().astype(np.uint8) for i in range(B) if counts[i] > 0],
                 axis=0,
             )
