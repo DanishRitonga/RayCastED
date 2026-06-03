@@ -316,8 +316,11 @@ def train_lsp(
             )
 
     for epoch in range(start_epoch, epochs):
+        _lr = _get_lr(epoch, warmup, epochs)
+        for pg in optimizer.param_groups:
+            pg['lr'] = _lr * (backbone_lr_ratio if pg.get('name') == 'backbone' else 1.0)
+
         if not backbone_unfrozen and epoch >= freeze_epochs:
-            _lr = _get_lr(epoch, warmup, epochs)
             for p in model.backbone.parameters():
                 p.requires_grad_(True)
             bb_decay, bb_nodecay = [], []
