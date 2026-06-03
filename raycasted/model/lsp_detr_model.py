@@ -153,6 +153,8 @@ class LSPDetrDetectionModel(nn.Module):
         query_block_size: int = 14,
         crop_size: int = 256,
         backbone_name: str = 'facebook/convnextv2-nano-1k-224',
+        use_gnn: bool = False,
+        gnn_k: int = 8,
     ):
         super().__init__()
         self.nc = nc
@@ -186,6 +188,8 @@ class LSPDetrDetectionModel(nn.Module):
             feature_levels=(2, 1, 0, 2, 1, 0),
             self_sta_config=self_sta,
             cross_sta_config=cross_sta,
+            use_gnn=use_gnn,
+            gnn_k=gnn_k,
         )
 
         matcher = HybridHungarianMatcher(
