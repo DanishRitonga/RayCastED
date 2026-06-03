@@ -51,7 +51,7 @@ class LSPCollateFn:
             mask_sum = padded_masks[i, :n].sum(dim=(1, 2))
             keep = mask_sum > 0
             if not keep.all():
-                t['labels'] = t['labels'][keep]
+                t['labels'] = t['labels'][keep.cpu()]
                 t['masks'] = padded_masks[i, :n][keep]
 
         # Rebuild padded_masks with only surviving masks
