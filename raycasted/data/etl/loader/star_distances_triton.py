@@ -53,8 +53,8 @@ def _distance_transform_kernel(
 
     cur_y = (h_base + off_h[:, None]).to(tl.float32)
     cur_x = (w_base + off_w[None, :]).to(tl.float32)
-    dy = step_size * sin_val
-    dx = step_size * cos_val
+    dy = step_size * cos_val
+    dx = step_size * sin_val
 
     for step in range(1, MAX_STEPS + 1):
         cur_y = cur_y + dy
