@@ -11,13 +11,13 @@ Exact LSP-DETR hyperparameters:
 
 CLI:
     uv run python -m raycasted.model.lsp_trainer \
-        --train-fold 0 1 2 \
-        --val-fold 3 \
+        --train-fold 1 \
+        --val-fold 2 \
         --output runs/lsp_detr
 
 API (used by pipeline.py):
     from raycasted.model.lsp_trainer import train_lsp
-    train_lsp(train_fold=[0, 1, 2], val_fold=3, output_dir=...)
+    train_lsp(train_fold=[1], val_fold=2, output_dir=...)
 """
 
 from __future__ import annotations
@@ -26,7 +26,10 @@ import argparse
 import csv
 import logging
 import math
+import multiprocessing as _mp
 from pathlib import Path
+
+_mp.set_start_method('spawn', force=True)
 
 import numpy as np
 import torch
