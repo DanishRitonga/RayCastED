@@ -164,7 +164,15 @@ def train_lsp(
     np.random.seed(seed)
 
     _device = torch.device(device) if isinstance(device, str) else device
-    out_dir = Path(output_dir)
+    base = Path(output_dir)
+    base.mkdir(parents=True, exist_ok=True)
+    run_idx = 1
+    while True:
+        suffix = '' if run_idx == 1 else str(run_idx)
+        out_dir = base / f'train{suffix}'
+        if not out_dir.exists():
+            break
+        run_idx += 1
     out_dir.mkdir(parents=True, exist_ok=True)
 
     _logger.info('Device: %s', _device)
