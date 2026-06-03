@@ -28,7 +28,7 @@ class WeightedClassAndTissueSampler(WeightedRandomSampler):
     def get_sampling_weights_cell(
         self, classes: list[NDArray[np.uint8]], num_classes: int, gamma: float = 1
     ) -> NDArray[np.float64]:
-        binary_cell_counts = np.zeros((len(classes), num_classes), dtype=np.bool)
+        binary_cell_counts = np.zeros((len(classes), num_classes), dtype=bool)
 
         for i, arr in enumerate(classes):
             unique_classes = np.unique(arr)
