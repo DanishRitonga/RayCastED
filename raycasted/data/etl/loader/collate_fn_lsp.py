@@ -43,6 +43,26 @@ class LSPCollateFn:
             padded_masks = padded_masks.clamp(0, 1)
             padded_masks = (padded_masks > 0.5).float()
 
+        # Filter out masks that became empty after augmentation (NaN centroids)
+        for i, t in enumerate(targets):
+            n = len(t['labels'])
+            if n == 0:
+                continue
+            mask_sum = padded_masks[i, :n].sum(dim=(1, 2))
+            keep = mask_sum > 0
+            if not keep.all():
+                t['labels'] = t['labels'][keep]
+                t['masks'] = padded_masks[i, :n][keep]
+
+        # Rebuild padded_masks with only surviving masks
+        N_max = max(len(t['labels']) for t in targets) if targets else 0
+        new_padded = torch.zeros(B, N_max, H, W, dtype=torch.float32, device=device)
+        for i, t in enumerate(targets):
+            n = len(t['labels'])
+            if n > 0:
+                new_padded[i, :n] = t['masks']
+        padded_masks = new_padded
+
         # GPU star_distances: one call per image in the batch
         from .star_distances_triton import star_distances_triton
 
