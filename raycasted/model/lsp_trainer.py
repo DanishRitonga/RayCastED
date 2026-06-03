@@ -235,7 +235,7 @@ def train_lsp(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=collate_fn,
+        collate_fn=val_collate,
         num_workers=workers,
         pin_memory=True,
     )
