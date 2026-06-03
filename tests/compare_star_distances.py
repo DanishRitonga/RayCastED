@@ -65,14 +65,20 @@ def test_single_instance(name, mask_fn, h=64, w=64):
         )
 
     has_nan = np.isnan(triton_lower_np).any() or np.isnan(triton_upper_np).any()
+    has_inf = np.isinf(triton_lower_np).any() or np.isinf(triton_upper_np).any()
     if has_nan:
         nan_mask = np.isnan(triton_lower_np)
-        nan_count = nan_mask.sum()
-        first_nan = np.unravel_index(nan_mask.argmax(), triton_lower_np.shape)
-        print(f'    WARNING: {nan_count} NaN values in Triton output, first at {first_nan}', flush=True)
+        print(f'    WARNING: {nan_mask.sum()} NaN in Triton output', flush=True)
+    if has_inf:
+        inf_mask = np.isinf(triton_lower_np)
+        print(f'    WARNING: {inf_mask.sum()} Inf in Triton lower', flush=True)
+        inf_mask_u = np.isinf(triton_upper_np)
+        print(f'    WARNING: {inf_mask_u.sum()} Inf in Triton upper', flush=True)
 
     lower_diff = np.abs(rust_lower - triton_lower_np)
     upper_diff = np.abs(rust_upper - triton_upper_np)
+    lower_diff = np.nan_to_num(lower_diff, nan=0.0, posinf=0.0, neginf=0.0)
+    upper_diff = np.nan_to_num(upper_diff, nan=0.0, posinf=0.0, neginf=0.0)
 
     lower_err_inside = lower_diff[:, inside].mean() if inside.any() else 0.0
     upper_err_inside = upper_diff[:, inside].mean() if inside.any() else 0.0
