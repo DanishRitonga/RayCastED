@@ -227,7 +227,6 @@ def train_lsp(
         sampler=train_sampler,
         collate_fn=train_collate,
         num_workers=0,
-        pin_memory=True,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -236,7 +235,6 @@ def train_lsp(
         shuffle=False,
         collate_fn=val_collate,
         num_workers=0,
-        pin_memory=True,
     )
 
     _logger.info('Train: %d samples, Val: %d samples', len(train_ds), len(val_ds))
