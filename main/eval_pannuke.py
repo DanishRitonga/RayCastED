@@ -26,13 +26,19 @@ Usage:
 """
 
 import argparse
+import os
 import resource
 import time
 from pathlib import Path
 
+os.environ['TORCHINDUCTOR_CPP_WRAPPER'] = '0'
+
 import cv2
 import numpy as np
+
 import torch
+
+torch._dynamo.config.disable = True
 from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader
 from ultralytics.utils.torch_utils import model_info
@@ -233,12 +239,33 @@ def _diagnose_recall(results, num_classes):
     print('=' * 65)
 
 
+def _uncompile_module(module: torch.nn.Module) -> torch.nn.Module:
+    """Strip torch.compile wrappers recursively to get raw float32 module."""
+    from torch._dynamo.eval_frame import OptimizedModule
+
+    if isinstance(module, OptimizedModule):
+        module = module._orig_mod
+
+    for name, child in list(module.named_children()):
+        unwrapped = _uncompile_module(child)
+        if unwrapped is not child:
+            setattr(module, name, unwrapped)
+    return module
+
+
 def load_model(weights_path: str, device: torch.device):
     """Load trained RayCastED model from checkpoint."""
     register_raycast_head()
     ckpt = torch.load(weights_path, map_location=device, weights_only=False)
 
     if isinstance(ckpt, dict):
+        print(f'  Checkpoint keys: {list(ckpt.keys())}', flush=True)
+        print(f'  epoch={ckpt.get("epoch", "?")}, best_bpq={ckpt.get("best_bpq", "?")}', flush=True)
+        if 'model' in ckpt:
+            print(
+                f'  model type: {type(ckpt["model"]).__name__ if ckpt["model"] is not None else "None"}, is_dict={isinstance(ckpt["model"], dict)}',
+                flush=True,
+            )
         # LSP-DETR checkpoint: {'model': state_dict, ...}
         # Try to build model from state_dict keys, then load weights
         if 'model' in ckpt and isinstance(ckpt['model'], dict):
@@ -298,11 +325,13 @@ def load_model(weights_path: str, device: torch.device):
                 else:
                     print(f'  Backbone verified: {bk} (max_diff={max_diff:.2e})', flush=True)
         else:
-            # Ultralytics checkpoint: {'model': nn.Module, ...}
             model = ckpt.get('model') or ckpt.get('ema')
+            if model is None:
+                raise ValueError('Checkpoint contains neither valid model nor EMA weights.')
+            print(f'  Loaded from: {"model" if ckpt.get("model") else "ema"}', flush=True)
+            model = _uncompile_module(model)
             model = model.float().to(device)
     else:
-        # Full model object saved directly
         model = ckpt.float().to(device)
 
     model.eval()
@@ -313,20 +342,18 @@ def _build_model_from_state_dict(state_dict: dict, device: torch.device):
     """Detect model architecture from state_dict keys and construct it."""
     keys = list(state_dict.keys())
 
-    # LSP-DETR: has backbone.swinv2 and decode_head keys
-    if any('backbone.swinv2' in k for k in keys):
+    # LSP-DETR: has backbone. and decode_head. keys
+    if any(k.startswith('backbone.embeddings.') for k in keys) and any(k.startswith('decode_head.') for k in keys):
         from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
 
-        # Infer n_rays from radial head shape
-        radial_key = 'decode_head.radial_head.0.weight'
+        # Infer n_rays from radial head output layer shape
+        radial_key = 'decode_head.radial_distances_head.0.4.weight'
         n_rays = state_dict[radial_key].shape[0] if radial_key in state_dict else 64
 
         # Infer nc from class head shape
-        cls_key = 'decode_head.class_head.0.weight'
+        cls_key = 'decode_head.class_head.weight'
         nc = state_dict[cls_key].shape[0] - 1 if cls_key in state_dict else 5  # nc+1 classes
 
-        # Infer crop_size: LSP-DETR default for PanNuke is 256.
-        # Can be overridden by state_dict metadata if present.
         crop_size = 256
 
         model = LSPDetrDetectionModel(nc=nc, n_rays=n_rays, crop_size=crop_size)
