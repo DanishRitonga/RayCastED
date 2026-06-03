@@ -121,7 +121,7 @@ def _validate(
             n_pred = pred_bboxes.shape[0]
             n_gt = len(gt_labels)
 
-            if n_pred > 0:
+            if n_pred > 0 and gt_rays_px.shape[0] == n_gt:
                 pred_rays = pred_bboxes[:, 2:].unsqueeze(1).expand(n_pred, n_gt, n_rays)
                 gt_rays = gt_rays_px.unsqueeze(0).expand(n_pred, n_gt, n_rays)
                 iou = polar_iou_pairwise_flat_torch(pred_rays, gt_rays).cpu().numpy()
