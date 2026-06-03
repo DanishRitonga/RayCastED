@@ -61,11 +61,6 @@ class LSPCollateFn:
             t['radial_distances'] = torch.stack([lower, upper], dim=0)
             t['centroids'] = masks2centroids(masks_i, normalize=True)
             t['labels'] = t['labels'].to(device)
-        else:
-            for t in targets:
-                t['radial_distances'] = torch.zeros(2, self.n_rays, H, W)
-                t['centroids'] = torch.empty(0, 2)
-                t['labels'] = t['labels'].to(device)
 
         return {
             'img': images,
