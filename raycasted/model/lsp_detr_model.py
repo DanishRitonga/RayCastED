@@ -152,7 +152,7 @@ class LSPDetrDetectionModel(nn.Module):
         num_layers: int = 6,
         query_block_size: int = 14,
         crop_size: int = 256,
-        backbone_name: str = 'facebook/convnextv2-nano-1k-224',
+        backbone_name: str = 'microsoft/swinv2-tiny-patch4-window16-256',
     ):
         super().__init__()
         self.nc = nc
