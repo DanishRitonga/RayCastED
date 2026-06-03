@@ -214,7 +214,7 @@ def train_lsp(
 
     train_sampler = WeightedClassAndTissueSampler(
         tissues=np.array(train_data['tissue']),
-        classes=train_data['categories'],
+        classes=[np.array(c, dtype=np.uint8) for c in train_data['categories']],
         num_classes=len(train_data.features['categories'].feature.names),
         num_samples=len(train_data),
     )
