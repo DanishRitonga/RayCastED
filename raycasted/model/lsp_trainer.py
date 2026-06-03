@@ -30,6 +30,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -221,12 +222,17 @@ def train_lsp(
     train_collate = LSPCollateFn(augment=gpu_augment, n_rays=n_rays, allow_overlaps=allow_overlaps)
     val_collate = LSPCollateFn(augment=None, n_rays=n_rays, allow_overlaps=allow_overlaps)
 
+    mp.set_start_method('spawn', force=True)
+
+    nw = min(4, mp.cpu_count())
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         sampler=train_sampler,
         collate_fn=train_collate,
-        num_workers=0,
+        num_workers=nw,
+        prefetch_factor=2,
+        persistent_workers=True,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -234,7 +240,9 @@ def train_lsp(
         batch_size=batch_size,
         shuffle=False,
         collate_fn=val_collate,
-        num_workers=0,
+        num_workers=nw,
+        prefetch_factor=2,
+        persistent_workers=True,
     )
 
     _logger.info('Train: %d samples, Val: %d samples', len(train_ds), len(val_ds))
