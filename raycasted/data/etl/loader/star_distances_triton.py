@@ -67,8 +67,8 @@ def _distance_transform_kernel(
     for step in range(1, MAX_STEPS + 1):
         cur_h = h + step * STEP_SIZE * sin
         cur_w = w + step * STEP_SIZE * cos
-        cur_h_int = tl.math.llrint(cur_h)
-        cur_w_int = tl.math.llrint(cur_w)
+        cur_h_int = cur_h.to(tl.int32)
+        cur_w_int = cur_w.to(tl.int32)
         in_bounds = (cur_h_int >= 0) & (cur_h_int < H) & (cur_w_int >= 0) & (cur_w_int < W)
         cur_idx = cur_h_int * W + cur_w_int
         boundary_val = tl.load(mask_ptr + cur_idx, mask=valid & in_bounds, other=0.0)
