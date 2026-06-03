@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 from torch import Tensor
 
 from .gpu_augment import GPUAugment
@@ -92,5 +93,19 @@ def gpu_prepare_batch(
         t['radial_distances'] = torch.stack([lower, upper], dim=0)
         t['centroids'] = masks2centroids(masks_i, normalize=True)
         t['labels'] = t['labels'].to(device)
+
+    for i, t in enumerate(targets):
+        n = len(t['labels'])
+        if n == 0:
+            t['boxes'] = torch.empty(0, 2 + n_rays, device=device)
+            continue
+        upper_map = t['radial_distances'][1]  # (n_rays, H, W) in pixel space
+        grid = t['centroids'] * 2 - 1  # (n, 2) → [-1, 1]
+        grid = grid.view(1, 1, n, 2)
+        sampled = F.grid_sample(
+            upper_map.unsqueeze(0), grid, mode='bilinear', padding_mode='border', align_corners=True,
+        )  # (1, n_rays, 1, n)
+        rays_norm = sampled.squeeze(0).squeeze(1).T / H  # (n, n_rays) normalized [0, 1]
+        t['boxes'] = torch.cat([t['centroids'], rays_norm], dim=-1)  # (n, 2 + n_rays)
 
     return {'img': images, 'targets': targets}

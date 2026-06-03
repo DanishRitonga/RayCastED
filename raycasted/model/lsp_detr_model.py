@@ -252,11 +252,6 @@ class LSPDetrDetectionModel(nn.Module):
         # New LSPDataset format: batch['img'] + batch['targets'] (list[dict])
         if 'targets' in batch:
             targets = batch['targets']
-            for tgt in targets:
-                if 'centroids' in tgt:
-                    tgt['boxes'] = tgt['centroids']
-                if 'labels' in tgt:
-                    tgt['labels'] = tgt['labels']
         else:
             # Legacy batch format
             bs = batch['img'].shape[0]
