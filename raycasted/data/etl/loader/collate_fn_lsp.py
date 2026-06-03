@@ -10,8 +10,8 @@ from .masks2centroids import masks2centroids
 class LSPCollateFn:
     """Collate function with batch-level GPU augmentation.
 
-    Applies GPUAugment to stacked batch, then computes star_distances (CPU
-    round-trip via Rust) and centroids on the transformed masks.
+    Applies GPUAugment to stacked batch, then computes star_distances via
+    Triton kernel (GPU-resident, zero CPU round-trip) and centroids on transformed masks.
     """
 
     def __init__(self, augment: GPUAugment | None = None, n_rays: int = 64, allow_overlaps: bool = True) -> None:
