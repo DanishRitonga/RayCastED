@@ -54,10 +54,19 @@ def test_single_instance(name, mask_fn, h=64, w=64):
     triton_lower_np = triton_lower.cpu().numpy()
     triton_upper_np = triton_upper.cpu().numpy()
 
+    inside = mask > 0
+    if inside.any():
+        pts = np.argwhere(inside)
+        cy, cx = pts[len(pts) // 2]
+        print(
+            f'    Debug single: rust[0,{cy},{cx}]={rust_lower[0, cy, cx]:.1f} '
+            f'triton[0,{cy},{cx}]={triton_lower_np[0, cy, cx]:.1f}',
+            flush=True,
+        )
+
     lower_diff = np.abs(rust_lower[0] - triton_lower_np)
     upper_diff = np.abs(rust_upper[0] - triton_upper_np)
 
-    inside = mask > 0
     lower_err_inside = lower_diff[:, inside].mean() if inside.any() else 0.0
     upper_err_inside = upper_diff[:, inside].mean() if inside.any() else 0.0
     lower_max = lower_diff.max()
