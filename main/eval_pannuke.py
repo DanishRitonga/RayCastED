@@ -13,15 +13,15 @@ to match LSP-DETR exactly.
 Usage:
     # With pre-transformed test tiles
     uv run python main/eval_pannuke.py \
-        --weights train4/weights/best.pt \
-        --data-dir output/pannuke/transformed/test \
+        --weights output/detr/train/weights/best.pt \
+        --data-dir output/test-custom-builder/transformed/test \
         --batch 16 --device 0
 
     # Auto-transform from config
     uv run python main/eval_pannuke.py \
         --config main/pannuke.yaml \
         --output output/pannuke \
-        --weights train4/weights/best.pt \
+        --weights output/detr/train/weights/best.pt \
         --batch 16 --device 0
 """
 
@@ -35,7 +35,6 @@ os.environ['TORCHINDUCTOR_CPP_WRAPPER'] = '0'
 
 import cv2
 import numpy as np
-
 import torch
 
 torch._dynamo.config.disable = True
@@ -44,9 +43,11 @@ from torch.utils.data import DataLoader
 from ultralytics.utils.torch_utils import model_info
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
+from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 from raycasted.data.etl.utils import constants as _const
 from raycasted.model.metrics import (
     compute_aji,
+    compute_bpq_from_iou,
     resolve_mask_overlaps,
 )
 from raycasted.model.register import register_raycast_head
@@ -593,6 +594,9 @@ def compute_metrics_streaming(results, num_classes):
     aji_scores = []
     bpq_scores = []
     bmpq_scores = []
+    ray_bpq_scores = []
+    ray_bsq_scores = []
+    ray_bdq_scores = []
     class_pq = {c: [] for c in range(num_classes)}
     class_mpq = {c: [] for c in range(num_classes)}
     centroid_tp = 0
@@ -649,6 +653,27 @@ def compute_metrics_streaming(results, num_classes):
         else:
             bmpq = 0.0
         bmpq_scores.append(bmpq)
+
+        # --- Ray-space bPQ (polar IoU, matches in-training _validate) ---
+        n_pred = len(pred_polys)
+        n_gt = len(gt_polys)
+        if n_pred > 0 and n_gt > 0:
+            pred_rays = torch.from_numpy(pred_polys[:, 2:]).float()
+            gt_rays = torch.from_numpy(gt_polys[:, 2:]).float()
+            ray_iou = (
+                polar_iou_pairwise_flat_torch(
+                    pred_rays.unsqueeze(1).expand(n_pred, n_gt, -1),
+                    gt_rays.unsqueeze(0).expand(n_pred, n_gt, -1),
+                )
+                .cpu()
+                .numpy()
+            )
+            rbpq, rbsq, rbdq = compute_bpq_from_iou(ray_iou)
+        else:
+            rbpq = rbsq = rbdq = 0.0
+        ray_bpq_scores.append(rbpq)
+        ray_bsq_scores.append(rbsq)
+        ray_bdq_scores.append(rbdq)
 
         # --- mPQ / mMPQ ---
         for cls_id in range(num_classes):
@@ -736,6 +761,11 @@ def compute_metrics_streaming(results, num_classes):
     mean_bpq = np.mean(bpq_scores)
     mean_bmpq = np.mean(bmpq_scores)
 
+    # Ray-space bPQ (polar IoU)
+    mean_ray_bpq = np.mean(ray_bpq_scores)
+    mean_ray_bsq = np.mean(ray_bsq_scores)
+    mean_ray_bdq = np.mean(ray_bdq_scores)
+
     # mPQ / mMPQ
     mpq_values = []
     mmpq_values = []
@@ -785,6 +815,9 @@ def compute_metrics_streaming(results, num_classes):
         'bmpq': mean_bmpq,
         'mpq': mean_mpq,
         'mmpq': mean_mmpq,
+        'ray_bpq': mean_ray_bpq,
+        'ray_bsq': mean_ray_bsq,
+        'ray_bdq': mean_ray_bdq,
         'ap': ap_results,
         'centroid': {'precision': prec, 'recall': rec, 'f1': f1},
     }
@@ -962,6 +995,9 @@ def _main(args):
     print(f'{"AP@0.5:0.05:0.95":<25} {ap50_95:>12.4f}')
     print(f'{"bPQ":<25} {metrics["bpq"]:>12.4f}')
     print(f'{"bMPQ":<25} {metrics["bmpq"]:>12.4f}')
+    print(f'{"Ray-bPQ (polar IoU)":<25} {metrics["ray_bpq"]:>12.4f}')
+    print(f'{"  Ray-bSQ":<25} {metrics["ray_bsq"]:>12.4f}')
+    print(f'{"  Ray-bDQ":<25} {metrics["ray_bdq"]:>12.4f}')
     print(f'{"mPQ":<25} {metrics["mpq"]:>12.4f}')
     print(f'{"mMPQ":<25} {metrics["mmpq"]:>12.4f}')
     print(f'{"F1 (centroid, r=12)":<25} {f12["f1"]:>12.4f}')

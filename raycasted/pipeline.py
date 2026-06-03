@@ -83,9 +83,12 @@ class RayCastPipeline:
             stage: 'all', 'ingest', 'transform', or 'train'.
             dataset: Restrict ingestion to a single dataset name.
         """
-        if stage in ('all', 'ingest'):
+        model_yaml = self.training_overrides.get('model', '')
+        skip_etl = _is_lsp_yaml(model_yaml)
+
+        if stage in ('all', 'ingest') and not skip_etl:
             self.ingest(dataset)
-        if stage in ('all', 'transform'):
+        if stage in ('all', 'transform') and not skip_etl:
             self.transform()
         if stage in ('all', 'train'):
             self.train()
@@ -203,16 +206,10 @@ class RayCastPipeline:
         from raycasted.model.lsp_trainer import train_lsp
 
         tcfg = self.training_config or {}
-        train_dir = str(self.transformed_dir / 'train')
-        val_dir = str(self.transformed_dir / 'val')
-
-        for label, d in [('train', train_dir), ('val', val_dir)]:
-            if not Path(d).exists() or not any(Path(d).glob('*.npz')):
-                raise RuntimeError(f'No {label} tiles found in {d}.')
 
         train_lsp(
-            train_dir=train_dir,
-            val_dir=val_dir,
+            train_fold=[0, 1, 2],
+            val_fold=3,
             output_dir=str(self.output_dir),
             epochs=self.training_overrides.get('epochs', tcfg.get('epochs', 130)),
             batch_size=self.training_overrides.get('batch', tcfg.get('batch', 16)),

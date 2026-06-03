@@ -7,16 +7,17 @@ Exact LSP-DETR hyperparameters:
   Gradient clipping 0.1
   Backbone frozen 30 epochs, unfrozen with lr×0.1
   Batch 16, 130 epochs, AMP
+  HuggingFace PanNuke dataset with albumentations augmentations + WeightedClassAndTissueSampler
 
 CLI:
     uv run python -m raycasted.model.lsp_trainer \
-        --train-dir /path/to/train_npz \
-        --val-dir /path/to/val_npz \
+        --train-fold 0 1 2 \
+        --val-fold 3 \
         --output runs/lsp_detr
 
 API (used by pipeline.py):
     from raycasted.model.lsp_trainer import train_lsp
-    train_lsp(train_dir=..., val_dir=..., output_dir=...)
+    train_lsp(train_fold=[0, 1, 2], val_fold=3, output_dir=...)
 """
 
 from __future__ import annotations
@@ -25,15 +26,16 @@ import argparse
 import csv
 import logging
 import math
-from pathlib import Path
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset, collate_fn
+from raycasted.data.etl.loader.collate_fn_lsp import collate_fn
+from raycasted.data.etl.loader.lsp_dataset import LSPDataset, load_pannuke_folds
+from raycasted.data.etl.loader.weighted_class_and_tissue import WeightedClassAndTissueSampler
+from raycasted.data.etl.ops.augment import build_eval_augmentations, build_train_augmentations
 from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 from raycasted.data.etl.utils.constants import configure_rays
 from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
@@ -89,36 +91,65 @@ def _validate(
             mask = keep[i]
             pred_bboxes = torch.cat([points[i, mask] * crop_size, radial[i, mask].exp()], dim=-1)
 
-            img_mask = targets[:, 0].long() == i
-            gt_bboxes = (targets[img_mask, 2:] * crop_size).to(device)
+            tgt = targets[i]
+            gt_labels = tgt['labels']
+            gt_centroids = tgt['centroids']
+            gt_radial = tgt['radial_distances']  # (2, n_rays, H, W)
+
+            if len(gt_labels) == 0:
+                n_pred = pred_bboxes.shape[0]
+                if n_pred == 0:
+                    total_bpq += 1.0
+                    total_bsq += 1.0
+                    total_bdq += 1.0
+                count += 1
+                continue
+
+            # Grid-sample upper-bound rays at GT centroid positions
+            # gt_radial: (2, n_rays, H, W), centroids: (N, 2) normalized [0,1]
+            grid = gt_centroids.to(device) * 2 - 1  # (N, 2) → [-1, 1]
+            grid = grid.view(1, -1, 1, 2)  # (1, N, 1, 2)
+            gr = gt_radial.to(device).float()  # (2, n_rays, H, W)
+            sampled = torch.nn.functional.grid_sample(
+                gr[1:2], grid, mode='bilinear', align_corners=False
+            )  # (1, n_rays, 1, N)
+            sampled = sampled.squeeze(0).squeeze(2).t()  # (N, n_rays)
+            gt_rays_px = sampled
 
             n_pred = pred_bboxes.shape[0]
-            n_gt = gt_bboxes.shape[0]
+            n_gt = len(gt_labels)
 
-            if n_gt == 0 and n_pred == 0:
-                total_bpq += 1.0
-                total_bsq += 1.0
-                total_bdq += 1.0
-            elif n_gt > 0 and n_pred > 0:
+            if n_pred > 0:
                 pred_rays = pred_bboxes[:, 2:].unsqueeze(1).expand(n_pred, n_gt, n_rays)
-                gt_rays = gt_bboxes[:, 2:].unsqueeze(0).expand(n_pred, n_gt, n_rays)
+                gt_rays = gt_rays_px.unsqueeze(0).expand(n_pred, n_gt, n_rays)
                 iou = polar_iou_pairwise_flat_torch(pred_rays, gt_rays).cpu().numpy()
                 bpq, bsq, bdq = compute_bpq_from_iou(iou)
                 total_bpq += bpq
                 total_bsq += bsq
                 total_bdq += bdq
+
             count += 1
 
     model.train()
     if count == 0:
         return {'bPQ': 0.0, 'bSQ': 0.0, 'bDQ': 0.0}
-    return {'bPQ': total_bpq / count, 'bSQ': total_bsq / count, 'bDQ': total_bdq / count}
+    return {
+        'bPQ': total_bpq / count,
+        'bSQ': total_bsq / count,
+        'bDQ': total_bdq / count,
+    }
+
+    return {
+        'bPQ': total_bpq / count,
+        'bSQ': total_bsq / count,
+        'bDQ': total_bdq / count,
+    }
 
 
 def train_lsp(
     *,
-    train_dir: str,
-    val_dir: str,
+    train_fold: list[int] | int = 0,
+    val_fold: int = 3,
     output_dir: str,
     epochs: int = 130,
     batch_size: int = 16,
@@ -136,32 +167,14 @@ def train_lsp(
     workers: int = 4,
     seed: int = 42,
     device: torch.device | str = 'cuda',
+    allow_overlaps: bool = True,
 ) -> None:
-    """Run LSP-DETR training with exact reference hyperparameters.
+    """Train LSP-DETR model on PanNuke using exact LSP-DETR recipe."""
+    import numpy as np
 
-    Args:
-        train_dir: Directory of .npz training tiles.
-        val_dir: Directory of .npz validation tiles.
-        output_dir: Directory for checkpoints.
-        epochs: Total training epochs (default 130 matching LSP-DETR).
-        batch_size: Batch size (default 16 matching LSP-DETR).
-        lr: Peak learning rate (default 1e-4).
-        wd: Weight decay (default 1e-4).
-        warmup: Linear warmup epochs (default 10).
-        freeze_epochs: Epochs to keep backbone frozen (default 30).
-        backbone_lr_ratio: Backbone LR multiplier after unfreeze (default 0.1).
-        clip_grad: Gradient clipping norm (default 0.1).
-        n_rays: Number of ray distances (default 64).
-        nc: Number of classes (default 5 for PanNuke).
-        crop_size: Input size (default 256).
-        conf: Validation confidence threshold.
-        resume: Checkpoint path to resume from.
-        workers: DataLoader workers.
-        seed: Random seed.
-        device: torch.device or 'cuda'/'cpu'/'0'.
-    """
     torch.manual_seed(seed)
     np.random.seed(seed)
+    from glob import glob
 
     _device = torch.device(device) if isinstance(device, str) else device
     base = Path(output_dir)
@@ -178,26 +191,38 @@ def train_lsp(
     _logger.info('Device: %s', _device)
     configure_rays(n_rays)
 
-    aug_config = {
-        'stain_jitter': True,
-        'stain_hsv_h': 0.05,
-        'stain_hsv_s': 0.3,
-        'stain_hsv_v': 0.2,
-        'stain_blur_prob': 0.2,
-        'stain_blur_sigma': 1.0,
-        'scale_augment': True,
-        'scale_range': [0.7, 1.3],
-        'translate_augment': True,
-        'translate_range': 0.1,
-    }
+    data_paths = sorted(glob('raycasted/data/dataset/PanNuke/data/fold*-*.parquet'))
+    if not data_paths:
+        raise FileNotFoundError('No PanNuke parquet files found in raycasted/data/dataset/PanNuke/data/')
+    _logger.info('Found %d PanNuke parquet files', len(data_paths))
 
-    train_ds = RayCastTileDataset(train_dir, crop_size=crop_size, augment=True, augment_config=aug_config)
-    val_ds = RayCastTileDataset(val_dir, crop_size=crop_size, augment=False)
+    train_data = load_pannuke_folds(data_paths, folds=train_fold if isinstance(train_fold, list) else [train_fold])
+    val_data = load_pannuke_folds(data_paths, folds=[val_fold])
+
+    train_ds = LSPDataset(
+        train_data,
+        transforms=build_train_augmentations(),
+        n_rays=n_rays,
+        allow_overlaps=allow_overlaps,
+    )
+    val_ds = LSPDataset(
+        val_data,
+        transforms=build_eval_augmentations(),
+        n_rays=n_rays,
+        allow_overlaps=allow_overlaps,
+    )
+
+    train_sampler = WeightedClassAndTissueSampler(
+        tissues=np.array(train_data['tissue']),
+        classes=train_data['categories'],
+        num_classes=len(train_data.features['categories'].feature.names),
+        num_samples=len(train_data),
+    )
 
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        sampler=train_sampler,
         collate_fn=collate_fn,
         num_workers=workers,
         pin_memory=True,
@@ -212,7 +237,7 @@ def train_lsp(
         pin_memory=True,
     )
 
-    _logger.info('Train: %d tiles, Val: %d tiles', len(train_ds), len(val_ds))
+    _logger.info('Train: %d samples, Val: %d samples', len(train_ds), len(val_ds))
     _logger.info('Steps per epoch: %d', len(train_loader))
 
     model = LSPDetrDetectionModel(nc=nc, n_rays=n_rays, crop_size=crop_size)
@@ -277,43 +302,34 @@ def train_lsp(
             )
 
     for epoch in range(start_epoch, epochs):
-        _lr = _get_lr(epoch, warmup, epochs, lr)
-        for pg in optimizer.param_groups:
-            pg['lr'] = _lr * backbone_lr_ratio if 'backbone' in pg.get('name', '') else _lr
-
-        if epoch == freeze_epochs and not backbone_unfrozen:
-            already = any('backbone' in pg.get('name', '') for pg in optimizer.param_groups)
-            if not already:
-                for p in model.backbone.parameters():
-                    p.requires_grad_(True)
-                n_bbn = sum(p.numel() for p in model.backbone.parameters())
-                _logger.info('Unfreezing backbone (%.1fM params) at epoch %d', n_bbn / 1e6, epoch)
-
-                bbn_decay, bbn_nodecay = [], []
-                for n, p in model.backbone.named_parameters():
-                    if p.ndim <= 1 or 'norm' in n.lower():
-                        bbn_nodecay.append(p)
-                    else:
-                        bbn_decay.append(p)
-
-                if bbn_decay:
-                    optimizer.add_param_group(
-                        {
-                            'params': bbn_decay,
-                            'weight_decay': wd,
-                            'lr': _lr * backbone_lr_ratio,
-                            'name': 'backbone',
-                        }
-                    )
-                if bbn_nodecay:
-                    optimizer.add_param_group(
-                        {
-                            'params': bbn_nodecay,
-                            'weight_decay': 0.0,
-                            'lr': _lr * backbone_lr_ratio,
-                            'name': 'backbone',
-                        }
-                    )
+        if not backbone_unfrozen and epoch >= freeze_epochs:
+            _lr = _get_lr(epoch, warmup, epochs)
+            for p in model.backbone.parameters():
+                p.requires_grad_(True)
+            bb_decay, bb_nodecay = [], []
+            for n, p in model.backbone.named_parameters():
+                if p.ndim <= 1 or 'norm' in n.lower():
+                    bb_nodecay.append(p)
+                else:
+                    bb_decay.append(p)
+            if bb_decay:
+                optimizer.add_param_group(
+                    {
+                        'params': bb_decay,
+                        'weight_decay': wd,
+                        'lr': _lr * backbone_lr_ratio,
+                        'name': 'backbone',
+                    }
+                )
+            if bb_nodecay:
+                optimizer.add_param_group(
+                    {
+                        'params': bb_nodecay,
+                        'weight_decay': 0.0,
+                        'lr': _lr * backbone_lr_ratio,
+                        'name': 'backbone',
+                    }
+                )
             backbone_unfrozen = True
 
         model.train()
@@ -335,11 +351,9 @@ def train_lsp(
             images = images.to(_device, non_blocking=True)
             batch_dict = {
                 'img': images,
-                'batch_idx': targets[:, 0].long(),
-                'cls': targets[:, 1].long(),
-                'bboxes': targets[:, 2:],
+                'targets': targets,
             }
-            total_instances += targets.shape[0]
+            total_instances += sum(len(t['labels']) for t in targets)
 
             with torch.amp.autocast('cuda'):
                 loss, loss_items = model.loss(batch_dict)
@@ -435,8 +449,8 @@ def train_lsp(
 
 def main():  # noqa: D103
     parser = argparse.ArgumentParser(description='Standalone LSP-DETR trainer')
-    parser.add_argument('--train-dir', required=True, help='Directory of .npz training tiles')
-    parser.add_argument('--val-dir', required=True, help='Directory of .npz validation tiles')
+    parser.add_argument('--train-fold', type=int, nargs='+', default=[0, 1, 2], help='PanNuke folds for training')
+    parser.add_argument('--val-fold', type=int, default=3, help='PanNuke fold for validation')
     parser.add_argument('--output', default='runs/lsp_detr', help='Output directory for checkpoints')
     parser.add_argument('--epochs', type=int, default=130)
     parser.add_argument('--batch-size', type=int, default=16)
@@ -456,8 +470,8 @@ def main():  # noqa: D103
     args = parser.parse_args()
 
     train_lsp(
-        train_dir=args.train_dir,
-        val_dir=args.val_dir,
+        train_fold=args.train_fold,
+        val_fold=args.val_fold,
         output_dir=args.output,
         epochs=args.epochs,
         batch_size=args.batch_size,

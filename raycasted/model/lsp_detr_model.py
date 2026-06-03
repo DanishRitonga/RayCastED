@@ -249,15 +249,25 @@ class LSPDetrDetectionModel(nn.Module):
         if preds is None:
             preds = self.predict(batch['img'])
 
-        bs = batch['img'].shape[0]
-        batch_idx = batch.get('batch_idx', torch.zeros_like(batch['cls']))
-        targets = []
-        for i in range(bs):
-            mask_i = batch_idx == i
-            tgt = {'labels': batch['cls'][mask_i].long()}
-            if 'bboxes' in batch:
-                tgt['boxes'] = batch['bboxes'][mask_i]
-            targets.append(tgt)
+        # New LSPDataset format: batch['img'] + batch['targets'] (list[dict])
+        if 'targets' in batch:
+            targets = batch['targets']
+            for tgt in targets:
+                if 'centroids' in tgt:
+                    tgt['boxes'] = tgt['centroids']
+                if 'labels' in tgt:
+                    tgt['labels'] = tgt['labels']
+        else:
+            # Legacy batch format
+            bs = batch['img'].shape[0]
+            batch_idx = batch.get('batch_idx', torch.zeros_like(batch['cls']))
+            targets = []
+            for i in range(bs):
+                mask_i = batch_idx == i
+                tgt = {'labels': batch['cls'][mask_i].long()}
+                if 'bboxes' in batch:
+                    tgt['boxes'] = batch['bboxes'][mask_i]
+                targets.append(tgt)
 
         loss_dict = self.criterion(preds, targets, crop_size=self.crop_size)
         return loss_dict['total'], torch.as_tensor(

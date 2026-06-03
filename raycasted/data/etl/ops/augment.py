@@ -10,6 +10,12 @@ so the same code works with any ray count.
 
 import numpy as np
 
+# Lazy import for LSP-DETR transforms (not needed by ETL pipeline)
+try:
+    import albumentations as A
+except ImportError:
+    A = None  # type: ignore[assignment]
+
 
 def _get_permutation_indices(n_rays: int) -> dict:
     """Get flip/rotation permutation indices for the given ray count.
@@ -343,3 +349,73 @@ def random_translate(
     shifted_ann = filter_and_clip_annotations(shifted_ann, 0, 0, crop_size, crop_size, min_rays_after_clip=0.3)
 
     return shifted_image, shifted_ann
+
+
+# =============================================================================
+# LSP-DETR albumentations transforms (guard against empty masks after augment)
+# =============================================================================
+
+if A is not None:
+
+    class LSPElasticTransform(A.ElasticTransform):  # noqa: D101
+        def apply_to_mask(self, mask, map_x, map_y, **params):
+            if mask.size == 0:
+                return mask
+            return super().apply_to_mask(mask, map_x, map_y, **params)
+
+    class LSPHorizontalFlip(A.HorizontalFlip):  # noqa: D101
+        def apply_to_mask(self, mask, *args, **params):
+            if mask.size == 0:
+                return mask
+            return super().apply_to_mask(mask, *args, **params)
+
+    class LSPVerticalFlip(A.VerticalFlip):  # noqa: D101
+        def apply_to_mask(self, mask, *args, **params):
+            if mask.size == 0:
+                return mask
+            return super().apply_to_mask(mask, *args, **params)
+
+    class LSPRandomRotate90(A.RandomRotate90):  # noqa: D101
+        def apply_to_mask(self, mask, *args, **params):
+            if mask.size == 0:
+                return mask
+            return super().apply_to_mask(mask, *args, **params)
+
+    class LSPRandomSizedCrop(A.RandomSizedCrop):  # noqa: D101
+        def apply_to_mask(self, mask, crop_coords, **params):
+            if mask.size == 0:
+                return mask
+            return super().apply_to_mask(mask, crop_coords, **params)
+
+
+def build_train_augmentations():
+    """Build the LSP-DETR albumentations training pipeline.
+
+    12 transforms, applied to both image and mask simultaneously.
+    Matches the original PanNuke.yaml config.
+    """
+    import albumentations as A
+
+    return A.Compose(
+        [
+            LSPRandomRotate90(p=1.0),
+            LSPHorizontalFlip(p=0.5),
+            LSPVerticalFlip(p=0.5),
+            A.Downscale(scale_range=(0.5, 0.5), p=0.15),
+            A.Blur(blur_limit=11, p=0.2),
+            A.GaussNoise(std_range=(0.0, 0.44), p=0.25),
+            A.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.1, hue=0.05, p=0.2),
+            A.Superpixels(p_replace=0.1, n_segments=200, max_size=128, p=0.1),
+            A.ZoomBlur(max_factor=1.05, p=0.1),
+            LSPRandomSizedCrop(min_max_height=(128, 256), size=(256, 256), p=0.1),
+            LSPElasticTransform(sigma=25, alpha=0.5, p=0.2),
+            A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ]
+    )
+
+
+def build_eval_augmentations():
+    """Build the LSP-DETR albumentations eval pipeline (just normalize)."""
+    import albumentations as A
+
+    return A.Compose([A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))])
