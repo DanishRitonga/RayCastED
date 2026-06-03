@@ -64,15 +64,22 @@ def test_single_instance(name, mask_fn, h=64, w=64):
             flush=True,
         )
 
-    lower_diff = np.abs(rust_lower[0] - triton_lower_np)
-    upper_diff = np.abs(rust_upper[0] - triton_upper_np)
+    has_nan = np.isnan(triton_lower_np).any() or np.isnan(triton_upper_np).any()
+    if has_nan:
+        nan_mask = np.isnan(triton_lower_np)
+        nan_count = nan_mask.sum()
+        first_nan = np.unravel_index(nan_mask.argmax(), triton_lower_np.shape)
+        print(f'    WARNING: {nan_count} NaN values in Triton output, first at {first_nan}', flush=True)
+
+    lower_diff = np.abs(rust_lower - triton_lower_np)
+    upper_diff = np.abs(rust_upper - triton_upper_np)
 
     lower_err_inside = lower_diff[:, inside].mean() if inside.any() else 0.0
     upper_err_inside = upper_diff[:, inside].mean() if inside.any() else 0.0
-    lower_max = lower_diff.max()
-    upper_max = upper_diff.max()
+    lower_max = np.nanmax(lower_diff) if not has_nan else float('nan')
+    upper_max = np.nanmax(upper_diff) if not has_nan else float('nan')
 
-    ok = lower_max < 5.0 and upper_max < 5.0
+    ok = not has_nan and lower_max < 5.0 and upper_max < 5.0
     status = 'PASS' if ok else 'FAIL'
 
     print(
@@ -106,16 +113,24 @@ def test_multi_instance(name, masks_fn, h=64, w=64):
     triton_lower_np = triton_lower.cpu().numpy()
     triton_upper_np = triton_upper.cpu().numpy()
 
-    lower_diff = np.abs(rust_lower[0] - triton_lower_np)
-    upper_diff = np.abs(rust_upper[0] - triton_upper_np)
+    has_nan = np.isnan(triton_lower_np).any() or np.isnan(triton_upper_np).any()
+    if has_nan:
+        nan_mask = np.isnan(triton_lower_np)
+        print(
+            f'    WARNING: {nan_mask.sum()} NaN in Triton, first at {np.unravel_index(nan_mask.argmax(), triton_lower_np.shape)}',
+            flush=True,
+        )
+
+    lower_diff = np.abs(rust_lower - triton_lower_np)
+    upper_diff = np.abs(rust_upper - triton_upper_np)
 
     any_mask = masks.sum(axis=0) > 0
     lower_err = lower_diff[:, any_mask].mean() if any_mask.any() else 0.0
     upper_err = upper_diff[:, any_mask].mean() if any_mask.any() else 0.0
-    lower_max = lower_diff.max()
-    upper_max = upper_diff.max()
+    lower_max = np.nanmax(lower_diff) if not has_nan else float('nan')
+    upper_max = np.nanmax(upper_diff) if not has_nan else float('nan')
 
-    ok = lower_max < 5.0 and upper_max < 5.0
+    ok = not has_nan and lower_max < 5.0 and upper_max < 5.0
     status = 'PASS' if ok else 'FAIL'
 
     print(
