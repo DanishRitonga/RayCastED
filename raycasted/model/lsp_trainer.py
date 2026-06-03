@@ -26,7 +26,9 @@ import argparse
 import csv
 import logging
 import math
+from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -170,8 +172,6 @@ def train_lsp(
     allow_overlaps: bool = True,
 ) -> None:
     """Train LSP-DETR model on PanNuke using exact LSP-DETR recipe."""
-    import numpy as np
-
     torch.manual_seed(seed)
     np.random.seed(seed)
     from glob import glob
