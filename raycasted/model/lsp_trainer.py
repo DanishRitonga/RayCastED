@@ -74,8 +74,9 @@ def _validate(
     total_bpq = total_bsq = total_bdq = 0.0
     count = 0
 
-    for images, targets in tqdm(val_loader, desc='Val', unit='step', leave=False):
-        images = images.to(device, non_blocking=True)
+    for batch_dict in tqdm(val_loader, desc='Val', unit='step', leave=False):
+        images = batch_dict['img'].to(device, non_blocking=True)
+        targets = batch_dict['targets']
 
         with torch.amp.autocast('cuda', enabled=False):
             out = model.predict(images)
@@ -350,12 +351,9 @@ def train_lsp(
             bar_format='{desc}{percentage:3.0f}%|{bar:10}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}{postfix}]',
             leave=False,
         )
-        for images, targets in train_pbar:
-            images = images.to(_device, non_blocking=True)
-            batch_dict = {
-                'img': images,
-                'targets': targets,
-            }
+        for batch_dict in train_pbar:
+            batch_dict['img'] = batch_dict['img'].to(_device, non_blocking=True)
+            targets = batch_dict['targets']
             total_instances += sum(len(t['labels']) for t in targets)
 
             with torch.amp.autocast('cuda'):
