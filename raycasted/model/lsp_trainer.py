@@ -26,10 +26,7 @@ import argparse
 import csv
 import logging
 import math
-import multiprocessing as _mp
 from pathlib import Path
-
-_mp.set_start_method('spawn', force=True)
 
 import numpy as np
 import torch
@@ -229,18 +226,17 @@ def train_lsp(
         batch_size=batch_size,
         sampler=train_sampler,
         collate_fn=train_collate,
-        num_workers=workers,
+        num_workers=0,
         pin_memory=True,
         drop_last=True,
-        persistent_workers=workers > 0,
-        prefetch_factor=4 if workers > 0 else None,
+        prefetch_factor=2,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
         shuffle=False,
         collate_fn=val_collate,
-        num_workers=workers,
+        num_workers=0,
         pin_memory=True,
     )
 

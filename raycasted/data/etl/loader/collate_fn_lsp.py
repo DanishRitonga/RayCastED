@@ -25,7 +25,8 @@ class LSPCollateFn:
 
         N_max = max(len(t['masks']) for t in targets) if targets else 0
         B, C, H, W = images.shape
-        device = images.device
+
+        device = torch.device('cuda') if torch.cuda.is_available() else images.device
 
         padded_masks = torch.zeros(B, N_max, H, W, dtype=torch.float32)
         for i, t in enumerate(targets):
