@@ -45,6 +45,7 @@ def test_single_instance(name, mask_fn, h=64, w=64):
     masks_t = torch.from_numpy(masks.astype(np.float32)).cuda()
     from raycasted.data.etl.loader.star_distances_triton import star_distances_triton
 
+    print(f'    Running Triton on {name}...', flush=True)
     t0 = time.perf_counter()
     triton_lower, triton_upper = star_distances_triton(masks_t, 32)
     torch.cuda.synchronize()
@@ -87,6 +88,7 @@ def test_multi_instance(name, masks_fn, h=64, w=64):
     masks_t = torch.from_numpy(masks.astype(np.float32)).cuda()
     from raycasted.data.etl.loader.star_distances_triton import star_distances_triton
 
+    print(f'    Running Triton on {name}...', flush=True)
     t0 = time.perf_counter()
     triton_lower, triton_upper = star_distances_triton(masks_t, 32)
     torch.cuda.synchronize()

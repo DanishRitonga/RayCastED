@@ -50,7 +50,7 @@ def _distance_transform_kernel(
     is_inside = mask_val > 0.0
 
     best_dist = tl.zeros([TILE_H, TILE_W], dtype=tl.float32)
-    for step in tl.static_range(1, MAX_STEPS + 1):
+    for step in range(1, MAX_STEPS + 1):
         cur_h_f = (h_base + off_h[:, None]).to(tl.float32) + float(step) * sin_val
         cur_w_f = (w_base + off_w[None, :]).to(tl.float32) + float(step) * cos_val
         cur_h_int = tl.math.floor(cur_h_f).to(tl.int32)
