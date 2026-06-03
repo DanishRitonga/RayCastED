@@ -242,7 +242,8 @@ def train_lsp(
 
     model = LSPDetrDetectionModel(nc=nc, n_rays=n_rays, crop_size=crop_size)
     model = model.to(_device)
-    _logger.info('Model: %.1fM params', sum(p.numel() for p in model.parameters()) / 1e6)
+    model = torch.compile(model, dynamic=True)
+    _logger.info('Model: %.1fM params (compiled)', sum(p.numel() for p in model.parameters()) / 1e6)
 
     for p in model.backbone.parameters():
         p.requires_grad_(False)
