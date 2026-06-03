@@ -51,15 +51,15 @@ def _distance_transform_kernel(
 
     best_dist = tl.zeros([TILE_H, TILE_W], dtype=tl.float32)
     for step in range(1, MAX_STEPS + 1):
-        cur_h_f = (h_base + off_h[:, None]).to(tl.float32) + float(step) * sin_val
-        cur_w_f = (w_base + off_w[None, :]).to(tl.float32) + float(step) * cos_val
+        cur_h_f = (h_base + off_h[:, None]).to(tl.float32) + step.to(tl.float32) * sin_val
+        cur_w_f = (w_base + off_w[None, :]).to(tl.float32) + step.to(tl.float32) * cos_val
         cur_h_int = tl.math.floor(cur_h_f).to(tl.int32)
         cur_w_int = tl.math.floor(cur_w_f).to(tl.int32)
         in_bounds = (cur_h_int >= 0) & (cur_h_int < H) & (cur_w_int >= 0) & (cur_w_int < W)
         cur_idx = cur_h_int * W + cur_w_int
         boundary_val = tl.load(mask_ptr + cur_idx, mask=valid & in_bounds, other=0.0)
         hit = is_inside & (boundary_val == 0.0) & (best_dist == 0.0)
-        dist_val = float(step - 1)
+        dist_val = (step - 1).to(tl.float32)
         best_dist = tl.where(hit, dist_val, best_dist)
 
     best_dist = tl.where(is_inside & (best_dist == 0.0), float(MAX_STEPS), best_dist)
