@@ -229,7 +229,6 @@ def train_lsp(
         num_workers=0,
         pin_memory=True,
         drop_last=True,
-        prefetch_factor=2,
     )
     val_loader = DataLoader(
         val_ds,
