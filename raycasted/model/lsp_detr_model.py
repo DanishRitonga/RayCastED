@@ -208,7 +208,7 @@ class LSPDetrDetectionModel(nn.Module):
 
         mean = IMAGENET_MEAN.to(device=x.device, dtype=x.dtype)
         std = IMAGENET_STD.to(device=x.device, dtype=x.dtype)
-        x_norm = (x - mean) / std
+        x_norm = (x / 255.0 - mean) / std
 
         out = self.backbone(x_norm, output_hidden_states=True)
         hs = out.hidden_states  # [patch_embed, stage1, stage2, stage3, stage4]

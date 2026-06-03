@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import albumentations as A
 import numpy as np
 import torch
-from albumentations.pytorch import ToTensorV2
 from datasets import Dataset, concatenate_datasets
-from stardist import star_distances
 from torch import Tensor
 
 from .masks2centroids import masks2centroids
@@ -33,64 +30,41 @@ def load_pannuke_folds(data_paths: list[str], folds: list[int] | None = None) ->
     return concatenate_datasets(datasets_list) if datasets_list else Dataset.from_dict({})
 
 
-class LSPDataset(torch.utils.data.Dataset[tuple[Tensor, dict[str, Tensor]]]):
-    """PanNuke dataset matching LSP-DETR exactly.
+class LSPDataset(torch.utils.data.Dataset[tuple[Tensor, dict]]):
+    """PanNuke dataset for LSP-DETR training with GPU augmentation.
 
-    Loads PanNuke parquet files, applies albumentations transforms to image+masks,
-    computes radial distance maps via star_distances (Rust), and returns
-    normalized tensors for training.
+    Loads raw PIL images + masks, converts to tensors without any transforms.
+    Augmentation is applied at batch level in the collate_fn via GPUAugment.
+    star_distances + centroids are computed after augmentation in the collate_fn.
     """
 
     def __init__(
         self,
         data: Dataset,
-        transforms: A.Compose | None = None,
         n_rays: int = 64,
-        allow_overlaps: bool = True,
     ) -> None:
         self.data = data
-        self.transforms = transforms or A.Compose([])
         self.n_rays = n_rays
-        self.allow_overlaps = allow_overlaps
-        self._to_tensor = ToTensorV2()
 
     def __len__(self) -> int:
         return len(self.data)
 
-    @staticmethod
-    def _pil_masks_to_np(masks: list) -> np.ndarray:
-        """Convert list of PIL mask images to (H, W, N) uint8 ndarray."""
-        if not masks:
-            return np.empty((256, 256, 0), dtype=np.uint8)
-        return np.stack([np.array(m, dtype=np.uint8) for m in masks], axis=-1)
-
-    def __getitem__(self, idx: int) -> tuple[Tensor, dict[str, Tensor]]:
+    def __getitem__(self, idx: int) -> tuple[Tensor, dict]:
         sample = self.data[idx]
-        image = np.array(sample['image'], dtype=np.uint8)
-        masks = self._pil_masks_to_np(sample['instances'])
-        labels = np.array(sample['categories'], dtype=np.int64)
+        image = torch.from_numpy(np.array(sample['image'], dtype=np.float32)).permute(2, 0, 1)
+        masks = self._pil_masks_to_tensor(sample['instances'])
+        labels = torch.tensor(sample['categories'], dtype=torch.long)
         tissue_id = sample['tissue']
-
-        transformed = self.transforms(image=image, mask=masks)
-        image = transformed['image']
-        masks = transformed['mask'].transpose(2, 0, 1)
-
-        keep = masks.any(axis=(1, 2))
-        masks = masks[keep]
-        labels = labels[keep]
-
-        lower_bound, upper_bound = star_distances(masks, self.n_rays)
-        if not self.allow_overlaps:
-            upper_bound = lower_bound
-        radial_distances = np.stack((lower_bound, upper_bound), axis=0)
-
-        image = self._to_tensor(image=image)['image']
-        masks = torch.from_numpy(masks)
 
         return image, {
             'masks': masks,
-            'labels': torch.from_numpy(labels).long(),
-            'radial_distances': torch.from_numpy(radial_distances),
-            'centroids': masks2centroids(masks, normalize=True),
+            'labels': labels,
             'tissue': tissue_id,
         }
+
+    @staticmethod
+    def _pil_masks_to_tensor(masks: list) -> torch.Tensor:
+        if not masks:
+            return torch.empty((0, 256, 256), dtype=torch.float32)
+        arrs = [torch.from_numpy(np.array(m, dtype=np.float32)) for m in masks]
+        return torch.stack(arrs, dim=0)

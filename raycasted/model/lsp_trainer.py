@@ -34,10 +34,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from raycasted.data.etl.loader.collate_fn_lsp import collate_fn
+from raycasted.data.etl.loader.collate_fn_lsp import LSPCollateFn
+from raycasted.data.etl.loader.gpu_augment import GPUAugment
 from raycasted.data.etl.loader.lsp_dataset import LSPDataset, load_pannuke_folds
 from raycasted.data.etl.loader.weighted_class_and_tissue import WeightedClassAndTissueSampler
-from raycasted.data.etl.ops.augment import build_eval_augmentations, build_train_augmentations
 from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 from raycasted.data.etl.utils.constants import configure_rays
 from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
@@ -206,18 +206,8 @@ def train_lsp(
     train_data = load_pannuke_folds(data_paths, folds=train_fold if isinstance(train_fold, list) else [train_fold])
     val_data = load_pannuke_folds(data_paths, folds=[val_fold])
 
-    train_ds = LSPDataset(
-        train_data,
-        transforms=build_train_augmentations(),
-        n_rays=n_rays,
-        allow_overlaps=allow_overlaps,
-    )
-    val_ds = LSPDataset(
-        val_data,
-        transforms=build_eval_augmentations(),
-        n_rays=n_rays,
-        allow_overlaps=allow_overlaps,
-    )
+    train_ds = LSPDataset(train_data, n_rays=n_rays)
+    val_ds = LSPDataset(val_data, n_rays=n_rays)
 
     train_sampler = WeightedClassAndTissueSampler(
         tissues=np.array(train_data['tissue']),
@@ -226,11 +216,15 @@ def train_lsp(
         num_samples=len(train_data),
     )
 
+    gpu_augment = GPUAugment()
+    train_collate = LSPCollateFn(augment=gpu_augment, n_rays=n_rays, allow_overlaps=allow_overlaps)
+    val_collate = LSPCollateFn(augment=None, n_rays=n_rays, allow_overlaps=allow_overlaps)
+
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
         sampler=train_sampler,
-        collate_fn=collate_fn,
+        collate_fn=train_collate,
         num_workers=workers,
         pin_memory=True,
         drop_last=True,
