@@ -208,8 +208,8 @@ class RayCastPipeline:
         tcfg = self.training_config or {}
 
         train_lsp(
-            train_fold=[0, 1, 2],
-            val_fold=3,
+            train_fold=[1],
+            val_fold=2,
             output_dir=str(self.output_dir),
             epochs=self.training_overrides.get('epochs', tcfg.get('epochs', 130)),
             batch_size=self.training_overrides.get('batch', tcfg.get('batch', 16)),

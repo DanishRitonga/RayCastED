@@ -149,8 +149,8 @@ def _validate(
 
 def train_lsp(
     *,
-    train_fold: list[int] | int = 0,
-    val_fold: int = 3,
+    train_fold: list[int] | int = 1,
+    val_fold: int = 2,
     output_dir: str,
     epochs: int = 130,
     batch_size: int = 16,
@@ -448,8 +448,8 @@ def train_lsp(
 
 def main():  # noqa: D103
     parser = argparse.ArgumentParser(description='Standalone LSP-DETR trainer')
-    parser.add_argument('--train-fold', type=int, nargs='+', default=[0, 1, 2], help='PanNuke folds for training')
-    parser.add_argument('--val-fold', type=int, default=3, help='PanNuke fold for validation')
+    parser.add_argument('--train-fold', type=int, nargs='+', default=[1], help='PanNuke folds for training (fold1=1)')
+    parser.add_argument('--val-fold', type=int, default=2, help='PanNuke fold for validation (fold2=2)')
     parser.add_argument('--output', default='runs/lsp_detr', help='Output directory for checkpoints')
     parser.add_argument('--epochs', type=int, default=130)
     parser.add_argument('--batch-size', type=int, default=16)
