@@ -124,6 +124,7 @@ def _validate(
                 pred_rays = pred_bboxes[:, 2:].unsqueeze(1).expand(n_pred, n_gt, n_rays)
                 gt_rays = gt_rays_px.unsqueeze(0).expand(n_pred, n_gt, n_rays)
                 iou = polar_iou_pairwise_flat_torch(pred_rays, gt_rays).cpu().numpy()
+                iou = np.nan_to_num(iou, nan=0.0, posinf=0.0, neginf=0.0)
                 bpq, bsq, bdq = compute_bpq_from_iou(iou)
                 total_bpq += bpq
                 total_bsq += bsq
