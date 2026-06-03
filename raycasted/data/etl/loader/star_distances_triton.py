@@ -17,8 +17,9 @@ import triton.language as tl
 def _distance_transform_kernel(
     mask_ptr,
     out_ptr,
-    cos_val: tl.constexpr,
+    step_size: tl.constexpr,
     sin_val: tl.constexpr,
+    cos_val: tl.constexpr,
     ray_idx: tl.constexpr,
     H: tl.constexpr,
     W: tl.constexpr,
@@ -28,8 +29,7 @@ def _distance_transform_kernel(
 ):
     """Ray-cast distance from each pixel to mask boundary for ONE ray angle.
 
-    Grid: (tiles_h * tiles_w,)  — one block per (TILE_H, TILE_W) tile.
-    Each thread walks along (cos_val, sin_val) until boundary.
+    step_size = 1.0 / max(|cos_val|, |sin_val|) — advances one pixel per iteration.
     """
     pid = tl.program_id(0)
     tiles_per_row = (H + TILE_H - 1) // TILE_H
@@ -50,19 +50,24 @@ def _distance_transform_kernel(
     is_inside = mask_val > 0.0
 
     best_dist = tl.zeros([TILE_H, TILE_W], dtype=tl.float32)
+
+    cur_y = (h_base + off_h[:, None]).to(tl.float32)
+    cur_x = (w_base + off_w[None, :]).to(tl.float32)
+    dy = step_size * sin_val
+    dx = step_size * cos_val
+
     for step in range(1, MAX_STEPS + 1):
-        cur_h_f = (h_base + off_h[:, None]).to(tl.float32) + step.to(tl.float32) * sin_val
-        cur_w_f = (w_base + off_w[None, :]).to(tl.float32) + step.to(tl.float32) * cos_val
-        cur_h_int = tl.math.floor(cur_h_f).to(tl.int32)
-        cur_w_int = tl.math.floor(cur_w_f).to(tl.int32)
+        cur_y = cur_y + dy
+        cur_x = cur_x + dx
+        cur_h_int = tl.math.floor(cur_y).to(tl.int32)
+        cur_w_int = tl.math.floor(cur_x).to(tl.int32)
         in_bounds = (cur_h_int >= 0) & (cur_h_int < H) & (cur_w_int >= 0) & (cur_w_int < W)
         cur_idx = cur_h_int * W + cur_w_int
         boundary_val = tl.load(mask_ptr + cur_idx, mask=valid & in_bounds, other=0.0)
-        hit = is_inside & (boundary_val == 0.0) & (best_dist == 0.0)
-        dist_val = (step - 1).to(tl.float32)
-        best_dist = tl.where(hit, dist_val, best_dist)
+        hit = is_inside & in_bounds & (boundary_val == 0.0) & (best_dist == 0.0)
+        best_dist = tl.where(hit, step.to(tl.float32) * step_size, best_dist)
 
-    best_dist = tl.where(is_inside & (best_dist == 0.0), float(MAX_STEPS), best_dist)
+    best_dist = tl.where(is_inside & (best_dist == 0.0), float(MAX_STEPS) * step_size, best_dist)
     out_idx = ray_idx * H * W + h * W + w
     tl.store(out_ptr + out_idx, best_dist, mask=valid)
 
@@ -103,11 +108,15 @@ def star_distances_triton(
         out = torch.zeros(n_rays, H, W, dtype=torch.float32, device=device)
         for r in range(n_rays):
             angle = angles[r]
+            _cos = math.cos(angle.item())
+            _sin = math.sin(angle.item())
+            _step = 1.0 / max(abs(_cos), abs(_sin))
             _distance_transform_kernel[grid](
                 mask,
                 out,
-                math.cos(angle.item()),
-                math.sin(angle.item()),
+                _step,
+                _sin,
+                _cos,
                 r,
                 H,
                 W,
