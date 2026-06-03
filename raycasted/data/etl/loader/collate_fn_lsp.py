@@ -8,14 +8,9 @@ from .masks2centroids import masks2centroids
 
 
 class LSPCollateFn:
-    """Collate function with batch-level GPU augmentation.
+    """CPU-only collate: stacks images, pads masks. GPU work is done in the training loop."""
 
-    Applies GPUAugment to stacked batch, then computes star_distances via
-    Triton kernel (GPU-resident, zero CPU round-trip) and centroids on transformed masks.
-    """
-
-    def __init__(self, augment: GPUAugment | None = None, n_rays: int = 64, allow_overlaps: bool = True) -> None:
-        self.augment = augment
+    def __init__(self, n_rays: int = 64, allow_overlaps: bool = True) -> None:
         self.n_rays = n_rays
         self.allow_overlaps = allow_overlaps
 
@@ -26,63 +21,76 @@ class LSPCollateFn:
         N_max = max(len(t['masks']) for t in targets) if targets else 0
         B, C, H, W = images.shape
 
-        device = torch.device('cuda') if torch.cuda.is_available() else images.device
-
         padded_masks = torch.zeros(B, N_max, H, W, dtype=torch.float32)
         for i, t in enumerate(targets):
             n = len(t['masks'])
             if n > 0:
                 padded_masks[i, :n] = t['masks']
 
-        images = images.to(device)
-        padded_masks = padded_masks.to(device)
-
-        if self.augment is not None:
-            images, padded_masks = self.augment(images, padded_masks)
-            images = images.clamp(0, 255)
-            padded_masks = padded_masks.clamp(0, 1)
-            padded_masks = (padded_masks > 0.5).float()
-
-        # Filter out masks that became empty after augmentation (NaN centroids)
-        for i, t in enumerate(targets):
-            n = len(t['labels'])
-            if n == 0:
-                continue
-            mask_sum = padded_masks[i, :n].sum(dim=(1, 2))
-            keep = mask_sum > 0
-            if not keep.all():
-                t['labels'] = t['labels'][keep.cpu()]
-                t['masks'] = padded_masks[i, :n][keep]
-
-        # Rebuild padded_masks with only surviving masks
-        N_max = max(len(t['labels']) for t in targets) if targets else 0
-        new_padded = torch.zeros(B, N_max, H, W, dtype=torch.float32, device=device)
-        for i, t in enumerate(targets):
-            n = len(t['labels'])
-            if n > 0:
-                new_padded[i, :n] = t['masks']
-        padded_masks = new_padded
-
-        # GPU star_distances: one call per image in the batch
-        from .star_distances_triton import star_distances_triton
-
-        for i, t in enumerate(targets):
-            n = len(t['labels'])
-            if n == 0:
-                t['radial_distances'] = torch.zeros(2, self.n_rays, H, W, device=device)
-                t['centroids'] = torch.empty(0, 2, device=device)
-                t['labels'] = t['labels'].to(device)
-                continue
-
-            masks_i = padded_masks[i, :n]
-            lower, upper = star_distances_triton(masks_i, self.n_rays)
-            if not self.allow_overlaps:
-                upper = lower
-            t['radial_distances'] = torch.stack([lower, upper], dim=0)
-            t['centroids'] = masks2centroids(masks_i, normalize=True)
-            t['labels'] = t['labels'].to(device)
-
         return {
             'img': images,
             'targets': targets,
+            'padded_masks': padded_masks,
         }
+
+
+def gpu_prepare_batch(
+    batch: dict,
+    augment: GPUAugment | None = None,
+    n_rays: int = 64,
+    allow_overlaps: bool = True,
+) -> dict:
+    """Apply GPU augment, star_distances, centroids. Called in main process only."""
+    images = batch['img']
+    targets = batch['targets']
+    padded_masks = batch['padded_masks']
+
+    device = torch.device('cuda') if torch.cuda.is_available() else images.device
+    B, C, H, W = images.shape
+
+    images = images.to(device)
+    padded_masks = padded_masks.to(device)
+
+    if augment is not None:
+        images, padded_masks = augment(images, padded_masks)
+        images = images.clamp(0, 255)
+        padded_masks = padded_masks.clamp(0, 1)
+        padded_masks = (padded_masks > 0.5).float()
+
+    for i, t in enumerate(targets):
+        n = len(t['labels'])
+        if n == 0:
+            continue
+        mask_sum = padded_masks[i, :n].sum(dim=(1, 2))
+        keep = mask_sum > 0
+        if not keep.all():
+            t['labels'] = t['labels'][keep.cpu()]
+            t['masks'] = padded_masks[i, :n][keep]
+
+    N_max = max(len(t['labels']) for t in targets) if targets else 0
+    new_padded = torch.zeros(B, N_max, H, W, dtype=torch.float32, device=device)
+    for i, t in enumerate(targets):
+        n = len(t['labels'])
+        if n > 0:
+            new_padded[i, :n] = t['masks']
+    padded_masks = new_padded
+
+    from .star_distances_triton import star_distances_triton
+
+    for i, t in enumerate(targets):
+        n = len(t['labels'])
+        if n == 0:
+            t['radial_distances'] = torch.zeros(2, n_rays, H, W, device=device)
+            t['centroids'] = torch.empty(0, 2, device=device)
+            t['labels'] = t['labels'].to(device)
+            continue
+
+        masks_i = padded_masks[i, :n]
+        lower, upper = star_distances_triton(masks_i, n_rays)
+        if not allow_overlaps:
+            upper = lower
+        t['radial_distances'] = torch.stack([lower, upper], dim=0)
+        t['centroids'] = masks2centroids(masks_i, normalize=True)
+        t['labels'] = t['labels'].to(device)
+
+    return {'img': images, 'targets': targets}

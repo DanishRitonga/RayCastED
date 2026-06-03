@@ -35,7 +35,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from raycasted.data.etl.loader.collate_fn_lsp import LSPCollateFn
+from raycasted.data.etl.loader.collate_fn_lsp import LSPCollateFn, gpu_prepare_batch
 from raycasted.data.etl.loader.gpu_augment import GPUAugment
 from raycasted.data.etl.loader.lsp_dataset import LSPDataset, load_pannuke_folds
 from raycasted.data.etl.loader.weighted_class_and_tissue import WeightedClassAndTissueSampler
@@ -70,13 +70,15 @@ def _validate(
     n_rays: int,
     crop_size: int = 256,
     conf_threshold: float = 0.25,
+    allow_overlaps: bool = True,
 ) -> dict[str, float]:
     model.eval()
     total_bpq = total_bsq = total_bdq = 0.0
     count = 0
 
     for batch_dict in tqdm(val_loader, desc='Val', unit='step', leave=False):
-        images = batch_dict['img'].to(device, non_blocking=True)
+        batch_dict = gpu_prepare_batch(batch_dict, augment=None, n_rays=n_rays, allow_overlaps=allow_overlaps)
+        images = batch_dict['img']
         targets = batch_dict['targets']
 
         with torch.amp.autocast('cuda', enabled=False):
@@ -219,12 +221,12 @@ def train_lsp(
     )
 
     gpu_augment = GPUAugment()
-    train_collate = LSPCollateFn(augment=gpu_augment, n_rays=n_rays, allow_overlaps=allow_overlaps)
-    val_collate = LSPCollateFn(augment=None, n_rays=n_rays, allow_overlaps=allow_overlaps)
+    train_collate = LSPCollateFn(n_rays=n_rays, allow_overlaps=allow_overlaps)
+    val_collate = LSPCollateFn(n_rays=n_rays, allow_overlaps=allow_overlaps)
 
     mp.set_start_method('spawn', force=True)
 
-    nw = min(4, mp.cpu_count())
+    nw = min(2, mp.cpu_count())
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
@@ -232,7 +234,6 @@ def train_lsp(
         collate_fn=train_collate,
         num_workers=nw,
         prefetch_factor=2,
-        persistent_workers=True,
         drop_last=True,
     )
     val_loader = DataLoader(
@@ -242,7 +243,6 @@ def train_lsp(
         collate_fn=val_collate,
         num_workers=nw,
         prefetch_factor=2,
-        persistent_workers=True,
     )
 
     _logger.info('Train: %d samples, Val: %d samples', len(train_ds), len(val_ds))
@@ -357,7 +357,9 @@ def train_lsp(
             leave=False,
         )
         for batch_dict in train_pbar:
-            batch_dict['img'] = batch_dict['img'].to(_device, non_blocking=True)
+            batch_dict = gpu_prepare_batch(
+                batch_dict, augment=gpu_augment, n_rays=n_rays, allow_overlaps=allow_overlaps
+            )
             targets = batch_dict['targets']
             total_instances += sum(len(t['labels']) for t in targets)
 
@@ -399,7 +401,7 @@ def train_lsp(
             )
             _header_printed = True
 
-        val_m = _validate(model, val_loader, _device, nc, n_rays, crop_size, conf)
+        val_m = _validate(model, val_loader, _device, nc, n_rays, crop_size, conf, allow_overlaps=allow_overlaps)
         bpq, bsq, bdq = val_m['bPQ'], val_m['bSQ'], val_m['bDQ']
 
         lr_dec = optimizer.param_groups[0]['lr']
