@@ -269,6 +269,12 @@ class LSPDetrDetectionModel(nn.Module):
                     tgt['boxes'] = batch['bboxes'][mask_i]
                 targets.append(tgt)
 
+        # Debug: check if Hungarian matcher finds matches
+        _matched = self.criterion.matcher(preds, targets, crop_size=self.crop_size)
+        _mt = [(len(p), len(t)) for p, t in _matched]
+        _bx = [t.get('boxes').shape if t.get('boxes') is not None and t['boxes'].numel() > 0 else None for t in targets]
+        print(f'\n[MATCHED] {_mt}\n[BOXES]   {_bx}')
+
         loss_dict = self.criterion(preds, targets, crop_size=self.crop_size)
         return loss_dict['total'], torch.as_tensor(
             [loss_dict.get(k, torch.tensor(0.0)).detach() for k in ['loss_ce', 'loss_centroid', 'loss_radial']],
