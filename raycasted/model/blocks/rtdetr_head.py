@@ -416,7 +416,7 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
         centroids = torch.stack([gx.flatten(), gy.flatten()], dim=-1)  # [nq, 2], normalized [0,1]
         centroids = centroids.unsqueeze(0).expand(bs, -1, -1)  # [B, nq, 2]
 
-        grid_sample_input = torch.stack([gx * 2 - 1, gy * 2 - 1], dim=-1).unsqueeze(0).expand(bs, -1, -1, -1)
+        grid_sample_input = torch.stack([gx * 2 - 1, gy * 2 - 1], dim=-1).unsqueeze(0).expand(bs, -1, -1, -1).to(dtype=p4_proj.dtype)
         sampled_feats = F.grid_sample(p4_proj, grid_sample_input, align_corners=False)  # [B, hd, grid_h, grid_w]
         top_k_features = sampled_feats.flatten(2).transpose(1, 2)  # [B, nq, hd]
 
