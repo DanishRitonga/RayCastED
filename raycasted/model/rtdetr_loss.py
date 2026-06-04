@@ -214,9 +214,16 @@ class RayCastRTDETRDetectionLoss(nn.Module):
     def _compute_analytical_gt_rays(self, pred_xy, gt_vertices, crop_size, device):
         ray_cos, ray_sin = self._get_ray_directions(device)
         pred_xy_px = pred_xy * crop_size
-        distances = analytical_ray_distances(pred_xy_px, gt_vertices, ray_cos, ray_sin)
-        diag = torch.arange(distances.shape[0], device=device)
-        return distances[diag, diag] / crop_size
+        n = pred_xy_px.shape[0]
+        chunk = 25
+        results = []
+        for start in range(0, n, chunk):
+            end = min(start + chunk, n)
+            d = analytical_ray_distances(
+                pred_xy_px[start:end], gt_vertices[start:end], ray_cos, ray_sin
+            )
+            results.append(d[torch.arange(end - start, device=device), torch.arange(end - start, device=device)])
+        return torch.cat(results, dim=0) / crop_size
 
     def _get_loss_class(self, pred_scores, targets, gt_scores, num_gts, postfix=''):
         bs, nq = pred_scores.shape[:2]
