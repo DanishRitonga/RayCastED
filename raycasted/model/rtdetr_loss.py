@@ -52,6 +52,42 @@ def _analytical_cost_per_image(
     return cost_geo
 
 
+def _compute_inner_cost(pred_polygons, gt_polygons):
+    """Point-in-star-convex-polygon containment cost × 9999.
+
+    Returns 0 if predicted centroid is inside GT polygon, 9999 if outside.
+    Uses star-convex property: a point is inside if its distance from the GT
+    centroid, along its angular direction, is ≤ the polygon's ray length at
+    that angle.
+    """
+    n_pred = pred_polygons.shape[0]
+    n_gt = gt_polygons.shape[0]
+    if n_pred == 0 or n_gt == 0:
+        return torch.zeros(n_pred, n_gt, device=pred_polygons.device)
+
+    pred_xy = pred_polygons[:, :2]  # [n_pred, 2]
+    gt_xy = gt_polygons[:, :2]  # [n_gt, 2]
+    gt_rays = gt_polygons[:, 2:]  # [n_gt, n_rays]
+
+    dx = pred_xy[:, 0].unsqueeze(1) - gt_xy[:, 0].unsqueeze(0)  # [n_pred, n_gt]
+    dy = pred_xy[:, 1].unsqueeze(1) - gt_xy[:, 1].unsqueeze(0)
+    dist = (dx**2 + dy**2).sqrt()  # [n_pred, n_gt]
+
+    angles = torch.atan2(dy, dx) % (2 * torch.pi)  # [n_pred, n_gt], [0, 2π)
+    n_rays = gt_rays.shape[-1]
+    ray_angle = torch.linspace(0, 2 * torch.pi, n_rays + 1, device=gt_rays.device)[:n_rays]
+    ray_idx = (angles / (2 * torch.pi) * n_rays).clamp(0, n_rays - 1)
+    lo = ray_idx.long()
+    hi = (lo + 1) % n_rays
+
+    lo_ray = gt_rays[torch.arange(n_gt, device=gt_rays.device).unsqueeze(0), lo]  # [n_pred, n_gt]
+    hi_ray = gt_rays[torch.arange(n_gt, device=gt_rays.device).unsqueeze(0), hi]
+    frac = (angles - ray_angle[lo.clamp(0, n_rays - 1)]) / (ray_angle[1] + 1e-8)
+    interp_ray = lo_ray + (hi_ray - lo_ray) * frac.clamp(0, 1)  # [n_pred, n_gt]
+    inside = dist <= (interp_ray + 1e-6)  # [n_pred, n_gt]
+    return (~inside).float() * 9999.0
+
+
 class RayCastHungarianMatcher(nn.Module):
     """Hungarian matcher using class cost + analytical star-distance cost + polar IoU cost.
 
@@ -147,6 +183,13 @@ class RayCastHungarianMatcher(nn.Module):
             + self.cost_gain['centroid'] * cost_centroid
             + self.cost_gain['radial'] * cost_radial
         )
+
+        # Inner (containment) cost: 9999× penalty for queries outside GT polygon.
+        # Only predictions whose centroids fall inside the GT star-convex polygon
+        # are eligible for matching — matching LSP-DETR's hard constraint.
+        if use_analytical:
+            inner = _compute_inner_cost(pred_polygons, gt_polygons)
+            cost = cost + inner
 
         cost[cost.isnan() | cost.isinf()] = 0.0
         cost = cost.view(bs, nq, -1).cpu()
