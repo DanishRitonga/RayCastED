@@ -53,6 +53,10 @@ training:
   weight_decay: 0.0001
   warmup_epochs: 10
 
+  # Pretrained FCN backbone+neck weights (train102, bPQ=0.370, mAP50=0.533)
+  # Loads layers 0-20 from FCN checkpoint, random-initializes only the decoder head.
+  pretrained_ckpt: "/mnt/data/projects/RayCastED/output/bipartite/train102/weights/best.pt"
+
   # No pretrained backbone (YOLO26s trained from scratch)
   pretrained: false
 

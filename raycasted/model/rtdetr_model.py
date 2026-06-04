@@ -44,7 +44,7 @@ class RayCastRTDETRDetectionModel(RTDETRDetectionModel):
     and standard ultralytics parse_model for stock RT-DETR YAMLs (HGNetV2, etc.).
     """
 
-    def __init__(self, cfg='yolo26s-rtdetr-p234.yaml', ch=3, nc=None, verbose=True):
+    def __init__(self, cfg='yolo26s-rtdetr-p234.yaml', ch=3, nc=None, verbose=True, pretrained=None):
         from ultralytics.nn.tasks import yaml_model_load
         from ultralytics.utils import LOGGER
 
@@ -81,10 +81,57 @@ class RayCastRTDETRDetectionModel(RTDETRDetectionModel):
         else:
             self.stride = torch.tensor([4.0, 8.0, 16.0])
 
-        initialize_weights(self)
+        if pretrained and isinstance(pretrained, str):
+            self._load_pretrained_backbone(pretrained)
+        else:
+            initialize_weights(self)
+
         if verbose:
             self.info()
             LOGGER.info('')
+
+    def _load_pretrained_backbone(self, ckpt_path):
+        """Load backbone+neck weights from FCN checkpoint, random-init decoder only."""
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        if isinstance(ckpt, dict) and 'model' in ckpt:
+            src_sd = ckpt['model'].state_dict()
+        elif isinstance(ckpt, dict):
+            src_sd = ckpt
+        else:
+            from ultralytics.utils import LOGGER
+
+            LOGGER.warning(f'Unrecognized checkpoint format: {type(ckpt)}')
+            initialize_weights(self)
+            return
+
+        dst_sd = self.state_dict()
+        loaded = 0
+        skipped = 0
+        for key, param in src_sd.items():
+            if key.startswith('model.21.'):
+                skipped += 1
+                continue
+            if key in dst_sd and dst_sd[key].shape == param.shape:
+                dst_sd[key] = param
+                loaded += 1
+
+        self.load_state_dict(dst_sd, strict=False)
+        # Only random-init the decoder head (layer 21)
+        for key in list(dst_sd.keys()):
+            if key.startswith('model.21.'):
+                module_path = key.split('.')
+                obj = self.model
+                for comp in module_path:
+                    try:
+                        obj = obj[int(comp)] if comp.isdigit() else getattr(obj, comp)
+                    except (IndexError, AttributeError):
+                        obj = None
+                        break
+                if obj is not None and isinstance(obj, torch.nn.parameter.Parameter):
+                    torch.nn.init.normal_(obj)
+        from ultralytics.utils import LOGGER
+
+        LOGGER.info(f'Pretrained backbone+neck: {loaded} weights loaded, {skipped} head weights randomized')
 
     def init_criterion(self):
         """Create RayCast RT-DETR detection loss."""

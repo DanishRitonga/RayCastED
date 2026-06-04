@@ -703,7 +703,8 @@ class RayCastTrainer(DetectionTrainer):
         elif is_rtdetr:
             from raycasted.model.rtdetr_model import RayCastRTDETRDetectionModel
 
-            model = RayCastRTDETRDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
+            pretrained_ckpt = tcfg.get('pretrained_ckpt') if tcfg else None
+            model = RayCastRTDETRDetectionModel(cfg, ch=3, nc=nc, verbose=verbose, pretrained=pretrained_ckpt)
             return model
         else:
             model = RayCastDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
