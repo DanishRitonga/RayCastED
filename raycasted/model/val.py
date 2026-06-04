@@ -418,7 +418,8 @@ class RayCastValidator(DetectionValidator):
             # bPQ + mPQ via polar IoU matrix (same metric as training, no rasterization)
             iou_matrix = batch_result['iou_matrix']
             bpq, bsq, bdq = compute_bpq_from_iou(iou_matrix)
-            mpq = compute_mpq_from_iou(iou_matrix, predn['cls'] if not no_pred else np.array([]), cls)
+            pred_cls_np = predn['cls'].cpu().numpy() if not no_pred else np.array([])
+            mpq = compute_mpq_from_iou(iou_matrix, pred_cls_np, cls)
             self.metrics.update_bpq(bpq, bsq, bdq, mpq)
 
     def get_stats(self):
