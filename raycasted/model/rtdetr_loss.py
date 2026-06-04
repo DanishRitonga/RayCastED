@@ -72,7 +72,7 @@ class RayCastHungarianMatcher(nn.Module):
     ):
         super().__init__()
         if cost_gain is None:
-            cost_gain = {'class': 2, 'analytical': 5, 'piou': 2}
+            cost_gain = {'class': 1, 'centroid': 1, 'radial': 1}
         self.cost_gain = cost_gain
         self.use_fl = use_fl
         self.alpha = alpha
@@ -128,32 +128,24 @@ class RayCastHungarianMatcher(nn.Module):
         ray_cos, ray_sin = self._get_ray_directions(pred_polygons.device)
 
         if use_analytical:
-            cost_geo = _analytical_cost_per_image(
+            cost_radial = _analytical_cost_per_image(
                 pred_polygons, gt_vertices, crop_size, gt_groups, nq, ray_cos, ray_sin
             )
+            pred_xy = pred_polygons[:, :2]
+            gt_xy = gt_polygons[:, :2]
+            cost_centroid = (pred_xy.unsqueeze(1) - gt_xy.unsqueeze(0)).abs().sum(-1)
         else:
             pred_rays = pred_polygons[:, 2:]
             gt_rays = gt_polygons[:, 2:]
-            cost_ray = (pred_rays.unsqueeze(1) - gt_rays.unsqueeze(0)).abs().sum(-1)
+            cost_radial = (pred_rays.unsqueeze(1) - gt_rays.unsqueeze(0)).abs().sum(-1)
             pred_xy = pred_polygons[:, :2]
             gt_xy = gt_polygons[:, :2]
-            cost_xy = (pred_xy.unsqueeze(1) - gt_xy.unsqueeze(0)).abs().sum(-1)
-            cost_geo = cost_ray + cost_xy
-
-        n_pred = pred_polygons.shape[0]
-        n_gt = gt_polygons.shape[0]
-        if n_pred > 0 and n_gt > 0:
-            pred_exp = pred_polygons[:, 2:].unsqueeze(1).expand(n_pred, n_gt, -1)
-            gt_exp = gt_polygons[:, 2:].unsqueeze(0).expand(n_pred, n_gt, -1)
-            piou = polar_iou_pairwise_flat_torch(pred_exp, gt_exp)
-            cost_piou = 1.0 - piou
-        else:
-            cost_piou = torch.zeros(n_pred, n_gt, device=pred_polygons.device)
+            cost_centroid = (pred_xy.unsqueeze(1) - gt_xy.unsqueeze(0)).abs().sum(-1)
 
         cost = (
             self.cost_gain['class'] * cost_class
-            + self.cost_gain.get('analytical', self.cost_gain.get('ray', 5)) * cost_geo
-            + self.cost_gain['piou'] * cost_piou
+            + self.cost_gain['centroid'] * cost_centroid
+            + self.cost_gain['radial'] * cost_radial
         )
 
         cost[cost.isnan() | cost.isinf()] = 0.0
@@ -187,13 +179,13 @@ class RayCastRTDETRDetectionLoss(nn.Module):
     ):
         super().__init__()
         if loss_gain is None:
-            loss_gain = {'class': 1, 'ray': 5, 'piou': 2, 'no_object': 0.1}
+            loss_gain = {'class': 1, 'centroid': 1, 'ray': 1}
         self.nc = nc
         self.loss_gain = loss_gain
         self.aux_loss = aux_loss
         self.n_rays = n_rays or _const.N_RAYS
         self.matcher = RayCastHungarianMatcher(
-            cost_gain={'class': 2, 'analytical': 5, 'piou': 2},
+            cost_gain={'class': 1, 'centroid': 1, 'radial': 1},
             n_rays=self.n_rays,
         )
         from ultralytics.utils.loss import FocalLoss, VarifocalLoss
@@ -242,19 +234,22 @@ class RayCastRTDETRDetectionLoss(nn.Module):
         return {name: loss_cls.squeeze() * self.loss_gain['class']}
 
     def _get_loss_polygon(self, pred_polygons, gt_polygons, postfix='', gt_vertices=None, crop_size=None):
+        name_centroid = f'loss_centroid{postfix}'
         name_ray = f'loss_ray{postfix}'
-        name_piou = f'loss_piou{postfix}'
 
         loss = {}
         if len(gt_polygons) == 0:
+            loss[name_centroid] = torch.tensor(0.0, device=pred_polygons.device)
             loss[name_ray] = torch.tensor(0.0, device=pred_polygons.device)
-            loss[name_piou] = torch.tensor(0.0, device=pred_polygons.device)
             return loss
 
         pred_rays = pred_polygons[:, 2:]
         gt_rays = gt_polygons[:, 2:]
         pred_xy = pred_polygons[:, :2]
         gt_xy = gt_polygons[:, :2]
+
+        centroid_l1 = F.l1_loss(pred_xy, gt_xy, reduction='sum')
+        loss[name_centroid] = self.loss_gain['centroid'] * centroid_l1 / len(gt_polygons)
 
         use_analytical = gt_vertices is not None and crop_size is not None and len(pred_xy) > 0
 
@@ -263,15 +258,10 @@ class RayCastRTDETRDetectionLoss(nn.Module):
                 pred_xy, gt_vertices, crop_size, pred_polygons.device
             ).detach()
             ray_l1 = F.l1_loss(pred_rays, analytical_gt, reduction='sum')
-            ray_l1 += F.l1_loss(pred_xy, gt_xy, reduction='sum')
         else:
-            ray_l1 = F.l1_loss(pred_rays, gt_rays, reduction='sum') + F.l1_loss(pred_xy, gt_xy, reduction='sum')
+            ray_l1 = F.l1_loss(pred_rays, gt_rays, reduction='sum')
 
         loss[name_ray] = self.loss_gain['ray'] * ray_l1 / len(gt_polygons)
-
-        piou = polar_iou_torch(pred_rays.float(), gt_rays.float())
-        piou_loss = (1.0 - piou).sum() / len(gt_polygons)
-        loss[name_piou] = self.loss_gain['piou'] * piou_loss
 
         return {k: v.squeeze() for k, v in loss.items()}
 
@@ -396,13 +386,13 @@ class RayCastRTDETRDetectionLoss(nn.Module):
                 match_indices=match_indices,
             )
             loss[0] += loss_[f'loss_class{postfix}']
-            loss[1] += loss_[f'loss_ray{postfix}']
-            loss[2] += loss_[f'loss_piou{postfix}']
+            loss[1] += loss_[f'loss_centroid{postfix}']
+            loss[2] += loss_[f'loss_ray{postfix}']
 
         return {
             f'loss_class_aux{postfix}': loss[0],
-            f'loss_ray_aux{postfix}': loss[1],
-            f'loss_piou_aux{postfix}': loss[2],
+            f'loss_centroid_aux{postfix}': loss[1],
+            f'loss_ray_aux{postfix}': loss[2],
         }
 
     def forward(

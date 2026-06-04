@@ -131,7 +131,7 @@ class RayCastRTDETRDetectionModel(RTDETRDetectionModel):
         )
 
         return sum(loss.values()), torch.as_tensor(
-            [loss[k].detach() for k in ['loss_class', 'loss_ray', 'loss_piou']],
+            [loss[k].detach() for k in ['loss_class', 'loss_centroid', 'loss_ray']],
             device=img.device,
         )
 

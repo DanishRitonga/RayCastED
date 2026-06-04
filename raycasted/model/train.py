@@ -964,7 +964,7 @@ class RayCastTrainer(DetectionTrainer):
             if isinstance(head, LSPTransformer):
                 self.loss_names = ('ce_loss', 'centroid_loss', 'radial_loss')
         elif isinstance(head, RayCastRTDETRDecoder):
-            self.loss_names = ('loss_class', 'loss_ray', 'loss_piou')
+            self.loss_names = ('loss_class', 'loss_centroid', 'loss_ray')
         else:
             self.loss_names = (
                 'xy_loss',
