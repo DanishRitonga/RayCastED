@@ -254,6 +254,8 @@ def compute_bpq_from_iou(
     Returns:
         (bPQ, bSQ, bDQ) tuple. Returns (0.0, 0.0, 0.0) if empty.
     """
+    if hasattr(iou_matrix, 'cpu') and iou_matrix.is_cuda:
+        iou_matrix = iou_matrix.cpu().numpy()
     n_pred, n_gt = iou_matrix.shape
 
     if n_gt == 0 or n_pred == 0:
@@ -294,13 +296,23 @@ def compute_mpq_from_iou(
     Returns:
         Mean per-class PQ. Returns 0.0 if no valid classes.
     """
+    if len(target_cls) == 0:
+        return 0.0
+
+    iou_np = iou_matrix.cpu().numpy() if hasattr(iou_matrix, 'cpu') else np.asarray(iou_matrix)
+    if iou_np.shape[0] == 0 or iou_np.shape[1] == 0:
+        return 0.0
+
     unique_cls = np.unique(target_cls).astype(int)
+    iou_np = np.asarray(iou_matrix.cpu() if hasattr(iou_matrix, 'cpu') else iou_matrix)
+    p_cls = np.asarray(pred_cls) if not isinstance(pred_cls, np.ndarray) else pred_cls
+    t_cls = np.asarray(target_cls) if not isinstance(target_cls, np.ndarray) else target_cls
     pq_values = []
 
     for c in unique_cls:
-        pred_mask = pred_cls == c
-        gt_mask = target_cls == c
-        sub_iou = iou_matrix[pred_mask][:, gt_mask] if pred_mask.any() and gt_mask.any() else np.zeros((0, 0))
+        pred_mask = p_cls == c
+        gt_mask = t_cls == c
+        sub_iou = iou_np[pred_mask][:, gt_mask] if pred_mask.any() and gt_mask.any() else np.zeros((0, 0))
         pq_c, _, _ = compute_bpq_from_iou(sub_iou, iou_threshold)
         pq_values.append(pq_c)
 

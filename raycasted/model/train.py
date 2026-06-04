@@ -594,6 +594,9 @@ class RayCastTrainer(DetectionTrainer):
     def plot_training_labels(self):
         """Skip standard bbox label plotting — incompatible with raycast polygon data."""
 
+    def plot_training_samples(self, *args, **kwargs):
+        """Skip training sample plotting — incompatible with raycast polygon data."""
+
     def optimizer_step(self):
         """Override gradient clipping to use configurable max_norm (LSP-DETR uses 0.1).
 
