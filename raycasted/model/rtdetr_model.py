@@ -138,7 +138,10 @@ class RayCastRTDETRDetectionModel(RTDETRDetectionModel):
         from raycasted.data.etl.utils import constants as _const
         from raycasted.model.rtdetr_loss import RayCastRTDETRDetectionLoss
 
-        return RayCastRTDETRDetectionLoss(nc=self.nc, use_vfl=True, n_rays=_const.N_RAYS)
+        return RayCastRTDETRDetectionLoss(
+            nc=self.nc, use_vfl=True, n_rays=_const.N_RAYS,
+            loss_gain={'class': 1, 'centroid': 1, 'ray': 1},
+        )
 
     def loss(self, batch, preds=None):
         """Compute training loss for ray polygon predictions."""
