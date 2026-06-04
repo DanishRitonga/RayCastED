@@ -49,6 +49,7 @@ class SpatialGAT(nn.Module):
         self.k_proj = nn.Linear(embed_dim, embed_dim)
         self.v_proj = nn.Linear(embed_dim, embed_dim)
         self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self.rel_pos_proj = nn.Linear(2, num_heads, bias=False)  # Δx,Δy → per-head attn bias
         self.centroids = None
 
     def forward(
@@ -77,14 +78,29 @@ class SpatialGAT(nn.Module):
             centroids = self.centroids.detach().clamp(1e-6, 1.0 - 1e-6)
             dists = torch.cdist(centroids, centroids)
             _, knn_idx = dists.topk(min(self.k + 1, L), dim=-1, largest=False)
-            knn_idx = knn_idx[:, :, 1:]  # exclude self
+            knn_idx = knn_idx[:, :, 1:]  # [B, L, K]
             spatial_bool = torch.zeros(B, 1, L, L, dtype=torch.bool, device=attn_weights.device)
+            # Allow self-attention
             b_idx = torch.arange(B, device=attn_weights.device).view(B, 1, 1)
-            # Always allow self-attention
             spatial_bool[b_idx, :, torch.arange(L, device=attn_weights.device).view(1, L, 1),
                         torch.arange(L, device=attn_weights.device).view(1, 1, L)] = True
             # Allow K nearest neighbors
             spatial_bool[b_idx, :, torch.arange(L, device=attn_weights.device).view(1, L, 1), knn_idx] = True
+
+            # Relative position bias: Δx,Δy → per-head scalar
+            b_exp = torch.arange(B, device=attn_weights.device).view(B, 1, 1).expand(B, L, self.k)
+            c_neigh = centroids[b_exp, knn_idx]  # [B, L, K, 2]
+            c_query = centroids.unsqueeze(2)   # [B, L, 1, 2]
+            rel_pos = c_neigh - c_query         # [B, L, K, 2]
+            rel_bias = self.rel_pos_proj(rel_pos)  # [B, L, K, n_heads]
+            rel_bias = rel_bias.permute(0, 3, 1, 2)  # [B, n_heads, L, K]
+
+            # Scatter into [B, n_heads, L, L]
+            q_idx = torch.arange(L, device=attn_weights.device).view(1, 1, L, 1).expand(B, self.num_heads, L, self.k)
+            h_idx = torch.arange(self.num_heads, device=attn_weights.device).view(1, self.num_heads, 1, 1)
+            b_exp = b_idx.view(B, 1, 1, 1).expand(B, self.num_heads, L, self.k)
+            knn_exp = knn_idx.unsqueeze(1).expand(B, self.num_heads, L, self.k)
+            attn_weights[b_exp, h_idx, q_idx, knn_exp] += rel_bias
 
         attn_weights = attn_weights.masked_fill(~spatial_bool, float('-inf'))
 
