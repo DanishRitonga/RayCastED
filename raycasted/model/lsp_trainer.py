@@ -168,6 +168,9 @@ def train_lsp(
     seed: int = 42,
     device: torch.device | str = 'cuda',
     allow_overlaps: bool = True,
+    backbone_name: str = 'microsoft/swinv2-tiny-patch4-window16-256',
+    use_gnn: bool = False,
+    gnn_k: int = 8,
 ) -> None:
     """Train LSP-DETR model on PanNuke using exact LSP-DETR recipe."""
     import os
@@ -242,7 +245,9 @@ def train_lsp(
     _logger.info('Train: %d samples, Val: %d samples', len(train_ds), len(val_ds))
     _logger.info('Steps per epoch: %d', len(train_loader))
 
-    model = LSPDetrDetectionModel(nc=nc, n_rays=n_rays, crop_size=crop_size)
+    model = LSPDetrDetectionModel(
+        nc=nc, n_rays=n_rays, crop_size=crop_size, backbone_name=backbone_name, use_gnn=use_gnn, gnn_k=gnn_k
+    )
     model = model.to(_device)
     model = torch.compile(model, dynamic=True)
     _logger.info('Model: %.1fM params (compiled)', sum(p.numel() for p in model.parameters()) / 1e6)
@@ -464,6 +469,10 @@ def main():  # noqa: D103
     parser.add_argument('--warmup', type=int, default=10)
     parser.add_argument('--freeze', type=int, default=30)
     parser.add_argument('--backbone-lr-ratio', type=float, default=0.1)
+    parser.add_argument('--backbone-lr-ratio', type=float, default=0.1)
+    parser.add_argument('--backbone', type=str, default='microsoft/swinv2-tiny-patch4-window16-256')
+    parser.add_argument('--gnn', action='store_true', default=False)
+    parser.add_argument('--gnn-k', type=int, default=8)
     parser.add_argument('--clip-grad', type=float, default=0.1)
     parser.add_argument('--n-rays', type=int, default=64)
     parser.add_argument('--nc', type=int, default=5)
@@ -485,6 +494,10 @@ def main():  # noqa: D103
         warmup=args.warmup,
         freeze_epochs=args.freeze,
         backbone_lr_ratio=args.backbone_lr_ratio,
+        backbone_lr_ratio=args.backbone_lr_ratio,
+        backbone_name=args.backbone,
+        use_gnn=args.gnn,
+        gnn_k=args.gnn_k,
         clip_grad=args.clip_grad,
         n_rays=args.n_rays,
         nc=args.nc,

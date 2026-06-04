@@ -247,6 +247,9 @@ class LSPTransformer(nn.Module):
         feature_levels: tuple[int, ...],
         self_sta_config: dict[str, int],
         cross_sta_config: tuple[dict[str, int], ...],
+        use_gnn: bool = False,
+        gnn_k: int = 8,
+        gnn_dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self.query_block_size = query_block_size
@@ -258,15 +261,29 @@ class LSPTransformer(nn.Module):
 
         self.layers = nn.ModuleList()
         for level in feature_levels:
-            self.layers.append(
-                Layer(
-                    dim=dim,
-                    src_dim=feature_channels[level],
-                    num_heads=num_heads,
-                    self_sta=self_sta_config,
-                    cross_sta=cross_sta_config[level],
+            if use_gnn:
+                from .query_gnn import GNNDecoderLayer
+
+                self.layers.append(
+                    GNNDecoderLayer(
+                        dim=dim,
+                        src_dim=feature_channels[level],
+                        num_heads=num_heads,
+                        self_k=gnn_k,
+                        cross_k=gnn_k,
+                        dropout=gnn_dropout,
+                    )
                 )
-            )
+            else:
+                self.layers.append(
+                    Layer(
+                        dim=dim,
+                        src_dim=feature_channels[level],
+                        num_heads=num_heads,
+                        self_sta=self_sta_config,
+                        cross_sta=cross_sta_config[level],
+                    )
+                )
 
         self.class_head = nn.Linear(dim, self.num_classes)
         self.point_head = nn.ModuleList([MLP(dim, dim, 2, 3) for _ in feature_levels])
