@@ -669,6 +669,7 @@ class RayCastTrainer(DetectionTrainer):
             from raycasted.model.rtdetr_model import RayCastRTDETRDetectionModel
 
             model = RayCastRTDETRDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
+            return model
         else:
             model = RayCastDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
 
