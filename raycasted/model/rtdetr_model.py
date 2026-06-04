@@ -108,8 +108,8 @@ class RayCastRTDETRDetectionModel(RTDETRDetectionModel):
             'bboxes': batch['bboxes'].to(device=img.device),
             'batch_idx': batch_idx.to(img.device, dtype=torch.long).view(-1),
             'gt_groups': gt_groups,
-            'gt_vertices': batch['gt_vertices'].to(device=img.device),
-            'crop_size': crop_size,
+            'gt_vertices': batch['gt_vertices'].to(device=img.device) if self.training else None,
+            'crop_size': crop_size if self.training else None,
         }
 
         if preds is None:

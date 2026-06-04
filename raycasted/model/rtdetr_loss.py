@@ -23,6 +23,35 @@ from raycasted.model.blocks.star_distances_analytical import (
 )
 
 
+def _analytical_cost_per_image(
+    pred_polygons_flat, gt_vertices, crop_size, gt_groups, nq, ray_cos, ray_sin
+):
+    """Compute analytical ray cost per-image (block-diagonal) to avoid OOM.
+
+    Computing [B*nq, sum_gt, 64, 64] at once explodes VRAM for dense images.
+    Instead, fill a block-diagonal cost matrix where only image i's preds
+    are matched against image i's GTs.
+    """
+    device = pred_polygons_flat.device
+    dtype = pred_polygons_flat.dtype
+    bs = len(gt_groups)
+    total_gt = sum(gt_groups)
+
+    cost_geo = torch.zeros(bs * nq, total_gt, device=device, dtype=dtype)
+    pred_offset = 0
+    gt_offset = 0
+    for b in range(bs):
+        n_gt_b = gt_groups[b]
+        if n_gt_b > 0:
+            pred_xy_b = pred_polygons_flat[pred_offset : pred_offset + nq, :2] * crop_size
+            gt_v_b = gt_vertices[gt_offset : gt_offset + n_gt_b]
+            cost_b = analytical_ray_cost(pred_xy_b, gt_v_b, ray_cos, ray_sin)  # [nq, n_gt_b]
+            cost_geo[pred_offset : pred_offset + nq, gt_offset : gt_offset + n_gt_b] = cost_b
+        pred_offset += nq
+        gt_offset += n_gt_b
+    return cost_geo
+
+
 class RayCastHungarianMatcher(nn.Module):
     """Hungarian matcher using class cost + analytical star-distance cost + polar IoU cost.
 
@@ -99,8 +128,9 @@ class RayCastHungarianMatcher(nn.Module):
         ray_cos, ray_sin = self._get_ray_directions(pred_polygons.device)
 
         if use_analytical:
-            pred_xy_px = pred_polygons[:, :2] * crop_size
-            cost_geo = analytical_ray_cost(pred_xy_px, gt_vertices, ray_cos, ray_sin)
+            cost_geo = _analytical_cost_per_image(
+                pred_polygons, gt_vertices, crop_size, gt_groups, nq, ray_cos, ray_sin
+            )
         else:
             pred_rays = pred_polygons[:, 2:]
             gt_rays = gt_polygons[:, 2:]

@@ -52,5 +52,5 @@ head:
 
   # --- RayCast RT-DETR Decoder: P2-P3-P4 ---
   # Args: [nc, hd, nq, ndp, nh, ndl, d_ffn, dropout, nd, n_rays]
-  # ndl=6 (full decoder depth), nd=100 (CDN denoising for stable training)
-  - [[14, 17, 20], 1, RayCastRTDETRDecoder, [5, 256, 100, 4, 8, 6, 1024, 0.0, 100, 64]]
+  # ndl=6 (full decoder depth), nd=20 (CDN denoising — 168→45 extra queries)
+  - [[14, 17, 20], 1, RayCastRTDETRDecoder, [5, 256, 100, 4, 8, 6, 1024, 0.0, 20, 64]]
