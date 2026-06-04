@@ -311,8 +311,13 @@ def compute_mpq_from_iou(
     for c in unique_cls:
         pred_mask = p_cls == c
         gt_mask = t_cls == c
-        sub_iou = iou_np[pred_mask][:, gt_mask] if pred_mask.any() and gt_mask.any() else np.zeros((0, 0))
+        if pred_mask.any() and gt_mask.any():
+            sub_iou = iou_np[pred_mask][:, gt_mask]
+        else:
+            sub_iou = np.zeros((0, 0))
         pq_c, _, _ = compute_bpq_from_iou(sub_iou, iou_threshold)
-        pq_values.append(pq_c)
+        pq_values.append(float(np.clip(pq_c, 0.0, 1.0)))
 
-    return float(np.mean(pq_values)) if pq_values else 0.0
+    if not pq_values:
+        return 0.0
+    return float(np.mean(pq_values))
