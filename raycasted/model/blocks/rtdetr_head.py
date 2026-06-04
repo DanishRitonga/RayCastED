@@ -404,24 +404,26 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
         p4_feat = raw_features[-1]  # [B, C_P4, H_P4, W_P4]
         p4_proj = self.input_proj[-1](p4_feat)  # [B, hd, H, W]
         _, _, H_p4, W_p4 = p4_proj.shape
+        device = p4_proj.device
+        dtype = p4_proj.dtype
         crop_size = H_p4 * 16  # P4 stride=16 → ×16 = image size
         stride = self.query_stride
         grid_h = int(crop_size // stride)
         grid_w = int(crop_size // stride)
         nq = grid_h * grid_w
 
-        cy = (torch.arange(grid_h, device=p4_proj.device, dtype=torch.float32) + 0.5) * stride / crop_size
-        cx = (torch.arange(grid_w, device=p4_proj.device, dtype=torch.float32) + 0.5) * stride / crop_size
+        cy = (torch.arange(grid_h, device=device, dtype=torch.float32) + 0.5) * stride / crop_size
+        cx = (torch.arange(grid_w, device=device, dtype=torch.float32) + 0.5) * stride / crop_size
         gy, gx = torch.meshgrid(cy, cx, indexing='ij')
         centroids = torch.stack([gx.flatten(), gy.flatten()], dim=-1)  # [nq, 2], normalized [0,1]
-        centroids = centroids.unsqueeze(0).expand(bs, -1, -1)  # [B, nq, 2]
+        centroids = centroids.unsqueeze(0).expand(bs, -1, -1).to(dtype=dtype)  # [B, nq, 2]
 
-        grid_sample_input = torch.stack([gx * 2 - 1, gy * 2 - 1], dim=-1).unsqueeze(0).expand(bs, -1, -1, -1).to(dtype=p4_proj.dtype)
+        grid_sample_input = torch.stack([gx * 2 - 1, gy * 2 - 1], dim=-1).unsqueeze(0).expand(bs, -1, -1, -1).to(dtype=dtype)
         sampled_feats = F.grid_sample(p4_proj, grid_sample_input, align_corners=False)  # [B, hd, grid_h, grid_w]
         top_k_features = sampled_feats.flatten(2).transpose(1, 2)  # [B, nq, hd]
 
         initial_radius = stride / (2 * crop_size)  # normalized radius in [0,1]
-        rays = torch.full((bs, nq, self.n_rays), initial_radius, device=p4_proj.device, dtype=p4_proj.dtype)
+        rays = torch.full((bs, nq, self.n_rays), initial_radius, device=device, dtype=dtype)
         polygons = torch.cat([centroids, rays], dim=-1)  # [B, nq, raycast_dim]
         anchors_encoded = encode_polygon(polygons)
 
@@ -434,7 +436,7 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
             refer_polygon_logits = torch.cat([dn_bbox, refer_polygon_logits], 1)
             refer_centroids = torch.cat([dn_centroids, refer_centroids], 1)
 
-        enc_scores = torch.zeros(bs, nq, self.nc, device=p4_proj.device, dtype=p4_proj.dtype)
+        enc_scores = torch.zeros(bs, nq, self.nc, device=device, dtype=dtype)
         embeddings = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1) if self.learnt_init_query else top_k_features
 
         if self.training:
