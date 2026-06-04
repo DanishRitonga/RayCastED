@@ -8,7 +8,7 @@ Key differences from standard RTDETRDecoder:
 - Anchors are n_rays-dimensional circles instead of 4-dim boxes
 - Iterative refinement: sigmoid for xy, exp for rays (vs sigmoid for all 4)
 - Cross-attention reference points use centroids only (2-dim), not full polygon
-- Denoising disabled by default (nd=0) — ray-polygon noise TBD
+- Denoising: raycast-aware _get_cdn_group_raycast applies centroid jitter + ray noise
 """
 
 import torch
@@ -21,6 +21,108 @@ from ultralytics.nn.modules.transformer import (
 from ultralytics.utils.torch_utils import TORCH_1_11
 
 from raycasted.data.etl.utils import constants as _const
+
+
+def _get_cdn_group_raycast(
+    batch,
+    num_classes,
+    num_queries,
+    class_embed,
+    num_dn=100,
+    cls_noise_ratio=0.5,
+    box_noise_scale=1.0,
+    training=False,
+):
+    """Raycast-aware CDN group builder — same logic as ultralytics get_cdn_group.
+
+    Works with n_rays-dim polygon bboxes instead of 4-dim xywh bboxes.
+    Noise strategy: additive on centroids, multiplicative on rays.
+    """
+    if (not training) or num_dn <= 0 or batch is None:
+        return None, None, None, None
+    gt_groups = batch['gt_groups']
+    total_num = sum(gt_groups)
+    max_nums = max(gt_groups)
+    if max_nums == 0:
+        return None, None, None, None
+
+    num_group = num_dn // max_nums
+    num_group = 1 if num_group == 0 else num_group
+    bs = len(gt_groups)
+    gt_cls = batch['cls']
+    gt_bbox = batch['bboxes']
+    b_idx = batch['batch_idx']
+
+    dn_cls = gt_cls.repeat(2 * num_group)
+    dn_bbox = gt_bbox.repeat(2 * num_group, 1)
+    dn_b_idx = b_idx.repeat(2 * num_group).view(-1)
+
+    neg_idx = torch.arange(total_num * num_group, dtype=torch.long, device=gt_bbox.device) + num_group * total_num
+
+    if cls_noise_ratio > 0:
+        mask = torch.rand(dn_cls.shape, device=dn_cls.device) < (cls_noise_ratio * 0.5)
+        idx = torch.nonzero(mask).squeeze(-1)
+        new_label = torch.randint_like(idx, 0, num_classes, dtype=dn_cls.dtype, device=dn_cls.device)
+        dn_cls[idx] = new_label
+
+    if box_noise_scale > 0:
+        centroid_noise = (torch.rand_like(dn_bbox[:, :2]) * 2 - 1) * box_noise_scale * 0.05
+        centroid_noise = centroid_noise.clamp(-0.25, 0.25)
+
+        ray_std = box_noise_scale * 0.1
+        ray_noise = torch.randn_like(dn_bbox[:, 2:]) * ray_std
+        ray_noise = ray_noise.clamp(-0.5, 0.5)
+
+        rand_sign = torch.randint_like(dn_bbox[:, :1], 0, 2, dtype=torch.float) * 2.0 - 1.0
+        rand_scale = torch.rand_like(dn_bbox[:, 2:])
+        rand_scale[neg_idx] += 1.0
+        ray_noise = ray_noise * rand_sign * rand_scale
+
+        dn_bbox = torch.cat(
+            [
+                (dn_bbox[:, :2] + centroid_noise).clamp(0.0, 1.0),
+                (dn_bbox[:, 2:] + ray_noise).clamp(0.0, 1.0),
+            ],
+            dim=1,
+        )
+        dn_bbox = torch.logit(dn_bbox.clamp(1e-6, 1.0 - 1e-6))
+
+    num_dn = int(max_nums * 2 * num_group)
+    bbox_dim = gt_bbox.shape[-1]
+    dn_cls_embed = class_embed[dn_cls]
+    padding_cls = torch.zeros(bs, num_dn, dn_cls_embed.shape[-1], device=gt_cls.device)
+    padding_bbox = torch.zeros(bs, num_dn, bbox_dim, device=gt_bbox.device)
+
+    map_indices = torch.cat([torch.tensor(range(num), dtype=torch.long) for num in gt_groups])
+    pos_idx = torch.stack([map_indices + max_nums * i for i in range(num_group)], dim=0)
+
+    map_indices = torch.cat([map_indices + max_nums * i for i in range(2 * num_group)])
+    padding_cls[(dn_b_idx, map_indices)] = dn_cls_embed
+    padding_bbox[(dn_b_idx, map_indices)] = dn_bbox
+
+    tgt_size = num_dn + num_queries
+    attn_mask = torch.zeros([tgt_size, tgt_size], dtype=torch.bool)
+    attn_mask[num_dn:, :num_dn] = True
+    for i in range(num_group):
+        if i == 0:
+            attn_mask[max_nums * 2 * i : max_nums * 2 * (i + 1), max_nums * 2 * (i + 1) : num_dn] = True
+        if i == num_group - 1:
+            attn_mask[max_nums * 2 * i : max_nums * 2 * (i + 1), : max_nums * i * 2] = True
+        else:
+            attn_mask[max_nums * 2 * i : max_nums * 2 * (i + 1), max_nums * 2 * (i + 1) : num_dn] = True
+            attn_mask[max_nums * 2 * i : max_nums * 2 * (i + 1), : max_nums * 2 * i] = True
+    dn_meta = {
+        'dn_pos_idx': [p.reshape(-1) for p in pos_idx.cpu().split(list(gt_groups), dim=1)],
+        'dn_num_group': num_group,
+        'dn_num_split': [num_dn, num_queries],
+    }
+
+    return (
+        padding_cls.to(class_embed.device),
+        padding_bbox.to(class_embed.device),
+        attn_mask.to(class_embed.device),
+        dn_meta,
+    )
 
 
 def encode_polygon(polygon: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -166,7 +268,6 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
             dn_centroids = dn_bbox[..., :2] if dn_bbox.shape[-1] > 2 else dn_bbox
             refer_polygon_logits = torch.cat([dn_bbox, refer_polygon_logits], 1)
             refer_centroids = torch.cat([dn_centroids, refer_centroids], 1)
-            enc_polygons = torch.cat([decode_polygon(dn_bbox) if dn_bbox.shape[-1] > 2 else dn_bbox, enc_polygons], 1)
 
         enc_scores = enc_outputs_scores[batch_ind, topk_ind].view(bs, self.num_queries, -1)
         embeddings = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1) if self.learnt_init_query else top_k_features
@@ -184,10 +285,8 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
 
     def forward(self, x, batch=None):
         """Run full encoder-decoder forward pass."""
-        from ultralytics.models.utils.ops import get_cdn_group
-
         feats, shapes = self._get_encoder_input(x)
-        dn_embed, dn_bbox, attn_mask, dn_meta = get_cdn_group(
+        dn_embed, dn_bbox, attn_mask, dn_meta = _get_cdn_group_raycast(
             batch,
             self.nc,
             self.num_queries,

@@ -52,6 +52,5 @@ head:
 
   # --- RayCast RT-DETR Decoder: P2-P3-P4 ---
   # Args: [nc, hd, nq, ndp, nh, ndl, d_ffn, dropout, nd, n_rays]
-  # hd=256, nq=100 (nuclei have ~28 cells/image), ndp=4, nh=8, ndl=3 (lighter),
-  # d_ffn=1024, nd=0 (no denoising for now), n_rays=64
-  - [[14, 17, 20], 1, RayCastRTDETRDecoder, [5, 256, 100, 4, 8, 3, 1024, 0.0, 0, 64]]
+  # ndl=6 (full decoder depth), nd=100 (CDN denoising for stable training)
+  - [[14, 17, 20], 1, RayCastRTDETRDecoder, [5, 256, 100, 4, 8, 6, 1024, 0.0, 100, 64]]
