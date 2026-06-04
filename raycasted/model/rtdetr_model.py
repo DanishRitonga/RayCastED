@@ -159,7 +159,7 @@ class RayCastRTDETRDetectionModel(RTDETRDetectionModel):
             'crop_size': crop_size if self.training else None,
         }
 
-        if preds is None:
+        if preds is None or not self.training:
             preds = self.predict(img, batch=targets)
 
         dec_polygons, dec_scores, enc_polygons, enc_scores, dn_meta = preds if self.training else preds[1]
