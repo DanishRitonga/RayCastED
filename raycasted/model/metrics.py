@@ -272,3 +272,36 @@ def compute_bpq_from_iou(
     pq = dq * sq
 
     return float(pq), float(sq), float(dq)
+
+
+def compute_mpq_from_iou(
+    iou_matrix: np.ndarray,
+    pred_cls: np.ndarray,
+    target_cls: np.ndarray,
+    iou_threshold: float = 0.5,
+) -> float:
+    """Compute mean per-class Panoptic Quality from IoU matrix and class labels.
+
+    For each class present in GT, extracts the sub-matrix of class-matched
+    pred-GT pairs, computes PQ via Hungarian matching, and averages.
+
+    Args:
+        iou_matrix: [N_pred, N_gt] pairwise IoU matrix.
+        pred_cls: [N_pred] predicted class indices.
+        target_cls: [N_gt] ground truth class indices.
+        iou_threshold: Minimum IoU for valid match (default 0.5).
+
+    Returns:
+        Mean per-class PQ. Returns 0.0 if no valid classes.
+    """
+    unique_cls = np.unique(target_cls).astype(int)
+    pq_values = []
+
+    for c in unique_cls:
+        pred_mask = pred_cls == c
+        gt_mask = target_cls == c
+        sub_iou = iou_matrix[pred_mask][:, gt_mask] if pred_mask.any() and gt_mask.any() else np.zeros((0, 0))
+        pq_c, _, _ = compute_bpq_from_iou(sub_iou, iou_threshold)
+        pq_values.append(pq_c)
+
+    return float(np.mean(pq_values)) if pq_values else 0.0
