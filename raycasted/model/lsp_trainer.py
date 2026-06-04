@@ -469,7 +469,6 @@ def main():  # noqa: D103
     parser.add_argument('--warmup', type=int, default=10)
     parser.add_argument('--freeze', type=int, default=30)
     parser.add_argument('--backbone-lr-ratio', type=float, default=0.1)
-    parser.add_argument('--backbone-lr-ratio', type=float, default=0.1)
     parser.add_argument('--backbone', type=str, default='microsoft/swinv2-tiny-patch4-window16-256')
     parser.add_argument('--gnn', action='store_true', default=False)
     parser.add_argument('--gnn-k', type=int, default=8)
@@ -493,7 +492,6 @@ def main():  # noqa: D103
         wd=args.wd,
         warmup=args.warmup,
         freeze_epochs=args.freeze,
-        backbone_lr_ratio=args.backbone_lr_ratio,
         backbone_lr_ratio=args.backbone_lr_ratio,
         backbone_name=args.backbone,
         use_gnn=args.gnn,
