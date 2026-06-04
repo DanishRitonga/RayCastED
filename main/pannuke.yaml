@@ -216,6 +216,11 @@ training:
   hierarchical_cls_detach: true
   hierarchical_binary_threshold: 0.01  # Hard gate: keep anchors with sigmoid(binary) > 0.01
 
+  # Local 3×3 window self-attention on o2o cls features (P2+P3 only)
+  # Unlike train31/32 (global 5376-token attention), each anchor only sees
+  # 8 local neighbors — preserves fg/bg gap.  0 learnable params.
+  local_window_attn: false
+
   # CLS-only TAL: o2o assigner uses cls^alpha * gaussian_decay (no pIoU)
   # Picks anchors based on what cls head already believes, gated by spatial proximity.
   # Self-reinforcing: higher cls → better assignment → even higher cls.

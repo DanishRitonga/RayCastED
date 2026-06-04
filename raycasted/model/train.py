@@ -737,6 +737,7 @@ class RayCastTrainer(DetectionTrainer):
         hierarchical_cls = bool(tcfg.get('hierarchical_cls', False)) if tcfg else False
         hierarchical_cls_detach = bool(tcfg.get('hierarchical_cls_detach', True)) if tcfg else True
         hierarchical_binary_threshold = float(tcfg.get('hierarchical_binary_threshold', 0.01)) if tcfg else 0.01
+        local_window_attn = bool(tcfg.get('local_window_attn', False)) if tcfg else False
 
         if isinstance(old_head, RayCastDetect):
             # YAML already specifies RayCastDetect — ensure n_rays matches
@@ -803,6 +804,15 @@ class RayCastTrainer(DetectionTrainer):
                 if old_head._end2end_arg:
                     old_head.one2one_prediction_refinement_attn = copy.deepcopy(old_head.prediction_refinement_attn)
                     old_head.prediction_refinement_attn = None
+
+            # --- Local window attention (o2o only, P2+P3) ---
+            if local_window_attn and getattr(old_head, 'local_window_attn', None) is None:
+                from raycasted.model.blocks.head import LocalWindowAttention
+
+                c3 = old_head.cv3[0][-1].in_channels
+                old_head.local_window_attn = nn.ModuleList(
+                    [LocalWindowAttention(c3) for _ in range(2)]
+                )
 
             # Rebuild cv2 with DCN if configured and not already present
             if dcn_in_reg_head:
@@ -886,6 +896,7 @@ class RayCastTrainer(DetectionTrainer):
                 hierarchical_cls=hierarchical_cls,
                 hierarchical_cls_detach=hierarchical_cls_detach,
                 hierarchical_binary_threshold=hierarchical_binary_threshold,
+                local_window_attn=local_window_attn,
             )
             # Copy attributes set by parse_model (f=from layers, i=layer index, etc.)
             for attr in ('f', 'i', 'type'):

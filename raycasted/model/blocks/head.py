@@ -28,6 +28,43 @@ from raycasted.model.blocks.dcn import DCNConv
 RAYCAST_DIM = 2 + _const.N_RAYS
 
 
+class LocalWindowAttention(nn.Module):
+    """3×3 local dot-product attention via F.unfold/fold.
+
+    Unlike cross-scale self-attention (train31/32) which broadcast-washes
+    fg signal into 98.7% bg anchors, this module restricts attention to
+    a local 3×3 spatial window. Each anchor only sees its 8 nearest
+    neighbors — preserving the fg/bg confidence gap that global attention
+    destroys.
+
+    0 learnable parameters — purely geometric local attention with
+    scale = 1/√C matching standard scaled dot-product attention.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.channels = channels
+        self.scale = channels**-0.5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply local 3×3 window self-attention with residual connection."""
+        b, c, h, w = x.shape
+        n = h * w
+        patches = F.unfold(x, kernel_size=3, padding=1)  # [B, C*9, N]
+        patches = patches.view(b, c, 9, n).permute(0, 3, 1, 2)  # [B, N, C, 9]
+        identity = patches[:, :, :, 4:5]  # [B, N, C, 1] — center pixel
+        q = identity  # [B, N, C, 1]
+        kv_indices = [0, 1, 2, 3, 5, 6, 7, 8]
+        kv = patches[:, :, :, kv_indices]  # [B, N, C, 8]
+        k = kv
+        v = kv
+        attn = (q.transpose(-2, -1) @ k) * self.scale  # [B, N, 1, 8]
+        attn = attn.softmax(dim=-1)
+        out = (attn @ v.transpose(-2, -1)).squeeze(-2)  # [B, N, C]
+        out = out.transpose(1, 2).view(b, c, h, w)  # [B, C, H, W]
+        return identity.squeeze(-1).transpose(1, 2).view(b, c, h, w) + out
+
+
 class RayRefinementBlock(nn.Module):
     """3x3 depthwise conv + GroupNorm + SiLU + residual skip.
 
@@ -233,6 +270,7 @@ class RayCastDetect(Detect):
         hierarchical_cls: bool = False,
         hierarchical_cls_detach: bool = True,
         hierarchical_binary_threshold: float = 0.01,
+        local_window_attn: bool = False,
     ):
         """Initialize polygon detection head.
 
@@ -376,6 +414,10 @@ class RayCastDetect(Detect):
         else:
             self.prediction_refinement_attn = None
 
+        self.local_window_attn = None
+        if local_window_attn:
+            self.local_window_attn = nn.ModuleList([LocalWindowAttention(c3) for _ in range(2)])  # P2+P3
+
         # Separate o2o heads — both box (cv2) and cls (cv3) are deepcopied.
         # Shared cv3 caused 11.5x overprediction: o2m's dense positives (topk=15)
         # taught the shared cls head to fire high scores for many anchors per GT,
@@ -412,6 +454,8 @@ class RayCastDetect(Detect):
             result['cls_head_class'] = self.one2one_cv3_class
         if hasattr(self, 'one2one_prediction_refinement_attn') and self.one2one_prediction_refinement_attn is not None:
             result['prediction_refinement_attn'] = self.one2one_prediction_refinement_attn
+        if self.local_window_attn is not None:
+            result['cls_attn'] = self.local_window_attn
         return result
 
     def forward_head(
@@ -422,6 +466,7 @@ class RayCastDetect(Detect):
         prediction_refinement_attn: nn.Module | None = None,
         cls_head_binary: nn.Module | None = None,
         cls_head_class: nn.Module | None = None,
+        cls_attn: nn.Module | None = None,
     ) -> dict[str, torch.Tensor]:
         """Concatenate polygon predictions and class scores across scales.
 
@@ -439,10 +484,24 @@ class RayCastDetect(Detect):
 
         if cls_head_binary is not None and cls_head_class is not None:
             binary_in = [xi.detach() for xi in x] if self.hierarchical_cls_detach else x
-            binary_scores = torch.cat(
-                [cls_head_binary[i](binary_in[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1
-            )
-            class_scores = torch.cat([cls_head_class[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+            if cls_attn is not None:
+                binary_feats = [cls_head_binary[i][:-1](binary_in[i]) for i in range(self.nl)]
+                binary_feats = [cls_attn[i](f) if i < len(cls_attn) else f for i, f in enumerate(binary_feats)]
+                binary_scores = torch.cat(
+                    [cls_head_binary[i][-1](binary_feats[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1
+                )
+                class_feats = [cls_head_class[i][:-1](x[i]) for i in range(self.nl)]
+                class_feats = [cls_attn[i](f) if i < len(cls_attn) else f for i, f in enumerate(class_feats)]
+                class_scores = torch.cat(
+                    [cls_head_class[i][-1](class_feats[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1
+                )
+            else:
+                binary_scores = torch.cat(
+                    [cls_head_binary[i](binary_in[i]).view(bs, 1, -1) for i in range(self.nl)], dim=-1
+                )
+                class_scores = torch.cat(
+                    [cls_head_class[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1
+                )
             result = dict(boxes=poly, binary_scores=binary_scores, class_scores=class_scores, feats=x)
         else:
             scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
