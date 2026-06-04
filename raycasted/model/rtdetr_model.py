@@ -99,6 +99,7 @@ class RayCastRTDETRDetectionModel(RTDETRDetectionModel):
 
         img = batch['img']
         bs = img.shape[0]
+        crop_size = float(img.shape[2])
         batch_idx = batch['batch_idx']
         gt_groups = [(batch_idx == i).sum().item() for i in range(bs)]
         targets = {
@@ -106,6 +107,8 @@ class RayCastRTDETRDetectionModel(RTDETRDetectionModel):
             'bboxes': batch['bboxes'].to(device=img.device),
             'batch_idx': batch_idx.to(img.device, dtype=torch.long).view(-1),
             'gt_groups': gt_groups,
+            'gt_vertices': batch['gt_vertices'].to(device=img.device),
+            'crop_size': crop_size,
         }
 
         if preds is None:

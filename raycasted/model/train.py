@@ -93,6 +93,32 @@ def _load_backbone_weights(model, weights_path: str) -> None:
     )
 
 
+def _reconstruct_polygon_vertices(bboxes_norm: torch.Tensor, crop_size: float):
+    """Reconstruct pixel-space polygon vertices from normalized ray vectors.
+
+    Args:
+        bboxes_norm: [N, 2+n_rays] — (cx, cy, r0..r63) in [0, 1]
+        crop_size: image size in pixels
+
+    Returns:
+        vertices: [N, n_rays, 2] pixel-space vertex coordinates
+    """
+    from raycasted.data.etl.utils.constants import N_RAYS
+
+    cx = bboxes_norm[:, 0] * crop_size
+    cy = bboxes_norm[:, 1] * crop_size
+    rays_norm = bboxes_norm[:, 2 : 2 + N_RAYS]
+    rays_px = rays_norm * crop_size
+
+    from raycasted.data.etl.utils import constants as _const
+
+    cos = torch.from_numpy(_const.RAY_COS).float()
+    sin = torch.from_numpy(_const.RAY_SIN).float()
+    vx = cx.unsqueeze(1) + rays_px * cos.unsqueeze(0)
+    vy = cy.unsqueeze(1) + rays_px * sin.unsqueeze(0)
+    return torch.stack([vx, vy], dim=-1)
+
+
 def _raycast_collate_fn(batch: list) -> dict:
     """Collate (image, labels) tuples into a batch dict for training.
 
@@ -139,11 +165,17 @@ def _raycast_collate_fn(batch: list) -> dict:
         ratio_pads.append((torch.ones(1, 1), torch.zeros(1, 2)))  # identity transform
         im_files.append(f'tile_{item_idx:04d}.npz')
 
+    bboxes = targets[:, 2:]  # [N, 2+n_rays] = cx, cy, d_1..d_n (normalized)
+    crop_size = float(images.shape[2])
+
+    gt_vertices = _reconstruct_polygon_vertices(bboxes, crop_size)
+
     return {
         'img': images,
         'batch_idx': targets[:, 0],
         'cls': targets[:, 1],
-        'bboxes': targets[:, 2:],  # [N, 2+n_rays] = cx, cy, d_1..d_n
+        'bboxes': bboxes,
+        'gt_vertices': gt_vertices,  # [N, n_rays, 2] pixel-space vertices
         'ori_shape': torch.stack(ori_shapes),
         'ratio_pad': ratio_pads,
         'im_file': im_files,
