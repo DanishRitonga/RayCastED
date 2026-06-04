@@ -374,10 +374,7 @@ class RayCastRTDETRDetectionLoss(nn.Module):
             )
 
         if len(pred_polygons_assigned) > 0:
-            pred_rays = pred_polygons_assigned[:, 2:].float()
-            gt_rays = gt_polygons_assigned[:, 2:].float()
-            piou = polar_iou_torch(pred_rays, gt_rays)
-            gt_scores[batch_idx, src_idx] = piou.detach()
+            gt_scores[batch_idx, src_idx] = 1.0  # fixed quality — decouple cls from ray noise
 
         loss_cls = self._get_loss_class(pred_scores, targets, gt_scores, num_gts, postfix)
         loss_poly = self._get_loss_polygon(

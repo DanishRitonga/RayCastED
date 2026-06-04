@@ -53,4 +53,4 @@ head:
   # --- RayCast RT-DETR Decoder: P2-P3-P4 ---
   # Args: [nc, hd, nq, ndp, nh, ndl, d_ffn, dropout, nd, n_rays, query_stride]
   # query_stride=32 → 8×8 grid of 64 queries (half memory vs 16×16=256)
-  - [[14, 17, 20], 1, RayCastRTDETRDecoder, [5, 256, 100, 4, 8, 6, 1024, 0.0, 0, 64, 16]]
+  - [[14, 17, 20], 1, RayCastRTDETRDecoder, [5, 256, 100, 4, 8, 6, 1024, 0.0, 20, 64, 16]]
