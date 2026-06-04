@@ -46,6 +46,7 @@ def _analytical_cost_per_image(
             pred_xy_b = pred_polygons_flat[pred_offset : pred_offset + nq, :2] * crop_size
             gt_v_b = gt_vertices[gt_offset : gt_offset + n_gt_b]
             cost_b = analytical_ray_cost(pred_xy_b, gt_v_b, ray_cos, ray_sin)  # [nq, n_gt_b]
+            cost_b = (cost_b + 1e-6).log()  # log-space like LSP-DETR
             cost_geo[pred_offset : pred_offset + nq, gt_offset : gt_offset + n_gt_b] = cost_b
         pred_offset += nq
         gt_offset += n_gt_b
@@ -262,10 +263,14 @@ class RayCastRTDETRDetectionLoss(nn.Module):
             analytical_gt = self._compute_analytical_gt_rays(
                 pred_xy, gt_vertices, crop_size, pred_polygons.device
             ).detach()
-            ray_l1 = F.l1_loss(pred_rays, analytical_gt, reduction='sum')
+            pred_rays_ln = (pred_rays + 1e-6).log()
+            gt_ln = (analytical_gt + 1e-6).log()
+            ray_l1 = F.l1_loss(pred_rays_ln, gt_ln, reduction='sum')
             ray_l1 += F.l1_loss(pred_xy, gt_xy, reduction='sum')
         else:
-            ray_l1 = F.l1_loss(pred_rays, gt_rays, reduction='sum') + F.l1_loss(pred_xy, gt_xy, reduction='sum')
+            ray_l1 = F.l1_loss((pred_rays + 1e-6).log(), (gt_rays + 1e-6).log(), reduction='sum') + F.l1_loss(
+                pred_xy, gt_xy, reduction='sum'
+            )
 
         loss[name_ray] = self.loss_gain['ray'] * ray_l1 / len(gt_polygons)
 
