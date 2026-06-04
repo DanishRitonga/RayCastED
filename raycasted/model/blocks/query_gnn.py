@@ -55,9 +55,10 @@ class QuerySelfGNN(nn.Module):
         Q = H * W
         x_flat = x.reshape(B, Q, D)
 
-        dist = torch.cdist(coords, coords)
-        _, knn_idx = torch.topk(dist, self.k + 1, dim=-1, largest=False)
-        knn_idx = knn_idx[..., 1:]
+        with torch.no_grad():
+            dist = torch.cdist(coords, coords)
+            _, knn_idx = torch.topk(dist, self.k + 1, dim=-1, largest=False)
+            knn_idx = knn_idx[..., 1:]
 
         neighbor_x = _batched_index_select(x_flat, 1, knn_idx)
         neighbor_coords = _batched_index_select(coords, 1, knn_idx)
@@ -110,8 +111,9 @@ class QueryCrossGNN(nn.Module):
         tgt_flat = tgt.reshape(B, Q, D)
         src_flat = src.reshape(B, N_kv, Ds)
 
-        dist = torch.cdist(tgt_coords, src_coords)
-        _, knn_idx = torch.topk(dist, self.k, dim=-1, largest=False)
+        with torch.no_grad():
+            dist = torch.cdist(tgt_coords, src_coords)
+            _, knn_idx = torch.topk(dist, self.k, dim=-1, largest=False)
 
         neighbor_src = _batched_index_select(src_flat, 1, knn_idx)
         neighbor_coords = _batched_index_select(src_coords, 1, knn_idx)
