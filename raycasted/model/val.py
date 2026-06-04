@@ -245,15 +245,16 @@ class RayCastValidator(DetectionValidator):
                     }
                 )
         else:
-            # RTDETRDecoder format: per-class scores
+            # RTDETRDecoder format: per-class scores in normalised [0,1] space
             cls_scores = pred_tensor[..., self.raycast_dim :]
             conf, cls = cls_scores.max(dim=-1)
+            imgsz = self.args.imgsz
             outputs = []
             for i in range(pred_tensor.shape[0]):
                 mask = conf[i] > self.args.conf
                 outputs.append(
                     {
-                        'bboxes': pred_tensor[i, mask, : self.raycast_dim],
+                        'bboxes': pred_tensor[i, mask, : self.raycast_dim] * imgsz,
                         'conf': conf[i, mask],
                         'cls': cls[i, mask],
                     }
