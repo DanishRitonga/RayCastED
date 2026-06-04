@@ -45,6 +45,10 @@ class SpatialGAT(nn.Module):
         self.k = k
         self.scale = self.head_dim**-0.5
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
         self.centroids = None
 
     def forward(
@@ -61,9 +65,9 @@ class SpatialGAT(nn.Module):
         """Spatial k-NN attention. centroids must be set before calling."""
         L, B, _ = query.shape
 
-        q = query.view(L, B, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
-        k = key.view(L, B, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
-        v = value.view(L, B, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
+        q = self.q_proj(query).view(L, B, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
+        k = self.k_proj(key).view(L, B, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
+        v = self.v_proj(value).view(L, B, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
 
         attn_weights = (q @ k.transpose(-2, -1)) * self.scale  # [B, n_heads, L, L]
 
@@ -92,7 +96,7 @@ class SpatialGAT(nn.Module):
         attn_weights = attn_weights.softmax(dim=-1)
         attn_weights = self.dropout(attn_weights)
         out = (attn_weights @ v).permute(0, 2, 1, 3).reshape(L, B, self.embed_dim)
-        return out, None
+        return self.out_proj(out), None
 
 
 def _get_cdn_group_raycast(
