@@ -149,7 +149,8 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
 
         features = self.enc_output(self.valid_mask * feats)
         enc_outputs_scores = self.enc_score_head(features)
-        enc_outputs_scores = enc_outputs_scores.masked_fill(~self.valid_mask.squeeze(-1), -1e9)
+        invalid = ~self.valid_mask.expand(-1, -1, enc_outputs_scores.shape[-1])
+        enc_outputs_scores = enc_outputs_scores.masked_fill(invalid, -1e9)
 
         topk_ind = torch.topk(enc_outputs_scores.max(-1).values, self.num_queries, dim=1).indices.view(-1)
         batch_ind = torch.arange(end=bs, dtype=topk_ind.dtype).unsqueeze(-1).repeat(1, self.num_queries).view(-1)
