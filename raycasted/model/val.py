@@ -20,7 +20,7 @@ from raycasted.data.etl.utils import constants as _val_const
 from raycasted.data.etl.utils.constants import configure_rays
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.blocks.rtdetr_head import RayCastRTDETRDecoder
-from raycasted.model.metrics import compute_bpq_from_iou, compute_mpq_from_iou
+from raycasted.model.metrics import compute_bpq_from_iou
 
 RAYCAST_DIM = 2 + _val_const.N_RAYS
 
@@ -53,8 +53,6 @@ class RayCastDetMetrics(DetMetrics):
         self.bpq_count = 0
         self.bsq_sum = 0.0
         self.bdq_sum = 0.0
-        self.mpq_sum = 0.0
-        self.mpq_count = 0
 
     def process(self, save_dir=Path('.'), plot=False, on_plot=None):
         """Compute mAP from shapely true-positive stats."""
@@ -99,7 +97,6 @@ class RayCastDetMetrics(DetMetrics):
             'metrics/bPQ',
             'metrics/bSQ',
             'metrics/bDQ',
-            'metrics/mPQ',
         ]
 
     def mean_results(self):
@@ -107,8 +104,7 @@ class RayCastDetMetrics(DetMetrics):
         bpq = self.bpq_sum / max(self.bpq_count, 1)
         bsq = self.bsq_sum / max(self.bpq_count, 1)
         bdq = self.bdq_sum / max(self.bpq_count, 1)
-        mpq = self.mpq_sum / max(self.mpq_count, 1)
-        return self.shapely.mean_results() + [bpq, bsq, bdq, mpq]
+        return self.shapely.mean_results() + [bpq, bsq, bdq]
 
     def class_result(self, i):
         """Return per-class results for shapely track."""
@@ -132,12 +128,11 @@ class RayCastDetMetrics(DetMetrics):
         values = [*self.mean_results(), self.fitness]
         return dict(zip(keys, values))
 
-    def update_bpq(self, bpq: float, bsq: float, bdq: float, mpq: float = 0.0):
-        """Accumulate per-image bPQ and mPQ components."""
+    def update_bpq(self, bpq: float, bsq: float, bdq: float):
+        """Accumulate per-image bPQ components."""
         self.bpq_sum += bpq
         self.bsq_sum += bsq
         self.bdq_sum += bdq
-        self.mpq_sum += mpq
         self.bpq_count += 1
 
 
@@ -166,7 +161,7 @@ class RayCastValidator(DetectionValidator):
 
     def get_desc(self):
         """Return a formatted header string for polygon + bPQ metrics."""
-        return ('%22s' + '%11s' * 10) % (
+        return ('%22s' + '%11s' * 9) % (
             'Class',
             'Images',
             'Instances',
@@ -177,7 +172,6 @@ class RayCastValidator(DetectionValidator):
             'bPQ',
             'bSQ',
             'bDQ',
-            'mPQ',
         )
 
     def preprocess(self, batch):
@@ -415,12 +409,10 @@ class RayCastValidator(DetectionValidator):
                 }
             )
 
-            # bPQ + mPQ via polar IoU matrix (same metric as training, no rasterization)
+            # bPQ via polar IoU matrix (same metric as training, no rasterization)
             iou_matrix = batch_result['iou_matrix']
             bpq, bsq, bdq = compute_bpq_from_iou(iou_matrix)
-            pred_cls_np = predn['cls'].cpu().numpy() if not no_pred else np.array([])
-            mpq = compute_mpq_from_iou(iou_matrix, pred_cls_np, cls)
-            self.metrics.update_bpq(bpq, bsq, bdq, mpq)
+            self.metrics.update_bpq(bpq, bsq, bdq)
 
     def get_stats(self):
         """Compute and return validation metrics."""
