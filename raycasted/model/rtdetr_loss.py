@@ -294,10 +294,11 @@ class RayCastRTDETRDetectionLoss(nn.Module):
 
         gt_vertices_assigned = None
         if gt_vertices is not None and len(dst_idx) > 0:
+            n_rays_v = gt_vertices.shape[-2]
             gt_vertices_all = gt_vertices.unsqueeze(0).expand(bs, -1, -1, -1)
             gt_vertices_assigned = torch.cat(
                 [
-                    t[j] if len(j) > 0 else torch.zeros(0, self.n_rays, 2, device=pred_polygons.device)
+                    t[j] if len(j) > 0 else torch.zeros(0, n_rays_v, 2, device=pred_polygons.device)
                     for t, (_, j) in zip(gt_vertices_all, match_indices)
                 ]
             )

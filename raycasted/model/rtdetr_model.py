@@ -88,9 +88,10 @@ class RayCastRTDETRDetectionModel(RTDETRDetectionModel):
 
     def init_criterion(self):
         """Create RayCast RT-DETR detection loss."""
+        from raycasted.data.etl.utils import constants as _const
         from raycasted.model.rtdetr_loss import RayCastRTDETRDetectionLoss
 
-        return RayCastRTDETRDetectionLoss(nc=self.nc, use_vfl=True)
+        return RayCastRTDETRDetectionLoss(nc=self.nc, use_vfl=True, n_rays=_const.N_RAYS)
 
     def loss(self, batch, preds=None):
         """Compute training loss for ray polygon predictions."""
