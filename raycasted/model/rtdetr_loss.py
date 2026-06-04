@@ -222,13 +222,13 @@ class RayCastRTDETRDetectionLoss(nn.Module):
     ):
         super().__init__()
         if loss_gain is None:
-            loss_gain = {'class': 1, 'centroid': 1, 'ray': 1}
+            loss_gain = {'class': 0.3, 'centroid': 1, 'ray': 1}
         self.nc = nc
         self.loss_gain = loss_gain
         self.aux_loss = aux_loss
         self.n_rays = n_rays or _const.N_RAYS
         self.matcher = RayCastHungarianMatcher(
-            cost_gain={'class': 1, 'centroid': 1, 'radial': 1},
+            cost_gain={'class': 0, 'centroid': 1, 'radial': 0},
             n_rays=self.n_rays,
         )
         from ultralytics.utils.loss import FocalLoss, VarifocalLoss
