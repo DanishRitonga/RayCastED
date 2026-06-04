@@ -23,6 +23,78 @@ from ultralytics.utils.torch_utils import TORCH_1_11
 from raycasted.data.etl.utils import constants as _const
 
 
+class SpatialGAT(nn.Module):
+    """Spatial k-NN Graph Attention for decoder query self-attention.
+
+    Replaces dense multi-head self-attention in the RT-DETR decoder with
+    spatially-local attention. For each query, builds a spatial k-NN graph
+    from predicted centroid positions and restricts attention to the k
+    nearest spatial neighbors. This provides the inductive bias that makes
+    Conv and STAttention work for scratch training — unlike dense attention
+    which produces uniform weights when initialized from scratch.
+
+    Mimics nn.MultiheadAttention interface so it can drop-in replace
+    DeformableTransformerDecoderLayer.self_attn.
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int, k: int = 8, dropout: float = 0.0):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.k = k
+        self.scale = self.head_dim**-0.5
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.centroids = None
+
+    def forward(
+        self,
+        query,
+        key,
+        value,
+        attn_mask=None,
+        key_padding_mask=None,
+        need_weights=False,
+        average_attn_weights=True,
+        is_causal=False,
+    ):
+        """Spatial k-NN attention. centroids must be set before calling."""
+        L, B, _ = query.shape
+
+        q = query.view(L, B, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
+        k = key.view(L, B, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
+        v = value.view(L, B, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
+
+        attn_weights = (q @ k.transpose(-2, -1)) * self.scale  # [B, n_heads, L, L]
+
+        # Spatial k-NN mask: allow self + K nearest neighbors, mask rest
+        spatial_bool = torch.ones(B, 1, L, L, dtype=torch.bool, device=attn_weights.device)
+        if self.centroids is not None:
+            centroids = self.centroids.detach().clamp(1e-6, 1.0 - 1e-6)
+            dists = torch.cdist(centroids, centroids)
+            _, knn_idx = dists.topk(min(self.k + 1, L), dim=-1, largest=False)
+            knn_idx = knn_idx[:, :, 1:]  # exclude self
+            spatial_bool = torch.zeros(B, 1, L, L, dtype=torch.bool, device=attn_weights.device)
+            b_idx = torch.arange(B, device=attn_weights.device).view(B, 1, 1)
+            # Always allow self-attention
+            spatial_bool[b_idx, :, torch.arange(L, device=attn_weights.device).view(1, L, 1),
+                        torch.arange(L, device=attn_weights.device).view(1, 1, L)] = True
+            # Allow K nearest neighbors
+            spatial_bool[b_idx, :, torch.arange(L, device=attn_weights.device).view(1, L, 1), knn_idx] = True
+
+        attn_weights = attn_weights.masked_fill(~spatial_bool, float('-inf'))
+
+        if attn_mask is not None:
+            if attn_mask.dim() == 2:
+                attn_mask = attn_mask.view(1, 1, L, L)
+            attn_weights = attn_weights.masked_fill(attn_mask, float('-inf'))
+
+        attn_weights = attn_weights.softmax(dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        out = (attn_weights @ v).permute(0, 2, 1, 3).reshape(L, B, self.embed_dim)
+        return out, None
+
+
 def _get_cdn_group_raycast(
     batch,
     num_classes,
@@ -201,6 +273,12 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
         # bboxes, but we pass 2-dim centroids as reference points.
         self.query_pos_head = MLP(2, 2 * hd, hd, num_layers=2)
         self._reset_raycast_params()
+        self._patch_self_attn(hd, nh, dropout)
+
+    def _patch_self_attn(self, hd, nh, dropout):
+        """Replace dense MHA with spatial GAT in all decoder layers."""
+        for layer in self.decoder.layers:
+            layer.self_attn = SpatialGAT(embed_dim=hd, num_heads=nh, k=8, dropout=dropout)
 
     def _reset_raycast_params(self):
         constant_(self.enc_bbox_head.layers[-1].weight, 0.0)
@@ -318,6 +396,7 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
         refer_centroids_2d = refer_centroids
 
         for i, layer in enumerate(self.decoder.layers):
+            layer.self_attn.centroids = refer_centroids_2d
             query_pos = self.query_pos_head(refer_centroids_2d)
             output = layer(
                 output,
