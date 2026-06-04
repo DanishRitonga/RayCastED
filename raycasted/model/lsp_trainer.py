@@ -145,12 +145,6 @@ def _validate(
         'bDQ': total_bdq / count,
     }
 
-    return {
-        'bPQ': total_bpq / count,
-        'bSQ': total_bsq / count,
-        'bDQ': total_bdq / count,
-    }
-
 
 def train_lsp(
     *,
