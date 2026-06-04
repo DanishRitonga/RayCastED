@@ -59,9 +59,11 @@ class LSPSetCriterion(nn.Module):
 
     def _cls_loss(self, logits, targets, matched):
         num_classes = logits.shape[-1]
+        B, Q = logits.shape[:2]
         device = logits.device
 
         tgt_classes = torch.full(logits.shape[:2], num_classes - 1, dtype=torch.int64, device=device)
+        fg_mask = torch.zeros(B, Q, dtype=torch.bool, device=device)
 
         for b, (pred_idx, tgt_idx) in enumerate(matched):
             if len(tgt_idx) == 0:
@@ -72,9 +74,16 @@ class LSPSetCriterion(nn.Module):
             matched_labels = labels.to(device=device)[tgt_idx]
             valid = matched_labels < num_classes - 1
             tgt_classes[b, pred_idx[valid]] = matched_labels[valid]
+            fg_mask[b, pred_idx[valid]] = True
 
         tgt_one_hot = F.one_hot(tgt_classes, num_classes).type_as(logits)
-        return sigmoid_focal_loss(logits, tgt_one_hot, alpha=self.focal_alpha, gamma=self.focal_gamma, reduction='mean')
+        loss = sigmoid_focal_loss(logits, tgt_one_hot, alpha=self.focal_alpha, gamma=self.focal_gamma, reduction='none')
+        loss = loss.reshape(B, Q, num_classes)
+
+        query_weights = torch.where(fg_mask, torch.tensor(1.0, device=device), torch.tensor(0.1, device=device))
+        loss = (loss * query_weights.unsqueeze(-1)).sum() / (fg_mask.sum() * num_classes + 1e-6)
+
+        return loss
 
     def _centroid_loss(self, points, targets, matched):
         total = torch.tensor(0.0, device=points.device)
