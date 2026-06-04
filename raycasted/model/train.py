@@ -533,7 +533,7 @@ class RayCastTrainer(DetectionTrainer):
             from ultralytics.nn.tasks import yaml_model_load
 
             yaml_dict = yaml_model_load(model_yaml)
-            if _is_hybrid_yaml(yaml_dict) or _is_lsp_yaml(yaml_dict):
+            if _is_hybrid_yaml(yaml_dict) or _is_lsp_yaml(yaml_dict) or _is_rtdetr_yaml(yaml_dict):
                 self.args.optimizer = tcfg.get('optimizer', 'AdamW')
                 self.args.lr0 = tcfg.get('lr0', 1e-4)
                 self.args.weight_decay = tcfg.get('weight_decay', 1e-4)
@@ -864,13 +864,14 @@ class RayCastTrainer(DetectionTrainer):
             model.model[-1] = new_head
             model.end2end = True
 
-        # Patch init_criterion for both initial creation and resume path.
-        # The resume path calls model.init_criterion() to re-create the loss,
-        # so monkey-patching ensures RayCastE2ELoss is always used.
-        max_epochs = getattr(self.args, 'epochs', 200)
-        model.init_criterion = _RayCastCriterionWrapper(
-            model, max_epochs=max_epochs, training_config=self.training_config
-        )
+        # Patch init_criterion for FCN models only (RayCastDetect head).
+        # RT-DETR and other decoder-based models have their own criterion
+        # (Hungarian matching + VFL + ray L1 + polar IoU), not dual TAL.
+        if isinstance(old_head, RayCastDetect):
+            max_epochs = getattr(self.args, 'epochs', 200)
+            model.init_criterion = _RayCastCriterionWrapper(
+                model, max_epochs=max_epochs, training_config=self.training_config
+            )
 
         # On resume, restore extra-head weights from checkpoint that were lost
         # when RayCastDetectionModel.__init__ reconstructed the model from YAML.
@@ -919,7 +920,7 @@ class RayCastTrainer(DetectionTrainer):
             if isinstance(head, LSPTransformer):
                 self.loss_names = ('ce_loss', 'centroid_loss', 'radial_loss')
         elif isinstance(head, RayCastRTDETRDecoder):
-            self.loss_names = ('cls_loss', 'ray_loss', 'piou_loss')
+            self.loss_names = ('loss_class', 'loss_ray', 'loss_piou')
         else:
             self.loss_names = (
                 'xy_loss',
