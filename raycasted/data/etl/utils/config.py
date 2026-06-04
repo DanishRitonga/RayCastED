@@ -217,6 +217,7 @@ class TrainingSettings(BaseModel):
 
     # Pretrained backbone
     pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
+    pretrained_ckpt: str | None = None  # path to FCN checkpoint for backbone+neck weight loading
 
     # DCNv2 in head
     dcn_in_reg_head: bool = False  # replace 2nd Conv in cv2 with modulated deformable conv
