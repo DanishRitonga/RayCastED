@@ -292,7 +292,7 @@ class RayCastRTDETRDetectionLoss(nn.Module):
         gt_xy = gt_polygons[:, :2]
 
         centroid_l1 = F.l1_loss(pred_xy, gt_xy, reduction='sum')
-        loss[name_centroid] = self.loss_gain['centroid'] * centroid_l1 / len(gt_polygons)
+        loss[name_centroid] = self.loss_gain['centroid'] * centroid_l1 / (len(gt_polygons) * 2)
 
         use_analytical = gt_vertices is not None and crop_size is not None and len(pred_xy) > 0
 
@@ -304,7 +304,7 @@ class RayCastRTDETRDetectionLoss(nn.Module):
         else:
             ray_l1 = F.l1_loss(pred_rays, gt_rays, reduction='sum')
 
-        loss[name_ray] = self.loss_gain['ray'] * ray_l1 / len(gt_polygons)
+        loss[name_ray] = self.loss_gain['ray'] * ray_l1 / (len(gt_polygons) * self.n_rays)
 
         return {k: v.squeeze() for k, v in loss.items()}
 
