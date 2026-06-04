@@ -11,6 +11,8 @@
 cache
 output
 results
+results.csv
+*.pt
 
 .claude
 .opencode
