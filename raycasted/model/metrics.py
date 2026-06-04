@@ -304,7 +304,6 @@ def compute_mpq_from_iou(
         return 0.0
 
     unique_cls = np.unique(target_cls).astype(int)
-    iou_np = np.asarray(iou_matrix.cpu() if hasattr(iou_matrix, 'cpu') else iou_matrix)
     p_cls = np.asarray(pred_cls) if not isinstance(pred_cls, np.ndarray) else pred_cls
     t_cls = np.asarray(target_cls) if not isinstance(target_cls, np.ndarray) else target_cls
     pq_values = []
