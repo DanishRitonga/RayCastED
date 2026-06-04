@@ -13,6 +13,7 @@ Key differences from standard RTDETRDecoder:
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.init import constant_, xavier_uniform_
 from ultralytics.nn.modules.head import RTDETRDecoder
 from ultralytics.nn.modules.transformer import (
@@ -267,9 +268,11 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
         box_noise_scale: float = 1.0,
         learnt_init_query: bool = False,
         n_rays: int | None = None,
+        query_stride: int | None = None,
     ):
         self.n_rays = n_rays or _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays
+        self.query_stride = query_stride
         super().__init__(
             nc=nc,
             ch=ch,
@@ -299,6 +302,13 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
         """Replace dense MHA with spatial GAT in all decoder layers."""
         for layer in self.decoder.layers:
             layer.self_attn = SpatialGAT(embed_dim=hd, num_heads=nh, k=8, dropout=dropout)
+
+    def _grid_nq(self, raw_features):
+        """Compute number of grid queries from P4 feature map and stride."""
+        p4 = raw_features[-1]
+        crop_size = p4.shape[2] * 16
+        stride = self.query_stride
+        return int(crop_size // stride) ** 2
 
     def _reset_raycast_params(self):
         constant_(self.enc_bbox_head.layers[-1].weight, 0.0)
@@ -339,8 +349,10 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
         anchors_encoded = anchors_encoded.masked_fill(~valid_mask, float('inf'))
         return anchors_encoded, valid_mask
 
-    def _get_decoder_input(self, feats, shapes, dn_embed=None, dn_bbox=None):
+    def _get_decoder_input(self, feats, shapes, dn_embed=None, dn_bbox=None, raw_features=None):
         bs = feats.shape[0]
+        if self.query_stride is not None:
+            return self._get_grid_decoder_input(raw_features, bs, dn_embed, dn_bbox)
         if self.dynamic or self.shapes != shapes:
             self.anchors, self.valid_mask = self._generate_anchors(
                 shapes, dtype=feats.dtype, device=feats.device, n_rays=self.n_rays
@@ -381,13 +393,69 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
 
         return embeddings, refer_centroids, refer_polygon_logits, enc_polygons, enc_scores
 
+    def _get_grid_decoder_input(self, raw_features, bs, dn_embed, dn_bbox):
+        """Build decoder input from a uniform spatial grid (LSP-DETR style).
+
+        Bypasses encoder score head entirely — uses a fixed grid of query
+        positions instead of learned top-K selection. Each query's features
+        are sampled from P4 neck features at its grid position via
+        grid_sample.
+        """
+        p4_feat = raw_features[-1]  # [B, C_P4, H_P4, W_P4]
+        p4_proj = self.input_proj[-1](p4_feat)  # [B, hd, H, W]
+        _, _, H_p4, W_p4 = p4_proj.shape
+        crop_size = H_p4 * 16  # P4 stride=16 → ×16 = image size
+        stride = self.query_stride
+        grid_h = int(crop_size // stride)
+        grid_w = int(crop_size // stride)
+        nq = grid_h * grid_w
+
+        cy = (torch.arange(grid_h, device=p4_proj.device, dtype=torch.float32) + 0.5) * stride / crop_size
+        cx = (torch.arange(grid_w, device=p4_proj.device, dtype=torch.float32) + 0.5) * stride / crop_size
+        gy, gx = torch.meshgrid(cy, cx, indexing='ij')
+        centroids = torch.stack([gx.flatten(), gy.flatten()], dim=-1)  # [nq, 2], normalized [0,1]
+        centroids = centroids.unsqueeze(0).expand(bs, -1, -1)  # [B, nq, 2]
+
+        grid_sample_input = torch.stack([gx * 2 - 1, gy * 2 - 1], dim=-1).unsqueeze(0).expand(bs, -1, -1, -1)
+        sampled_feats = F.grid_sample(p4_proj, grid_sample_input, align_corners=False)  # [B, hd, grid_h, grid_w]
+        top_k_features = sampled_feats.flatten(2).transpose(1, 2)  # [B, nq, hd]
+
+        initial_radius = stride / (2 * crop_size)  # normalized radius in [0,1]
+        rays = torch.full((bs, nq, self.n_rays), initial_radius, device=p4_proj.device, dtype=p4_proj.dtype)
+        polygons = torch.cat([centroids, rays], dim=-1)  # [B, nq, raycast_dim]
+        anchors_encoded = encode_polygon(polygons)
+
+        refer_polygon_logits = self.enc_bbox_head(top_k_features) + anchors_encoded
+        enc_polygons = decode_polygon(refer_polygon_logits)
+        refer_centroids = enc_polygons[..., :2]
+
+        if dn_bbox is not None:
+            dn_centroids = dn_bbox[..., :2] if dn_bbox.shape[-1] > 2 else dn_bbox
+            refer_polygon_logits = torch.cat([dn_bbox, refer_polygon_logits], 1)
+            refer_centroids = torch.cat([dn_centroids, refer_centroids], 1)
+
+        enc_scores = torch.zeros(bs, nq, self.nc, device=p4_proj.device, dtype=p4_proj.dtype)
+        embeddings = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1) if self.learnt_init_query else top_k_features
+
+        if self.training:
+            refer_polygon_logits = refer_polygon_logits.detach()
+            refer_centroids = refer_centroids.detach()
+            if not self.learnt_init_query:
+                embeddings = embeddings.detach()
+
+        if dn_embed is not None:
+            embeddings = torch.cat([dn_embed, embeddings], 1)
+
+        return embeddings, refer_centroids, refer_polygon_logits, enc_polygons, enc_scores
+
     def forward(self, x, batch=None):
         """Run full encoder-decoder forward pass."""
         feats, shapes = self._get_encoder_input(x)
+        nq = self._grid_nq(x) if self.query_stride is not None else self.num_queries
         dn_embed, dn_bbox, attn_mask, dn_meta = _get_cdn_group_raycast(
             batch,
             self.nc,
-            self.num_queries,
+            nq,
             self.denoising_class_embed.weight,
             self.num_denoising,
             self.label_noise_ratio,
@@ -395,7 +463,7 @@ class RayCastRTDETRDecoder(RTDETRDecoder):
             self.training,
         )
         embed, refer_centroids, refer_polygon_logits, enc_polygons, enc_scores = self._get_decoder_input(
-            feats, shapes, dn_embed, dn_bbox
+            feats, shapes, dn_embed, dn_bbox, raw_features=x
         )
 
         dec_polygons, dec_scores = self._raycast_decoder(

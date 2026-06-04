@@ -51,6 +51,6 @@ head:
   - [-1, 2, C3k2, [512, True]]                              # 20  P4 PAN (16x16)
 
   # --- RayCast RT-DETR Decoder: P2-P3-P4 ---
-  # Args: [nc, hd, nq, ndp, nh, ndl, d_ffn, dropout, nd, n_rays]
-  # ndl=6 (full decoder depth), nd=20 (CDN denoising — 168→45 extra queries)
-  - [[14, 17, 20], 1, RayCastRTDETRDecoder, [5, 256, 100, 4, 8, 6, 1024, 0.0, 20, 64]]
+  # Args: [nc, hd, nq, ndp, nh, ndl, d_ffn, dropout, nd, n_rays, query_stride]
+  # query_stride=16 → 16×16 grid of 256 queries (LSP-DETR style, no encoder score head)
+  - [[14, 17, 20], 1, RayCastRTDETRDecoder, [5, 256, 100, 4, 8, 6, 1024, 0.0, 20, 64, 16]]

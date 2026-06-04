@@ -127,6 +127,7 @@ def _handle_rtdetr_decoder(ch_list, f, args, layers):
     dropout = args[7] if len(args) > 7 else 0.0
     nd = args[8] if len(args) > 8 else 0
     n_rays = args[9] if len(args) > 9 else None
+    query_stride = args[10] if len(args) > 10 else None
     m_ = RayCastRTDETRDecoder(
         nc=nc,
         ch=tuple(neck_ch),
@@ -139,6 +140,7 @@ def _handle_rtdetr_decoder(ch_list, f, args, layers):
         dropout=dropout,
         nd=nd,
         n_rays=n_rays,
+        query_stride=query_stride,
     )
     return m_, nc + m_.raycast_dim
 
