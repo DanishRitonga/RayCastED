@@ -282,6 +282,40 @@ def load_model(weights_path: str, device: torch.device):
     return model
 
 
+def _fcn_postprocess(decoded_batch, raycast_dim, nc, max_det=100):
+    """Apply sigmoid + top-k postprocessing for raw FCN anchor outputs.
+
+    Handles both [B, features, anchors] (raw _inference output) and
+    [B, n_pred, features] (already-postprocessed) formats.
+    """
+    if decoded_batch.dim() != 3:
+        return decoded_batch
+    bsz, d1, d2 = decoded_batch.shape
+
+    expected_features = raycast_dim + nc + 1
+    is_raw = d1 >= d2 and d1 == expected_features
+
+    if not is_raw:
+        return decoded_batch
+
+    decoded = decoded_batch.transpose(1, 2).contiguous()  # [B, anchors, features]
+    _, num_anchors, num_features = decoded.shape
+    cls_logits = decoded[..., raycast_dim : raycast_dim + nc]  # [B, anchors, nc]
+    cls_scores = cls_logits.sigmoid()
+    cls_score, cls_idx = cls_scores.max(dim=-1)  # [B, anchors]
+
+    sorted_idx = cls_score.argsort(dim=-1, descending=True)
+    topk = sorted_idx[:, :max_det]
+
+    result = torch.zeros(bsz, max_det, raycast_dim + 2, device=decoded.device, dtype=decoded.dtype)
+    for i in range(bsz):
+        idx = topk[i]
+        result[i, :, :raycast_dim] = decoded[i, idx, :raycast_dim]
+        result[i, :, raycast_dim] = cls_score[i, idx]
+        result[i, :, raycast_dim + 1] = cls_idx[i, idx].float()
+    return result
+
+
 def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
     """Run inference over all tiles, collecting predictions and GT.
 
@@ -302,6 +336,8 @@ def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
             raw_out = model(images)
             decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
             batch_size = images.shape[0]
+
+            decoded = _fcn_postprocess(decoded, raycast_dim, nc)
 
             if debug and _batch_idx == 0:
                 d0 = decoded[0].cpu().numpy() if isinstance(decoded, torch.Tensor) else np.array([])
