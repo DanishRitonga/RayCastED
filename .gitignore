@@ -12,6 +12,13 @@ cache
 output
 results
 
+# Training artifacts
+results.csv
+*.pt
+
+# Rust stardist build artifacts
+raycasted/data/stardist/target/
+
 .claude
 .opencode
 runs/
