@@ -246,6 +246,7 @@ class _RayCastCriterionWrapper:
             nc_override=tcfg.get('nc_override', None),
             cls_only_tal=tcfg.get('cls_only_tal', False),
             o2o_distill_weight=tcfg.get('o2o_distill_weight', 0.0),
+            analytical_rays=tcfg.get('analytical_rays', False),
         )
 
 

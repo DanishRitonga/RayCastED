@@ -219,6 +219,11 @@ class TrainingSettings(BaseModel):
     hierarchical_binary_threshold: float = 0.01  # Binary gate threshold at inference
     nc_override: int | None = None  # Force nc (e.g. 1 for binary detection); remaps all labels to class 0
 
+    # Analytical rays: compute GT ray targets from predicted centroid → polygon
+    # boundary via Cramer's rule instead of using precomputed static GT rays.
+    # Couples centroid and ray gradients: ∂L/∂centroid ≠ 0 through chain rule.
+    analytical_rays: bool = False
+
     # Gradient clipping (LSP-DETR uses 0.1). Ultralytics defaults to 10.0.
     clip_grad: float = 10.0
 

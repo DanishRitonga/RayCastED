@@ -1,16 +1,16 @@
 """Smoke test: RT-DETR with analytical star-distance loss on synthetic data.
- 
+
 Verifies the full training pipeline (forward + loss + backward) with
 Cramer's rule analytical ray-polygon intersection for the matcher cost
 and loss targets.
 """
- 
+
 import torch
- 
+
 from raycasted.data.etl.utils import constants as _const
 from raycasted.model.blocks.star_distances_analytical import _normed_rays_to_vertices, build_ray_directions
- 
- 
+
+
 def _reconstruct_polygon_vertices(bboxes_norm, crop_size, n_rays=None):
     """Reconstruct pixel-space polygon vertices from normalized ray vectors."""
     if n_rays is None:
@@ -94,9 +94,7 @@ def test_analytical_star_distances_smoke():
                 grad_params += p.numel()
 
     assert grad_params > 0, 'no parameters received gradients'
-    assert grad_params / total_params > 0.5, (
-        f'only {grad_params}/{total_params} params have gradients'
-    )
+    assert grad_params / total_params > 0.5, f'only {grad_params}/{total_params} params have gradients'
 
 
 def test_analytical_ray_cost_shape():
