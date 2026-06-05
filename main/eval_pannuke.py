@@ -450,12 +450,7 @@ def _decode_fcn_output(decoded: torch.Tensor, raycast_dim: int, conf_threshold: 
 
 
 def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
-    """Run inference over all tiles, collecting predictions and GT.
-
-    Returns:
-        results: list of dicts, one per image, with keys:
-            'pred_polys', 'pred_confs', 'gt_polys', 'pred_cls', 'gt_cls', 'imgsz'
-    """
+    """Run inference over all tiles, collecting predictions and GT."""
     results = []
     training_args = getattr(model, 'training_args', {})
     crop_size = getattr(model, 'crop_size', None) or training_args.get('crop_size', 256)
@@ -471,6 +466,17 @@ def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
                 preds = _decode_lsp_output(raw_out, crop_size, conf_threshold, device, debug=debug)
             else:
                 decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
+                if debug and _batch_idx == 0:
+                    det0 = decoded[0].cpu().numpy()
+                    confs = det0[:, raycast_dim]
+                    print(
+                        f'  [ROUTING] FCN path: decoded.shape={decoded.shape}, '
+                        f'n_rays={n_rays}, raycast_dim={raycast_dim}, '
+                        f'conf_col=det[:,{raycast_dim}] '
+                        f'range=[{confs.min():.4f}, {confs.max():.4f}], '
+                        f'n_above_thresh={(confs > conf_threshold).sum()}/{len(confs)}',
+                        flush=True,
+                    )
                 preds = _decode_fcn_output(decoded, raycast_dim, conf_threshold)
 
             for si in range(images.shape[0]):
@@ -538,6 +544,42 @@ def _mask_iou_matrix(pred_masks: list[np.ndarray], gt_masks: list[np.ndarray]) -
     return np.divide(intersection, union, out=np.zeros_like(intersection, dtype=np.float64), where=union > 0)
 
 
+def _apply_watershed(pred_masks, pred_centroids, img_h, img_w):
+    """Split touching instance masks via watershed using centroids as seeds.
+
+    LSP-DETR used watershed during PanNuke eval to separate merged nuclei
+    predictions. Distance transform of the binary foreground mask is used
+    as the topographic surface; predicted centroids are markers.
+    """
+    n = len(pred_masks)
+    if n <= 1:
+        return pred_masks
+
+    binary = np.stack(pred_masks).max(axis=0).astype(np.uint8)
+    if binary.sum() == 0:
+        return pred_masks
+
+    dist = cv2.distanceTransform(binary, cv2.DIST_L2, cv2.DIST_MASK_5)
+    dist_norm = np.clip(dist / (dist.max() + 1e-7) * 255, 0, 255).astype(np.uint8)
+
+    markers = np.zeros((img_h, img_w), dtype=np.int32)
+    for i in range(n):
+        cx, cy = pred_centroids[i]
+        ix, iy = int(round(cx)), int(round(cy))
+        if 0 <= ix < img_w and 0 <= iy < img_h:
+            if binary[iy, ix]:
+                markers[iy, ix] = i + 1
+
+    water_in = cv2.cvtColor(dist_norm, cv2.COLOR_GRAY2BGR)
+    cv2.watershed(water_in, markers)
+
+    refined = []
+    for i in range(n):
+        mask = (markers == i + 1).astype(np.uint8)
+        refined.append(mask)
+    return refined
+
+
 def _compute_pq_masked(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
     """Compute PQ with optional foreground mask (bMPQ / mMPQ style)."""
     n_pred = len(pred_masks)
@@ -582,7 +624,7 @@ def _compute_ap(recall, precision):
 # ---------------------------------------------------------------------------
 
 
-def compute_metrics_streaming(results, num_classes):
+def compute_metrics_streaming(results, num_classes, apply_watershed=False):
     """Compute all metrics in a single pass, one image at a time.
 
     Rasterizes masks, computes per-image metrics, then frees masks.
@@ -629,6 +671,10 @@ def compute_metrics_streaming(results, num_classes):
         pred_masks = _polygons_to_masks_fast(pred_polys, imgsz, imgsz) if len(pred_polys) > 0 else []
         if pred_masks:
             pred_masks = resolve_mask_overlaps(pred_masks)
+
+        # --- Watershed (LSP-DETR protocol) ---
+        if apply_watershed and len(pred_masks) > 1:
+            pred_masks = _apply_watershed(pred_masks, pred_polys[:, :2], imgsz, imgsz)
 
         # --- AJI ---
         aji_scores.append(compute_aji(pred_masks, gt_masks))
@@ -875,6 +921,8 @@ def main():
     parser.add_argument('--workers', type=int, default=4)
     parser.add_argument('--max-images', type=int, default=0, help='Limit to N images (0=all)')
     parser.add_argument('--debug', action='store_true', help='Print per-batch decode stats')
+    parser.add_argument('--watershed', action='store_true',
+                        help='Post-process masks with watershed (LSP-DETR eval protocol)')
     args = parser.parse_args()
 
     try:
@@ -959,7 +1007,7 @@ def _main(args):
 
     # --- Compute all metrics (streaming, memory-efficient) ---
     print('Computing metrics (streaming)...', flush=True)
-    metrics = compute_metrics_streaming(results, num_classes=nc)
+    metrics = compute_metrics_streaming(results, num_classes=nc, apply_watershed=args.watershed)
 
     ap_results = metrics['ap']
     ap50 = ap_results.get(0.5, {}).get('AP', 0.0)
@@ -1010,6 +1058,7 @@ def _main(args):
 
     print(f'\nImages evaluated: {len(results)}')
     print(f'Confidence threshold: {args.conf}')
+    print(f'Watershed post-processing: {"ON" if args.watershed else "OFF"}')
     print(f'Total predictions: {n_pred_total}')
     print(f'Total GT instances: {n_gt_total}')
 
