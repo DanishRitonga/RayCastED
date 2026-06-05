@@ -12,30 +12,28 @@ to match LSP-DETR exactly.
 
 Usage:
     # With pre-transformed test tiles
-    uv run python main/eval_pannuke.py \
-        --weights train4/weights/best.pt \
-        --data-dir output/pannuke/transformed/test \
+    uv run python main/eval_pannuke.py \\
+        --weights train4/weights/best.pt \\
+        --data-dir output/pannuke/transformed/test \\
         --batch 16 --device 0
 
     # Auto-transform from config
-    uv run python main/eval_pannuke.py \
-        --config main/pannuke.yaml \
-        --output output/pannuke \
-        --weights train4/weights/best.pt \
+    uv run python main/eval_pannuke.py \\
+        --config main/pannuke.yaml \\
+        --output output/pannuke \\
+        --weights train4/weights/best.pt \\
         --batch 16 --device 0
 """
 
 import argparse
-import atexit
 import resource
-import signal
-import sys
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
+from scipy.ndimage import distance_transform_edt, label
 from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader
 from ultralytics.utils.torch_utils import model_info
@@ -49,37 +47,77 @@ from raycasted.model.metrics import (
 from raycasted.model.register import register_raycast_head
 
 
-def _uncompile_module(module):
-    try:
-        if hasattr(torch._dynamo, 'eval_frame') and hasattr(torch._dynamo.eval_frame, 'OptimizedModule'):
-            while isinstance(module, torch._dynamo.eval_frame.OptimizedModule):
-                module = module._orig_mod
-    except Exception:
-        pass
-    return module
+def _apply_watershed(pred_masks, pred_confs):
+    """Distance-transform watershed to split touching nuclei (LSP-DETR eval protocol)."""
+    if not pred_masks:
+        return [], []
+    if len(pred_masks) <= 1:
+        return pred_masks, pred_confs
+
+    combined = np.zeros_like(pred_masks[0], dtype=np.uint8)
+    for m in pred_masks:
+        combined = np.bitwise_or(combined, m.astype(np.uint8))
+
+    distance = distance_transform_edt(combined)
+    distance_norm = cv2.normalize(distance, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    markers, n_markers = label(combined)
+    if n_markers <= 1:
+        return pred_masks, pred_confs
+
+    markers = markers.astype(np.int32)
+    labels = cv2.watershed(cv2.cvtColor(distance_norm, cv2.COLOR_GRAY2BGR), markers)
+
+    split_masks = []
+    split_confs = []
+    for lbl in range(1, np.max(labels) + 1):
+        component = (labels == lbl).astype(np.uint8)
+        if component.sum() > 0:
+            overlap = np.array([(component & m.astype(np.uint8)).sum() for m in pred_masks])
+            best = int(overlap.argmax())
+            split_masks.append(component)
+            split_confs.append(pred_confs[best] if best < len(pred_confs) else 0.0)
+
+    return split_masks, split_confs
 
 
-def _apply_watershed(pred_masks: list[np.ndarray], pred_confs: np.ndarray):
-    if len(pred_masks) < 2:
-        return pred_masks, list(range(len(pred_masks)))
-    h, w = pred_masks[0].shape
-    combined = np.zeros((h, w), dtype=np.int32)
-    for i, m in enumerate(pred_masks):
-        combined[m > 0] = i + 1
-    if combined.max() < 2:
-        return pred_masks, list(range(len(pred_masks)))
-    binary = (combined > 0).astype(np.uint8)
-    dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
-    markers = np.zeros((h, w), dtype=np.int32)
-    for i, m in enumerate(pred_masks):
-        cent = np.unravel_index(np.argmax(m * dist), (h, w))
-        if dist[cent] > 0:
-            markers[cent[0], cent[1]] = i + 1
-    if np.count_nonzero(markers) < 2:
-        return pred_masks, list(range(len(pred_masks)))
-    labels = cv2.watershed(np.zeros((h, w, 3), dtype=np.uint8), markers)
-    result = [(labels == i + 1).astype(np.uint8) for i in range(len(pred_masks))]
-    return result, list(range(len(pred_masks)))
+def _uncompile_module(model):
+    """Unwrap torch._dynamo.OptimizedModule if present."""
+    if hasattr(torch, '_dynamo'):
+        unwrapped = torch._dynamo.eval_frame._optimized_module_unwrap(model)
+        return unwrapped if unwrapped is not None else model
+    return model
+
+
+def _fcn_postprocess(decoded_batch, raycast_dim, nc, max_det=100):
+    """Sigmoid + top-k for raw FCN [B, features, anchors] output.
+
+    Some checkpoints don't have end2end=True, so model(images) returns
+    raw _inference output instead of postprocessed [B, max_det, 68].
+    This detects that case and applies sigmoid + max-class + top-k.
+    """
+    if decoded_batch.dim() != 3:
+        return decoded_batch
+    bsz, d1, d2 = decoded_batch.shape
+
+    expected_features = raycast_dim + nc
+    is_raw = d2 > d1 and d1 == expected_features
+
+    if not is_raw:
+        return decoded_batch
+
+    decoded = decoded_batch.transpose(1, 2).contiguous()
+    cls_logits = decoded[..., raycast_dim : raycast_dim + nc]
+    cls_score, cls_idx = cls_logits.max(dim=-1)
+    sorted_idx = cls_score.argsort(dim=-1, descending=True)
+    topk = sorted_idx[:, :max_det]
+
+    result = torch.zeros(bsz, max_det, raycast_dim + 2, device=decoded.device, dtype=decoded.dtype)
+    for i in range(bsz):
+        idx = topk[i]
+        result[i, :, :raycast_dim] = decoded[i, idx, :raycast_dim]
+        result[i, :, raycast_dim] = cls_score[i, idx]
+        result[i, :, raycast_dim + 1] = cls_idx[i, idx].float()
+    return result
 
 
 def _polygons_to_masks_fast(detections: np.ndarray, img_h: int, img_w: int) -> list[np.ndarray]:
@@ -270,49 +308,16 @@ def _diagnose_recall(results, num_classes):
 
 
 def load_model(weights_path: str, device: torch.device):
-    """Load trained RayCastED FCN model from checkpoint."""
+    """Load trained RayCastED model from checkpoint."""
     register_raycast_head()
     ckpt = torch.load(weights_path, map_location=device, weights_only=False)
     model = ckpt.get('model') or ckpt.get('ema') if isinstance(ckpt, dict) else ckpt
     if model is None:
-        raise ValueError('Checkpoint has no "model" or "ema" key.')
+        raise ValueError(f'Checkpoint at {weights_path} has no model or ema key')
     model = _uncompile_module(model)
     model = model.float().to(device)
     model.eval()
     return model
-
-
-def _fcn_postprocess(decoded_batch, raycast_dim, nc, max_det=100):
-    """Apply top-k postprocessing for raw FCN anchor outputs.
-
-    Handles [B, features, anchors] (raw _inference output) and
-    [B, n_pred, features] (already-postprocessed) formats.
-    _inference already applies sigmoid — no extra sigmoid needed.
-    """
-    if decoded_batch.dim() != 3:
-        return decoded_batch
-    bsz, d1, d2 = decoded_batch.shape
-
-    expected_features = raycast_dim + nc
-    is_raw = d2 > d1 and d1 == expected_features
-
-    if not is_raw:
-        return decoded_batch
-
-    decoded = decoded_batch.transpose(1, 2).contiguous()  # [B, anchors, features]
-    cls_logits = decoded[..., raycast_dim : raycast_dim + nc]  # [B, anchors, nc]
-    cls_score, cls_idx = cls_logits.max(dim=-1)  # [B, anchors]
-
-    sorted_idx = cls_score.argsort(dim=-1, descending=True)
-    topk = sorted_idx[:, :max_det]
-
-    result = torch.zeros(bsz, max_det, raycast_dim + 2, device=decoded.device, dtype=decoded.dtype)
-    for i in range(bsz):
-        idx = topk[i]
-        result[i, :, :raycast_dim] = decoded[i, idx, :raycast_dim]
-        result[i, :, raycast_dim] = cls_score[i, idx]
-        result[i, :, raycast_dim + 1] = cls_idx[i, idx].float()
-    return result
 
 
 def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
@@ -334,9 +339,8 @@ def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
             images = batch['img'].to(device)
             raw_out = model(images)
             decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
-            batch_size = images.shape[0]
-
             decoded = _fcn_postprocess(decoded, raycast_dim, nc)
+            batch_size = images.shape[0]
 
             if debug and _batch_idx == 0:
                 d0 = decoded[0].cpu().numpy() if isinstance(decoded, torch.Tensor) else np.array([])
@@ -463,7 +467,7 @@ def _compute_ap(recall, precision):
 # ---------------------------------------------------------------------------
 
 
-def compute_metrics_streaming(results, num_classes, watershed=False):
+def compute_metrics_streaming(results, num_classes, watershed_flag=False):
     """Compute all metrics in a single pass, one image at a time.
 
     Rasterizes masks, computes per-image metrics, then frees masks.
@@ -507,7 +511,7 @@ def compute_metrics_streaming(results, num_classes, watershed=False):
         pred_masks = _polygons_to_masks_fast(pred_polys, imgsz, imgsz) if len(pred_polys) > 0 else []
         if pred_masks:
             pred_masks = resolve_mask_overlaps(pred_masks)
-        if watershed and len(pred_masks) >= 2:
+        if watershed_flag and len(pred_masks) >= 2:
             pred_masks, _ = _apply_watershed(pred_masks, pred_confs)
 
         # --- AJI ---
@@ -698,6 +702,10 @@ def benchmark_inference(model, dataloader, device, n_warmup=10):
 
 
 def main():
+    import atexit
+    import signal
+    import sys
+
     def _crash_handler(signum, frame):
         sig_name = signal.Signals(signum).name
         print(f'\nFATAL: received {sig_name} — process dying', file=sys.stderr, flush=True)
@@ -711,7 +719,7 @@ def main():
     for sig in (signal.SIGSEGV, signal.SIGABRT, signal.SIGBUS, signal.SIGFPE):
         signal.signal(sig, _crash_handler)
 
-    parser = argparse.ArgumentParser(description='PanNuke Fold3 Evaluation (FCN-only)')
+    parser = argparse.ArgumentParser(description='PanNuke Fold3 Evaluation')
     parser.add_argument('--weights', type=str, required=True)
     parser.add_argument('--data-dir', type=str, default='')
     parser.add_argument('--config', type=str, default='')
@@ -808,7 +816,7 @@ def _main(args):
 
     # --- Compute all metrics (streaming, memory-efficient) ---
     print('Computing metrics (streaming)...', flush=True)
-    metrics = compute_metrics_streaming(results, num_classes=nc, watershed=args.watershed)
+    metrics = compute_metrics_streaming(results, num_classes=nc, watershed_flag=args.watershed)
 
     ap_results = metrics['ap']
     ap50 = ap_results.get(0.5, {}).get('AP', 0.0)
@@ -858,6 +866,8 @@ def _main(args):
     print(f'Confidence threshold: {args.conf}')
     print(f'Total predictions: {n_pred_total}')
     print(f'Total GT instances: {n_gt_total}')
+    if args.watershed:
+        print('Post-processing: watershed')
 
     # --- Recall diagnosis ---
     try:
