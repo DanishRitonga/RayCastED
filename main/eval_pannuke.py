@@ -427,11 +427,23 @@ def _decode_lsp_output(
 
 
 def _fcn_postprocess(decoded, raycast_dim, nc, max_det=100):
-    """Apply sigmoid + top-k to raw FCN anchor output."""
+    """Apply sigmoid + top-k to raw FCN anchor output.
+
+    Handles both layouts: [B, anchors, features] and [B, features, anchors].
+    """
+    feat_dim = raycast_dim + nc
+    if decoded.shape[-1] == feat_dim:
+        pass
+    elif decoded.shape[1] == feat_dim:
+        decoded = decoded.transpose(1, 2).contiguous()
+    else:
+        raise ValueError(f'Unexpected decoded shape: {decoded.shape}, expected feat_dim={feat_dim}')
     poly = decoded[:, :, :raycast_dim]
     scores = decoded[:, :, raycast_dim:raycast_dim + nc].sigmoid()
     max_scores, cls_idx = scores.max(dim=-1, keepdim=True)
-    _, topk_idx = max_scores.topk(max_det, dim=1)
+    n_anchors = decoded.shape[1]
+    topk = min(max_det, n_anchors)
+    _, topk_idx = max_scores.topk(topk, dim=1)
     topk_scores = max_scores.gather(dim=1, index=topk_idx.to(torch.int64))
     topk_cls = cls_idx.gather(dim=1, index=topk_idx.to(torch.int64))
     topk_poly = poly.gather(dim=1, index=topk_idx.expand(-1, -1, raycast_dim).to(torch.int64))
@@ -479,7 +491,8 @@ def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
             else:
                 decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
                 nc = 5
-                if decoded.ndim == 3 and decoded.shape[-1] >= raycast_dim + nc and decoded.shape[1] > 100:
+                max_dim = max(decoded.shape[-1], decoded.shape[1])
+                if decoded.ndim == 3 and max_dim >= raycast_dim + nc and max_dim > 100:
                     decoded = _fcn_postprocess(decoded, raycast_dim, nc, max_det=100)
                 if debug and _batch_idx == 0:
                     det0 = decoded[0].cpu().numpy()
