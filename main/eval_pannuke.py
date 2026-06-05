@@ -13,44 +13,73 @@ to match LSP-DETR exactly.
 Usage:
     # With pre-transformed test tiles
     uv run python main/eval_pannuke.py \
-        --weights output/detr/train/weights/best.pt \
-        --data-dir output/test-custom-builder/transformed/test \
+        --weights train4/weights/best.pt \
+        --data-dir output/pannuke/transformed/test \
         --batch 16 --device 0
 
     # Auto-transform from config
     uv run python main/eval_pannuke.py \
         --config main/pannuke.yaml \
         --output output/pannuke \
-        --weights output/detr/train/weights/best.pt \
+        --weights train4/weights/best.pt \
         --batch 16 --device 0
 """
 
 import argparse
-import os
+import atexit
 import resource
+import signal
+import sys
 import time
 from pathlib import Path
-
-os.environ['TORCHINDUCTOR_CPP_WRAPPER'] = '0'
 
 import cv2
 import numpy as np
 import torch
-
-torch._dynamo.config.disable = True
 from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader
 from ultralytics.utils.torch_utils import model_info
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
-from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 from raycasted.data.etl.utils import constants as _const
 from raycasted.model.metrics import (
     compute_aji,
-    compute_bpq_from_iou,
     resolve_mask_overlaps,
 )
 from raycasted.model.register import register_raycast_head
+
+
+def _uncompile_module(module):
+    try:
+        if hasattr(torch._dynamo, 'eval_frame') and hasattr(torch._dynamo.eval_frame, 'OptimizedModule'):
+            while isinstance(module, torch._dynamo.eval_frame.OptimizedModule):
+                module = module._orig_mod
+    except Exception:
+        pass
+    return module
+
+
+def _apply_watershed(pred_masks: list[np.ndarray], pred_confs: np.ndarray):
+    if len(pred_masks) < 2:
+        return pred_masks, list(range(len(pred_masks)))
+    h, w = pred_masks[0].shape
+    combined = np.zeros((h, w), dtype=np.int32)
+    for i, m in enumerate(pred_masks):
+        combined[m > 0] = i + 1
+    if combined.max() < 2:
+        return pred_masks, list(range(len(pred_masks)))
+    binary = (combined > 0).astype(np.uint8)
+    dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+    markers = np.zeros((h, w), dtype=np.int32)
+    for i, m in enumerate(pred_masks):
+        cent = np.unravel_index(np.argmax(m * dist), (h, w))
+        if dist[cent] > 0:
+            markers[cent[0], cent[1]] = i + 1
+    if np.count_nonzero(markers) < 2:
+        return pred_masks, list(range(len(pred_masks)))
+    labels = cv2.watershed(np.zeros((h, w, 3), dtype=np.uint8), markers)
+    result = [(labels == i + 1).astype(np.uint8) for i in range(len(pred_masks))]
+    return result, list(range(len(pred_masks)))
 
 
 def _polygons_to_masks_fast(detections: np.ndarray, img_h: int, img_w: int) -> list[np.ndarray]:
@@ -240,281 +269,56 @@ def _diagnose_recall(results, num_classes):
     print('=' * 65)
 
 
-def _uncompile_module(module: torch.nn.Module) -> torch.nn.Module:
-    """Strip torch.compile wrappers recursively to get raw float32 module."""
-    from torch._dynamo.eval_frame import OptimizedModule
-
-    if isinstance(module, OptimizedModule):
-        module = module._orig_mod
-
-    for name, child in list(module.named_children()):
-        unwrapped = _uncompile_module(child)
-        if unwrapped is not child:
-            setattr(module, name, unwrapped)
-    return module
-
-
 def load_model(weights_path: str, device: torch.device):
-    """Load trained RayCastED model from checkpoint."""
+    """Load trained RayCastED FCN model from checkpoint."""
     register_raycast_head()
     ckpt = torch.load(weights_path, map_location=device, weights_only=False)
-
-    if isinstance(ckpt, dict):
-        print(f'  Checkpoint keys: {list(ckpt.keys())}', flush=True)
-        print(f'  epoch={ckpt.get("epoch", "?")}, best_bpq={ckpt.get("best_bpq", "?")}', flush=True)
-        if 'model' in ckpt:
-            print(
-                f'  model type: {type(ckpt["model"]).__name__ if ckpt["model"] is not None else "None"}, is_dict={isinstance(ckpt["model"], dict)}',
-                flush=True,
-            )
-        # LSP-DETR checkpoint: {'model': state_dict, ...}
-        # Try to build model from state_dict keys, then load weights
-        if 'model' in ckpt and isinstance(ckpt['model'], dict):
-            state_dict = ckpt['model']
-            model = _build_model_from_state_dict(state_dict, device)
-            missing, unexpected = model.load_state_dict(state_dict, strict=False)
-            if missing:
-                print(f'  WARNING: {len(missing)} missing keys in state_dict', flush=True)
-                for m in missing[:5]:
-                    print(f'    missing: {m}', flush=True)
-                if len(missing) > 5:
-                    print(f'    ... and {len(missing) - 5} more', flush=True)
-            if unexpected:
-                print(f'  WARNING: {len(unexpected)} unexpected keys in state_dict', flush=True)
-                for u in unexpected[:5]:
-                    print(f'    unexpected: {u}', flush=True)
-                if len(unexpected) > 5:
-                    print(f'    ... and {len(unexpected) - 5} more', flush=True)
-            backbone_keys = [k for k in state_dict if 'backbone' in k and 'weight' in k]
-            if backbone_keys:
-                bk = backbone_keys[len(backbone_keys) // 2]
-                loaded_val = state_dict[bk]
-                model_val = model.state_dict()[bk]
-                if loaded_val.device != model_val.device:
-                    loaded_val = loaded_val.to(device)
-                max_diff = (model_val - loaded_val).abs().max().item()
-                if max_diff > 1e-6:
-                    print(f'  WARNING: backbone weight mismatch! {bk}: max_diff={max_diff:.2e}', flush=True)
-                else:
-                    print(f'  Backbone verified: {bk} (max_diff={max_diff:.2e})', flush=True)
-        elif 'ema' in ckpt and isinstance(ckpt['ema'], dict):
-            state_dict = ckpt['ema']
-            model = _build_model_from_state_dict(state_dict, device)
-            missing, unexpected = model.load_state_dict(state_dict, strict=False)
-            if missing:
-                print(f'  WARNING: {len(missing)} missing keys in state_dict', flush=True)
-                for m in missing[:5]:
-                    print(f'    missing: {m}', flush=True)
-                if len(missing) > 5:
-                    print(f'    ... and {len(missing) - 5} more', flush=True)
-            if unexpected:
-                print(f'  WARNING: {len(unexpected)} unexpected keys in state_dict', flush=True)
-                for u in unexpected[:5]:
-                    print(f'    unexpected: {u}', flush=True)
-                if len(unexpected) > 5:
-                    print(f'    ... and {len(unexpected) - 5} more', flush=True)
-            backbone_keys = [k for k in state_dict if 'backbone' in k and 'weight' in k]
-            if backbone_keys:
-                bk = backbone_keys[len(backbone_keys) // 2]
-                loaded_val = state_dict[bk]
-                model_val = model.state_dict()[bk]
-                if loaded_val.device != model_val.device:
-                    loaded_val = loaded_val.to(device)
-                max_diff = (model_val - loaded_val).abs().max().item()
-                if max_diff > 1e-6:
-                    print(f'  WARNING: backbone weight mismatch! {bk}: max_diff={max_diff:.2e}', flush=True)
-                else:
-                    print(f'  Backbone verified: {bk} (max_diff={max_diff:.2e})', flush=True)
-        else:
-            model = ckpt.get('model') or ckpt.get('ema')
-            if model is None:
-                raise ValueError('Checkpoint contains neither valid model nor EMA weights.')
-            print(f'  Loaded from: {"model" if ckpt.get("model") else "ema"}', flush=True)
-            model = _uncompile_module(model)
-            model = model.float().to(device)
-    else:
-        model = ckpt.float().to(device)
-
+    model = ckpt.get('model') or ckpt.get('ema') if isinstance(ckpt, dict) else ckpt
+    if model is None:
+        raise ValueError('Checkpoint has no "model" or "ema" key.')
+    model = _uncompile_module(model)
+    model = model.float().to(device)
     model.eval()
     return model
 
 
-def _build_model_from_state_dict(state_dict: dict, device: torch.device):
-    """Detect model architecture from state_dict keys and construct it."""
-    keys = list(state_dict.keys())
-
-    # LSP-DETR: has backbone. and decode_head. keys
-    if any(k.startswith('backbone.embeddings.') for k in keys) and any(k.startswith('decode_head.') for k in keys):
-        from raycasted.model.lsp_detr_model import LSPDetrDetectionModel
-
-        # Infer n_rays from radial head output layer shape
-        radial_key = 'decode_head.radial_distances_head.0.4.weight'
-        n_rays = state_dict[radial_key].shape[0] if radial_key in state_dict else 64
-
-        # Infer nc from class head shape
-        cls_key = 'decode_head.class_head.weight'
-        nc = state_dict[cls_key].shape[0] - 1 if cls_key in state_dict else 5  # nc+1 classes
-
-        crop_size = 256
-
-        model = LSPDetrDetectionModel(nc=nc, n_rays=n_rays, crop_size=crop_size)
-        return model.float().to(device)
-
-    # FCN checkpoint (Ultralytics-style): return ckpt directly
-    raise ValueError(
-        'Cannot auto-detect model architecture from checkpoint keys. '
-        'Ensure the checkpoint contains LSP-DETR or FCN model state_dict.'
-    )
-
-
-def _decode_lsp_output(
-    outputs: dict, crop_size: int, conf_threshold: float, device: torch.device, debug: bool = False
-) -> list[dict]:
-    logits = outputs['pred_logits']  # [B, Q, nc+1]
-    points = outputs['pred_points']  # [B, Q, 2]
-    radial = outputs['pred_radial']  # [B, Q, n_rays]
-    bs, nq, ncp1 = logits.shape
-    nc = ncp1 - 1
-
-    cls_prob = logits[:, :, :nc].softmax(dim=-1)  # [B, Q, nc]
-    conf, cls_id = cls_prob.max(dim=-1)  # [B, Q]
-    is_object = logits.argmax(dim=-1) != nc  # [B, Q]
-    keep = (conf > conf_threshold) & is_object
-
-    points_px = points * crop_size  # [B, Q, 2]
-    rays_px = radial.exp()  # [B, Q, n_rays]
-
-    if debug:
-        obj_rate = is_object.float().mean().item()
-        kept_rate = keep.float().mean().item()
-        avg_conf_masked = conf[keep].mean().item() if keep.any() else 0.0
-        avg_radial = radial[keep].exp().mean().item() if keep.any() else 0.0
-        cls_dist = torch.bincount(cls_id[keep], minlength=nc).cpu().tolist() if keep.any() else [0] * nc
-        print(
-            f'  [DEBUG] nq={nq}, is_object_rate={obj_rate:.4f}, '
-            f'keep_rate={kept_rate:.4f} (thresh={conf_threshold}), '
-            f'avg_conf={avg_conf_masked:.4f}, avg_ray={avg_radial:.1f}px, '
-            f'cls_dist={cls_dist}',
-            flush=True,
-        )
-        if keep.any():
-            k = keep[0]
-            n_show = min(5, k.sum().item())
-            idx = torch.where(k)[0][:n_show]
-            print(f'  [DEBUG] First {n_show} preds:')
-            for j, qi in enumerate(idx):
-                qi = qi.item()
-                print(
-                    f'    Q{qi}: cls={cls_id[0, qi].item()} conf={conf[0, qi].item():.4f} '
-                    f'cx={points_px[0, qi, 0].item():.1f} cy={points_px[0, qi, 1].item():.1f} '
-                    f'r_min={rays_px[0, qi].min().item():.1f} r_max={rays_px[0, qi].max().item():.1f}',
-                    flush=True,
-                )
-
-    polys = torch.cat([points_px, rays_px], dim=-1)  # [B, Q, 2+n_rays]
-
-    results = []
-    for i in range(bs):
-        k = keep[i]
-        results.append(
-            {
-                'polys': polys[i, k].cpu().numpy(),
-                'confs': conf[i, k].cpu().numpy(),
-                'classes': cls_id[i, k].cpu().numpy().astype(int),
-            }
-        )
-    return results
-
-
-def _fcn_postprocess(decoded, raycast_dim, nc, max_det=100):
-    """Apply sigmoid + top-k to raw FCN anchor output.
-
-    Handles both layouts: [B, anchors, features] and [B, features, anchors].
-    """
-    feat_dim = raycast_dim + nc
-    if decoded.shape[-1] == feat_dim:
-        pass
-    elif decoded.shape[1] == feat_dim:
-        decoded = decoded.transpose(1, 2).contiguous()
-    else:
-        raise ValueError(f'Unexpected decoded shape: {decoded.shape}, expected feat_dim={feat_dim}')
-    poly = decoded[:, :, :raycast_dim]
-    raw_cls = decoded[:, :, raycast_dim:raycast_dim + nc]
-    if raw_cls.min() >= 0 and raw_cls.max() <= 1:
-        scores = raw_cls
-    else:
-        scores = raw_cls.sigmoid()
-    max_scores, cls_idx = scores.max(dim=-1, keepdim=True)
-    n_anchors = decoded.shape[1]
-    topk = min(max_det, n_anchors)
-    _, topk_idx = max_scores.topk(topk, dim=1)
-    topk_scores = max_scores.gather(dim=1, index=topk_idx.to(torch.int64))
-    topk_cls = cls_idx.gather(dim=1, index=topk_idx.to(torch.int64))
-    topk_poly = poly.gather(dim=1, index=topk_idx.expand(-1, -1, raycast_dim).to(torch.int64))
-    return torch.cat([topk_poly, topk_scores, topk_cls.float()], dim=-1)
-
-
-def _decode_fcn_output(decoded: torch.Tensor, raycast_dim: int, conf_threshold: float) -> list[dict]:
-    results = []
-    for si in range(decoded.shape[0]):
-        det = decoded[si].cpu().numpy()
-        n_cols = det.shape[1] if det.ndim == 2 else 0
-
-        if det.ndim == 2 and n_cols >= raycast_dim + 2:
-            pred_confs = det[:, raycast_dim]
-            pred_cls = det[:, raycast_dim + 1].astype(int)
-            conf_mask = pred_confs > conf_threshold
-            det = det[conf_mask]
-            pred_confs = pred_confs[conf_mask]
-            pred_cls = pred_cls[conf_mask]
-        else:
-            det = det[:0] if det.ndim == 2 else np.zeros((0, raycast_dim + 2), dtype=np.float32)
-            pred_confs = np.array([], dtype=np.float32)
-            pred_cls = np.array([], dtype=int)
-
-        pred_poly = det[:, :raycast_dim] if det.shape[0] > 0 else np.zeros((0, raycast_dim), dtype=np.float32)
-        results.append({'polys': pred_poly, 'confs': pred_confs, 'classes': pred_cls})
-    return results
-
-
 def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
-    """Run inference over all tiles, collecting predictions and GT."""
+    """Run inference over all tiles, collecting predictions and GT.
+
+    Returns:
+        results: list of dicts, one per image, with keys:
+            'pred_polys', 'pred_confs', 'gt_polys', 'pred_cls', 'gt_cls', 'imgsz'
+    """
     results = []
     training_args = getattr(model, 'training_args', {})
-    crop_size = getattr(model, 'crop_size', None) or training_args.get('crop_size', 256)
-    n_rays = getattr(model, 'n_rays', None) or training_args.get('n_rays', 64)
+    crop_size = training_args.get('crop_size', 640)
+    n_rays = training_args.get('n_rays', 32)
+    nc = training_args.get('nc', 5)
     raycast_dim = 2 + n_rays
 
     with torch.no_grad():
         for _batch_idx, batch in enumerate(dataloader):
             images = batch['img'].to(device)
             raw_out = model(images)
+            decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
+            batch_size = images.shape[0]
 
-            if isinstance(raw_out, dict):
-                preds = _decode_lsp_output(raw_out, crop_size, conf_threshold, device, debug=debug)
-            else:
-                decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
-                nc = 5
-                max_dim = max(decoded.shape[-1], decoded.shape[1])
-                if decoded.ndim == 3 and max_dim >= raycast_dim + nc and max_dim > 100:
-                    decoded = _fcn_postprocess(decoded, raycast_dim, nc, max_det=100)
-                if debug and _batch_idx == 0:
-                    det0 = decoded[0].cpu().numpy()
-                    confs = det0[:, raycast_dim] if det0.ndim == 2 else []
+            if debug and _batch_idx == 0:
+                d0 = decoded[0].cpu().numpy() if isinstance(decoded, torch.Tensor) else np.array([])
+                print(
+                    f'  [debug] decoded.shape={decoded.shape}, n_rays={n_rays}, raycast_dim={raycast_dim}, nc={nc}',
+                    flush=True,
+                )
+                if d0.ndim == 2 and d0.shape[1] >= raycast_dim + 2:
+                    confs = d0[:, raycast_dim]
                     print(
-                        f'  [ROUTING] FCN path: decoded.shape={decoded.shape}, '
-                        f'n_rays={n_rays}, raycast_dim={raycast_dim}',
+                        f'  [debug] conf range=[{confs.min():.4f}, {confs.max():.4f}], '
+                        f'n_above_{conf_threshold:.2f}={(confs > conf_threshold).sum()}',
                         flush=True,
                     )
-                    if len(confs) > 0:
-                        print(
-                            f'  conf range=[{confs.min():.4f}, {confs.max():.4f}], '
-                            f'n_above_thresh={(confs > conf_threshold).sum()}/{len(confs)}',
-                            flush=True,
-                        )
-                preds = _decode_fcn_output(decoded, raycast_dim, conf_threshold)
 
-            for si in range(images.shape[0]):
+            for si in range(batch_size):
+                # --- GT ---
                 mask = batch['batch_idx'] == si
                 gt_cls = batch['cls'][mask].numpy().flatten()
                 gt_poly = batch['bboxes'][mask].numpy()
@@ -525,22 +329,23 @@ def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
                     gt_poly[:, 1] *= crop_size
                     gt_poly[:, 2:] *= crop_size
 
-                pred_poly = preds[si]['polys']
-                pred_confs = preds[si]['confs']
-                pred_cls = preds[si]['classes']
+                # --- Predictions ---
+                det = decoded[si].cpu().numpy()
+                n_cols = det.shape[1] if det.ndim == 2 else 0
 
-                if debug and _batch_idx == 0 and si == 0:
-                    print('  [DEBUG] First image GT (first 5):', flush=True)
-                    for j in range(min(5, len(gt_poly))):
-                        cx = gt_poly[j, 0]
-                        cy = gt_poly[j, 1]
-                        rays = gt_poly[j, 2:]
-                        print(
-                            f'    GT[{j}]: cls={int(gt_cls[j])} '
-                            f'cx={cx:.1f} cy={cy:.1f} '
-                            f'r_min={rays.min():.1f} r_max={rays.max():.1f}',
-                            flush=True,
-                        )
+                if det.ndim == 2 and n_cols >= raycast_dim + 2:
+                    pred_confs = det[:, raycast_dim]
+                    pred_cls = det[:, raycast_dim + 1].astype(int)
+                    conf_mask = pred_confs > conf_threshold
+                    det = det[conf_mask]
+                    pred_confs = pred_confs[conf_mask]
+                    pred_cls = pred_cls[conf_mask]
+                else:
+                    det = det[:0] if det.ndim == 2 else np.zeros((0, raycast_dim + 2), dtype=np.float32)
+                    pred_confs = np.array([], dtype=np.float32)
+                    pred_cls = np.array([], dtype=int)
+
+                pred_poly = det[:, :raycast_dim] if det.shape[0] > 0 else np.zeros((0, raycast_dim), dtype=np.float32)
 
                 results.append(
                     {
@@ -577,42 +382,6 @@ def _mask_iou_matrix(pred_masks: list[np.ndarray], gt_masks: list[np.ndarray]) -
     union = pred_area + gt_area.T - intersection
 
     return np.divide(intersection, union, out=np.zeros_like(intersection, dtype=np.float64), where=union > 0)
-
-
-def _apply_watershed(pred_masks, pred_centroids, img_h, img_w):
-    """Split touching instance masks via watershed using centroids as seeds.
-
-    LSP-DETR used watershed during PanNuke eval to separate merged nuclei
-    predictions. Distance transform of the binary foreground mask is used
-    as the topographic surface; predicted centroids are markers.
-    """
-    n = len(pred_masks)
-    if n <= 1:
-        return pred_masks
-
-    binary = np.stack(pred_masks).max(axis=0).astype(np.uint8)
-    if binary.sum() == 0:
-        return pred_masks
-
-    dist = cv2.distanceTransform(binary, cv2.DIST_L2, cv2.DIST_MASK_5)
-    dist_norm = np.clip(dist / (dist.max() + 1e-7) * 255, 0, 255).astype(np.uint8)
-
-    markers = np.zeros((img_h, img_w), dtype=np.int32)
-    for i in range(n):
-        cx, cy = pred_centroids[i]
-        ix, iy = int(round(cx)), int(round(cy))
-        if 0 <= ix < img_w and 0 <= iy < img_h:
-            if binary[iy, ix]:
-                markers[iy, ix] = i + 1
-
-    water_in = cv2.cvtColor(dist_norm, cv2.COLOR_GRAY2BGR)
-    cv2.watershed(water_in, markers)
-
-    refined = []
-    for i in range(n):
-        mask = (markers == i + 1).astype(np.uint8)
-        refined.append(mask)
-    return refined
 
 
 def _compute_pq_masked(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
@@ -659,7 +428,7 @@ def _compute_ap(recall, precision):
 # ---------------------------------------------------------------------------
 
 
-def compute_metrics_streaming(results, num_classes, apply_watershed=False):
+def compute_metrics_streaming(results, num_classes, watershed=False):
     """Compute all metrics in a single pass, one image at a time.
 
     Rasterizes masks, computes per-image metrics, then frees masks.
@@ -671,9 +440,6 @@ def compute_metrics_streaming(results, num_classes, apply_watershed=False):
     aji_scores = []
     bpq_scores = []
     bmpq_scores = []
-    ray_bpq_scores = []
-    ray_bsq_scores = []
-    ray_bdq_scores = []
     class_pq = {c: [] for c in range(num_classes)}
     class_mpq = {c: [] for c in range(num_classes)}
     centroid_tp = 0
@@ -706,10 +472,8 @@ def compute_metrics_streaming(results, num_classes, apply_watershed=False):
         pred_masks = _polygons_to_masks_fast(pred_polys, imgsz, imgsz) if len(pred_polys) > 0 else []
         if pred_masks:
             pred_masks = resolve_mask_overlaps(pred_masks)
-
-        # --- Watershed (LSP-DETR protocol) ---
-        if apply_watershed and len(pred_masks) > 1:
-            pred_masks = _apply_watershed(pred_masks, pred_polys[:, :2], imgsz, imgsz)
+        if watershed and len(pred_masks) >= 2:
+            pred_masks, _ = _apply_watershed(pred_masks, pred_confs)
 
         # --- AJI ---
         aji_scores.append(compute_aji(pred_masks, gt_masks))
@@ -734,27 +498,6 @@ def compute_metrics_streaming(results, num_classes, apply_watershed=False):
         else:
             bmpq = 0.0
         bmpq_scores.append(bmpq)
-
-        # --- Ray-space bPQ (polar IoU, matches in-training _validate) ---
-        n_pred = len(pred_polys)
-        n_gt = len(gt_polys)
-        if n_pred > 0 and n_gt > 0:
-            pred_rays = torch.from_numpy(pred_polys[:, 2:]).float()
-            gt_rays = torch.from_numpy(gt_polys[:, 2:]).float()
-            ray_iou = (
-                polar_iou_pairwise_flat_torch(
-                    pred_rays.unsqueeze(1).expand(n_pred, n_gt, -1),
-                    gt_rays.unsqueeze(0).expand(n_pred, n_gt, -1),
-                )
-                .cpu()
-                .numpy()
-            )
-            rbpq, rbsq, rbdq = compute_bpq_from_iou(ray_iou)
-        else:
-            rbpq = rbsq = rbdq = 0.0
-        ray_bpq_scores.append(rbpq)
-        ray_bsq_scores.append(rbsq)
-        ray_bdq_scores.append(rbdq)
 
         # --- mPQ / mMPQ ---
         for cls_id in range(num_classes):
@@ -842,11 +585,6 @@ def compute_metrics_streaming(results, num_classes, apply_watershed=False):
     mean_bpq = np.mean(bpq_scores)
     mean_bmpq = np.mean(bmpq_scores)
 
-    # Ray-space bPQ (polar IoU)
-    mean_ray_bpq = np.mean(ray_bpq_scores)
-    mean_ray_bsq = np.mean(ray_bsq_scores)
-    mean_ray_bdq = np.mean(ray_bdq_scores)
-
     # mPQ / mMPQ
     mpq_values = []
     mmpq_values = []
@@ -896,9 +634,6 @@ def compute_metrics_streaming(results, num_classes, apply_watershed=False):
         'bmpq': mean_bmpq,
         'mpq': mean_mpq,
         'mmpq': mean_mmpq,
-        'ray_bpq': mean_ray_bpq,
-        'ray_bsq': mean_ray_bsq,
-        'ray_bdq': mean_ray_bdq,
         'ap': ap_results,
         'centroid': {'precision': prec, 'recall': rec, 'f1': f1},
     }
@@ -928,10 +663,6 @@ def benchmark_inference(model, dataloader, device, n_warmup=10):
 
 
 def main():
-    import atexit
-    import signal
-    import sys
-
     def _crash_handler(signum, frame):
         sig_name = signal.Signals(signum).name
         print(f'\nFATAL: received {sig_name} — process dying', file=sys.stderr, flush=True)
@@ -945,7 +676,7 @@ def main():
     for sig in (signal.SIGSEGV, signal.SIGABRT, signal.SIGBUS, signal.SIGFPE):
         signal.signal(sig, _crash_handler)
 
-    parser = argparse.ArgumentParser(description='PanNuke Fold3 Evaluation')
+    parser = argparse.ArgumentParser(description='PanNuke Fold3 Evaluation (FCN-only)')
     parser.add_argument('--weights', type=str, required=True)
     parser.add_argument('--data-dir', type=str, default='')
     parser.add_argument('--config', type=str, default='')
@@ -954,10 +685,9 @@ def main():
     parser.add_argument('--device', type=str, default='0')
     parser.add_argument('--conf', type=float, default=0.20)
     parser.add_argument('--workers', type=int, default=4)
-    parser.add_argument('--max-images', type=int, default=0, help='Limit to N images (0=all)')
-    parser.add_argument('--debug', action='store_true', help='Print per-batch decode stats')
-    parser.add_argument('--watershed', action='store_true',
-                        help='Post-process masks with watershed (LSP-DETR eval protocol)')
+    parser.add_argument('--watershed', action='store_true', help='Apply watershed post-processing')
+    parser.add_argument('--debug', action='store_true', help='Print first-batch debug info')
+    parser.add_argument('--max-images', type=int, default=0, help='Limit eval to first N images (0=all)')
     args = parser.parse_args()
 
     try:
@@ -1008,9 +738,9 @@ def _main(args):
     print(f'Loading model: {args.weights}', flush=True)
     model = load_model(args.weights, device)
     training_args = getattr(model, 'training_args', {})
-    crop_size = getattr(model, 'crop_size', None) or training_args.get('crop_size', 256)
-    nc = getattr(model, 'nc', None) or training_args.get('nc', 5)
-    n_rays = getattr(model, 'n_rays', None) or training_args.get('n_rays', 64)
+    crop_size = training_args.get('crop_size', 640)
+    nc = training_args.get('nc', 1)
+    n_rays = training_args.get('n_rays', 32)
     print(f'  crop_size={crop_size}, nc={nc}, n_rays={n_rays}', flush=True)
 
     # Configure ray geometry
@@ -1020,11 +750,6 @@ def _main(args):
 
     # Build dataset
     dataset = RayCastTileDataset(data_dir=str(data_dir), crop_size=crop_size, augment=False)
-    if args.max_images > 0:
-        import torch.utils.data as _tud
-
-        dataset = _tud.Subset(dataset, range(min(args.max_images, len(dataset))))
-        print(f'  Limited to {len(dataset)} images', flush=True)
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch,
@@ -1036,13 +761,19 @@ def _main(args):
     # --- Run inference ---
     print('Running inference...', flush=True)
     results = run_inference(model, dataloader, device, conf_threshold=args.conf, debug=args.debug)
-    n_pred_total = sum(len(r['pred_polys']) for r in results)
-    n_gt_total = sum(len(r['gt_polys']) for r in results)
-    print(f'  Processed {len(results)} images: {n_pred_total} predictions, {n_gt_total} GT', flush=True)
+    if args.max_images > 0:
+        results = results[: args.max_images]
+        n_pred_total = sum(len(r['pred_polys']) for r in results)
+        n_gt_total = sum(len(r['gt_polys']) for r in results)
+        print(f'  Limited to {args.max_images} images: {n_pred_total} predictions, {n_gt_total} GT', flush=True)
+    else:
+        n_pred_total = sum(len(r['pred_polys']) for r in results)
+        n_gt_total = sum(len(r['gt_polys']) for r in results)
+        print(f'  Processed {len(results)} images: {n_pred_total} predictions, {n_gt_total} GT', flush=True)
 
     # --- Compute all metrics (streaming, memory-efficient) ---
     print('Computing metrics (streaming)...', flush=True)
-    metrics = compute_metrics_streaming(results, num_classes=nc, apply_watershed=args.watershed)
+    metrics = compute_metrics_streaming(results, num_classes=nc, watershed=args.watershed)
 
     ap_results = metrics['ap']
     ap50 = ap_results.get(0.5, {}).get('AP', 0.0)
@@ -1078,9 +809,6 @@ def _main(args):
     print(f'{"AP@0.5:0.05:0.95":<25} {ap50_95:>12.4f}')
     print(f'{"bPQ":<25} {metrics["bpq"]:>12.4f}')
     print(f'{"bMPQ":<25} {metrics["bmpq"]:>12.4f}')
-    print(f'{"Ray-bPQ (polar IoU)":<25} {metrics["ray_bpq"]:>12.4f}')
-    print(f'{"  Ray-bSQ":<25} {metrics["ray_bsq"]:>12.4f}')
-    print(f'{"  Ray-bDQ":<25} {metrics["ray_bdq"]:>12.4f}')
     print(f'{"mPQ":<25} {metrics["mpq"]:>12.4f}')
     print(f'{"mMPQ":<25} {metrics["mmpq"]:>12.4f}')
     print(f'{"F1 (centroid, r=12)":<25} {f12["f1"]:>12.4f}')
@@ -1093,7 +821,6 @@ def _main(args):
 
     print(f'\nImages evaluated: {len(results)}')
     print(f'Confidence threshold: {args.conf}')
-    print(f'Watershed post-processing: {"ON" if args.watershed else "OFF"}')
     print(f'Total predictions: {n_pred_total}')
     print(f'Total GT instances: {n_gt_total}')
 
