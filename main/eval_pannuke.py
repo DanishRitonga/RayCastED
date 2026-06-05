@@ -479,7 +479,7 @@ def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
             else:
                 decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
                 nc = 5
-                if decoded.ndim == 3 and decoded.shape[-1] >= raycast_dim + nc:
+                if decoded.ndim == 3 and decoded.shape[-1] >= raycast_dim + nc and decoded.shape[1] > 100:
                     decoded = _fcn_postprocess(decoded, raycast_dim, nc, max_det=100)
                 if debug and _batch_idx == 0:
                     det0 = decoded[0].cpu().numpy()
