@@ -426,6 +426,18 @@ def _decode_lsp_output(
     return results
 
 
+def _fcn_postprocess(decoded, raycast_dim, nc, max_det=100):
+    """Apply sigmoid + top-k to raw FCN anchor output."""
+    poly = decoded[:, :, :raycast_dim]
+    scores = decoded[:, :, raycast_dim:raycast_dim + nc].sigmoid()
+    max_scores, cls_idx = scores.max(dim=-1, keepdim=True)
+    _, topk_idx = max_scores.topk(max_det, dim=1)
+    topk_scores = max_scores.gather(dim=1, index=topk_idx.to(torch.int64))
+    topk_cls = cls_idx.gather(dim=1, index=topk_idx.to(torch.int64))
+    topk_poly = poly.gather(dim=1, index=topk_idx.expand(-1, -1, raycast_dim).to(torch.int64))
+    return torch.cat([topk_poly, topk_scores, topk_cls.float()], dim=-1)
+
+
 def _decode_fcn_output(decoded: torch.Tensor, raycast_dim: int, conf_threshold: float) -> list[dict]:
     results = []
     for si in range(decoded.shape[0]):
@@ -466,17 +478,23 @@ def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
                 preds = _decode_lsp_output(raw_out, crop_size, conf_threshold, device, debug=debug)
             else:
                 decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
+                nc = 5
+                if decoded.ndim == 3 and decoded.shape[-1] >= raycast_dim + nc:
+                    decoded = _fcn_postprocess(decoded, raycast_dim, nc, max_det=100)
                 if debug and _batch_idx == 0:
                     det0 = decoded[0].cpu().numpy()
-                    confs = det0[:, raycast_dim]
+                    confs = det0[:, raycast_dim] if det0.ndim == 2 else []
                     print(
                         f'  [ROUTING] FCN path: decoded.shape={decoded.shape}, '
-                        f'n_rays={n_rays}, raycast_dim={raycast_dim}, '
-                        f'conf_col=det[:,{raycast_dim}] '
-                        f'range=[{confs.min():.4f}, {confs.max():.4f}], '
-                        f'n_above_thresh={(confs > conf_threshold).sum()}/{len(confs)}',
+                        f'n_rays={n_rays}, raycast_dim={raycast_dim}',
                         flush=True,
                     )
+                    if len(confs) > 0:
+                        print(
+                            f'  conf range=[{confs.min():.4f}, {confs.max():.4f}], '
+                            f'n_above_thresh={(confs > conf_threshold).sum()}/{len(confs)}',
+                            flush=True,
+                        )
                 preds = _decode_fcn_output(decoded, raycast_dim, conf_threshold)
 
             for si in range(images.shape[0]):
