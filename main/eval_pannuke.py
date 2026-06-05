@@ -439,7 +439,11 @@ def _fcn_postprocess(decoded, raycast_dim, nc, max_det=100):
     else:
         raise ValueError(f'Unexpected decoded shape: {decoded.shape}, expected feat_dim={feat_dim}')
     poly = decoded[:, :, :raycast_dim]
-    scores = decoded[:, :, raycast_dim:raycast_dim + nc].sigmoid()
+    raw_cls = decoded[:, :, raycast_dim:raycast_dim + nc]
+    if raw_cls.min() >= 0 and raw_cls.max() <= 1:
+        scores = raw_cls
+    else:
+        scores = raw_cls.sigmoid()
     max_scores, cls_idx = scores.max(dim=-1, keepdim=True)
     n_anchors = decoded.shape[1]
     topk = min(max_det, n_anchors)
