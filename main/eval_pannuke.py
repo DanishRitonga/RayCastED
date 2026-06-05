@@ -283,26 +283,25 @@ def load_model(weights_path: str, device: torch.device):
 
 
 def _fcn_postprocess(decoded_batch, raycast_dim, nc, max_det=100):
-    """Apply sigmoid + top-k postprocessing for raw FCN anchor outputs.
+    """Apply top-k postprocessing for raw FCN anchor outputs.
 
-    Handles both [B, features, anchors] (raw _inference output) and
+    Handles [B, features, anchors] (raw _inference output) and
     [B, n_pred, features] (already-postprocessed) formats.
+    _inference already applies sigmoid — no extra sigmoid needed.
     """
     if decoded_batch.dim() != 3:
         return decoded_batch
     bsz, d1, d2 = decoded_batch.shape
 
-    expected_features = raycast_dim + nc + 1
-    is_raw = d1 >= d2 and d1 == expected_features
+    expected_features = raycast_dim + nc
+    is_raw = d2 > d1 and d1 == expected_features
 
     if not is_raw:
         return decoded_batch
 
     decoded = decoded_batch.transpose(1, 2).contiguous()  # [B, anchors, features]
-    _, num_anchors, num_features = decoded.shape
     cls_logits = decoded[..., raycast_dim : raycast_dim + nc]  # [B, anchors, nc]
-    cls_scores = cls_logits.sigmoid()
-    cls_score, cls_idx = cls_scores.max(dim=-1)  # [B, anchors]
+    cls_score, cls_idx = cls_logits.max(dim=-1)  # [B, anchors]
 
     sorted_idx = cls_score.argsort(dim=-1, descending=True)
     topk = sorted_idx[:, :max_det]
