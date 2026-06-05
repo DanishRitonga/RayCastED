@@ -12,16 +12,16 @@ to match LSP-DETR exactly.
 
 Usage:
     # With pre-transformed test tiles
-    uv run python main/eval_pannuke.py \\
-        --weights train4/weights/best.pt \\
-        --data-dir output/pannuke/transformed/test \\
+    uv run python main/eval_pannuke.py \
+        --weights train4/weights/best.pt \
+        --data-dir output/pannuke/transformed/test \
         --batch 16 --device 0
 
     # Auto-transform from config
-    uv run python main/eval_pannuke.py \\
-        --config main/pannuke.yaml \\
-        --output output/pannuke \\
-        --weights train4/weights/best.pt \\
+    uv run python main/eval_pannuke.py \
+        --config main/pannuke.yaml \
+        --output output/pannuke \
+        --weights train4/weights/best.pt \
         --batch 16 --device 0
 """
 
@@ -33,7 +33,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from scipy.ndimage import distance_transform_edt, label
 from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader
 from ultralytics.utils.torch_utils import model_info
@@ -45,82 +44,6 @@ from raycasted.model.metrics import (
     resolve_mask_overlaps,
 )
 from raycasted.model.register import register_raycast_head
-
-
-def _apply_watershed(pred_masks, pred_confs):
-    """Distance-transform watershed to split touching nuclei (LSP-DETR eval protocol)."""
-    if not pred_masks:
-        return [], []
-    if len(pred_masks) <= 1:
-        return pred_masks, pred_confs
-
-    combined = np.zeros_like(pred_masks[0], dtype=np.uint8)
-    for m in pred_masks:
-        combined = np.bitwise_or(combined, m.astype(np.uint8))
-
-    distance = distance_transform_edt(combined)
-    distance_norm = cv2.normalize(distance, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-    markers, n_markers = label(combined)
-    if n_markers <= 1:
-        return pred_masks, pred_confs
-
-    markers = markers.astype(np.int32)
-    labels = cv2.watershed(cv2.cvtColor(distance_norm, cv2.COLOR_GRAY2BGR), markers)
-
-    split_masks = []
-    split_confs = []
-    for lbl in range(1, np.max(labels) + 1):
-        component = (labels == lbl).astype(np.uint8)
-        if component.sum() > 0:
-            overlap = np.array([(component & m.astype(np.uint8)).sum() for m in pred_masks])
-            best = int(overlap.argmax())
-            split_masks.append(component)
-            split_confs.append(pred_confs[best] if best < len(pred_confs) else 0.0)
-
-    return split_masks, split_confs
-
-
-def _uncompile_module(model):
-    """Unwrap torch._dynamo.OptimizedModule if present."""
-    try:
-        if hasattr(torch, '_dynamo') and hasattr(torch._dynamo.eval_frame, '_optimized_module_unwrap'):
-            unwrapped = torch._dynamo.eval_frame._optimized_module_unwrap(model)
-            return unwrapped if unwrapped is not None else model
-    except (AttributeError, RuntimeError):
-        pass
-    return model
-
-
-def _fcn_postprocess(decoded_batch, raycast_dim, nc, max_det=100):
-    """Sigmoid + top-k for raw FCN [B, features, anchors] output.
-
-    Some checkpoints don't have end2end=True, so model(images) returns
-    raw _inference output instead of postprocessed [B, max_det, 68].
-    This detects that case and applies sigmoid + max-class + top-k.
-    """
-    if decoded_batch.dim() != 3:
-        return decoded_batch
-    bsz, d1, d2 = decoded_batch.shape
-
-    expected_features = raycast_dim + nc
-    is_raw = d2 > d1 and d1 == expected_features
-
-    if not is_raw:
-        return decoded_batch
-
-    decoded = decoded_batch.transpose(1, 2).contiguous()
-    cls_logits = decoded[..., raycast_dim : raycast_dim + nc]
-    cls_score, cls_idx = cls_logits.max(dim=-1)
-    sorted_idx = cls_score.argsort(dim=-1, descending=True)
-    topk = sorted_idx[:, :max_det]
-
-    result = torch.zeros(bsz, max_det, raycast_dim + 2, device=decoded.device, dtype=decoded.dtype)
-    for i in range(bsz):
-        idx = topk[i]
-        result[i, :, :raycast_dim] = decoded[i, idx, :raycast_dim]
-        result[i, :, raycast_dim] = cls_score[i, idx]
-        result[i, :, raycast_dim + 1] = cls_idx[i, idx].float()
-    return result
 
 
 def _polygons_to_masks_fast(detections: np.ndarray, img_h: int, img_w: int) -> list[np.ndarray]:
@@ -273,7 +196,7 @@ def _diagnose_recall(results, num_classes):
     if unmatched_dists:
         ud = np.array(unmatched_dists)
         finite = ud[np.isfinite(ud)]
-        print('\n  Unmatched GT — Distance to nearest prediction:')
+        print(f'\n  Unmatched GT — Distance to nearest prediction:')
         print(
             f'    <5px (near miss): {int(np.sum(finite < 5))}/{len(unmatched_dists)} ({100 * sum(finite < 5) / len(unmatched_dists):.1f}%)'
         )
@@ -293,7 +216,7 @@ def _diagnose_recall(results, num_classes):
     if unmatched_max_conf_12:
         umc = np.array(unmatched_max_conf_12)
         nonzero = umc[umc > 0]
-        print('\n  Unmatched GT — Max conf within 12px:')
+        print(f'\n  Unmatched GT — Max conf within 12px:')
         if len(nonzero) > 0:
             print(f'    Mean conf:          {nonzero.mean():.4f}')
             print(f'    Median conf:        {float(np.median(nonzero)):.4f}')
@@ -315,15 +238,12 @@ def load_model(weights_path: str, device: torch.device):
     register_raycast_head()
     ckpt = torch.load(weights_path, map_location=device, weights_only=False)
     model = ckpt.get('model') or ckpt.get('ema') if isinstance(ckpt, dict) else ckpt
-    if model is None:
-        raise ValueError(f'Checkpoint at {weights_path} has no model or ema key')
-    model = _uncompile_module(model)
     model = model.float().to(device)
     model.eval()
     return model
 
 
-def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
+def run_inference(model, dataloader, device, conf_threshold=0.20):
     """Run inference over all tiles, collecting predictions and GT.
 
     Returns:
@@ -334,7 +254,6 @@ def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
     training_args = getattr(model, 'training_args', {})
     crop_size = training_args.get('crop_size', 640)
     n_rays = training_args.get('n_rays', 32)
-    nc = training_args.get('nc', 5)
     raycast_dim = 2 + n_rays
 
     with torch.no_grad():
@@ -342,22 +261,7 @@ def run_inference(model, dataloader, device, conf_threshold=0.20, debug=False):
             images = batch['img'].to(device)
             raw_out = model(images)
             decoded = raw_out[0] if isinstance(raw_out, tuple) else raw_out
-            decoded = _fcn_postprocess(decoded, raycast_dim, nc)
             batch_size = images.shape[0]
-
-            if debug and _batch_idx == 0:
-                d0 = decoded[0].cpu().numpy() if isinstance(decoded, torch.Tensor) else np.array([])
-                print(
-                    f'  [debug] decoded.shape={decoded.shape}, n_rays={n_rays}, raycast_dim={raycast_dim}, nc={nc}',
-                    flush=True,
-                )
-                if d0.ndim == 2 and d0.shape[1] >= raycast_dim + 2:
-                    confs = d0[:, raycast_dim]
-                    print(
-                        f'  [debug] conf range=[{confs.min():.4f}, {confs.max():.4f}], '
-                        f'n_above_{conf_threshold:.2f}={(confs > conf_threshold).sum()}',
-                        flush=True,
-                    )
 
             for si in range(batch_size):
                 # --- GT ---
@@ -470,7 +374,7 @@ def _compute_ap(recall, precision):
 # ---------------------------------------------------------------------------
 
 
-def compute_metrics_streaming(results, num_classes, watershed_flag=False):
+def compute_metrics_streaming(results, num_classes):
     """Compute all metrics in a single pass, one image at a time.
 
     Rasterizes masks, computes per-image metrics, then frees masks.
@@ -514,8 +418,6 @@ def compute_metrics_streaming(results, num_classes, watershed_flag=False):
         pred_masks = _polygons_to_masks_fast(pred_polys, imgsz, imgsz) if len(pred_polys) > 0 else []
         if pred_masks:
             pred_masks = resolve_mask_overlaps(pred_masks)
-        if watershed_flag and len(pred_masks) >= 2:
-            pred_masks, _ = _apply_watershed(pred_masks, pred_confs)
 
         # --- AJI ---
         aji_scores.append(compute_aji(pred_masks, gt_masks))
@@ -731,9 +633,6 @@ def main():
     parser.add_argument('--device', type=str, default='0')
     parser.add_argument('--conf', type=float, default=0.20)
     parser.add_argument('--workers', type=int, default=4)
-    parser.add_argument('--watershed', action='store_true', help='Apply watershed post-processing')
-    parser.add_argument('--debug', action='store_true', help='Print first-batch debug info')
-    parser.add_argument('--max-images', type=int, default=0, help='Limit eval to first N images (0=all)')
     args = parser.parse_args()
 
     try:
@@ -806,20 +705,14 @@ def _main(args):
 
     # --- Run inference ---
     print('Running inference...', flush=True)
-    results = run_inference(model, dataloader, device, conf_threshold=args.conf, debug=args.debug)
-    if args.max_images > 0:
-        results = results[: args.max_images]
-        n_pred_total = sum(len(r['pred_polys']) for r in results)
-        n_gt_total = sum(len(r['gt_polys']) for r in results)
-        print(f'  Limited to {args.max_images} images: {n_pred_total} predictions, {n_gt_total} GT', flush=True)
-    else:
-        n_pred_total = sum(len(r['pred_polys']) for r in results)
-        n_gt_total = sum(len(r['gt_polys']) for r in results)
-        print(f'  Processed {len(results)} images: {n_pred_total} predictions, {n_gt_total} GT', flush=True)
+    results = run_inference(model, dataloader, device, conf_threshold=args.conf)
+    n_pred_total = sum(len(r['pred_polys']) for r in results)
+    n_gt_total = sum(len(r['gt_polys']) for r in results)
+    print(f'  Processed {len(results)} images: {n_pred_total} predictions, {n_gt_total} GT', flush=True)
 
     # --- Compute all metrics (streaming, memory-efficient) ---
     print('Computing metrics (streaming)...', flush=True)
-    metrics = compute_metrics_streaming(results, num_classes=nc, watershed_flag=args.watershed)
+    metrics = compute_metrics_streaming(results, num_classes=nc)
 
     ap_results = metrics['ap']
     ap50 = ap_results.get(0.5, {}).get('AP', 0.0)
@@ -869,8 +762,6 @@ def _main(args):
     print(f'Confidence threshold: {args.conf}')
     print(f'Total predictions: {n_pred_total}')
     print(f'Total GT instances: {n_gt_total}')
-    if args.watershed:
-        print('Post-processing: watershed')
 
     # --- Recall diagnosis ---
     try:
