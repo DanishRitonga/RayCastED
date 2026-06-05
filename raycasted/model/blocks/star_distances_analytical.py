@@ -149,6 +149,74 @@ def analytical_ray_cost(
     return distances.mean(dim=-1)
 
 
+def _analytical_ray_distances_paired(
+    centroids_px: torch.Tensor,
+    vertices: torch.Tensor,
+    ray_cos: torch.Tensor,
+    ray_sin: torch.Tensor,
+):
+    """Ray-edge distances for 1:1 matched (pred, GT) pairs — diagonal only.
+
+    Avoids the [N, N, n_verts, n_rays] full pairwise matrix of
+    ``analytical_ray_distances`` by exploiting the 1:1 pre-matching.
+
+    Args:
+        centroids_px: [N, 2] predicted centroids in pixel space
+        vertices: [N, n_verts, 2] GT polygon vertices, one per centroid
+        ray_cos: [n_rays] cosine of ray directions
+        ray_sin: [n_rays] sine of ray directions
+
+    Returns:
+        distances: [N, n_rays] non-negative distance to polygon boundary
+                   along each ray, capped at a reasonable maximum for misses
+    """
+    device = centroids_px.device
+    dtype = centroids_px.dtype
+    n_rays = ray_cos.shape[0]
+    n_pairs, n_verts, _ = vertices.shape
+
+    ray_cos = ray_cos.to(device=device, dtype=dtype).view(1, 1, n_rays)
+    ray_sin = ray_sin.to(device=device, dtype=dtype).view(1, 1, n_rays)
+
+    v1 = vertices                               # [N, n_verts, 2]
+    v2_shift = vertices.roll(-1, dims=1)        # wrap-around edges
+
+    cx = centroids_px[:, 0:1, None]             # [N, 1, 1]
+    cy = centroids_px[:, 1:2, None]             # [N, 1, 1]
+
+    v1x = v1[:, :, 0:1]                         # [N, n_verts, 1]
+    v1y = v1[:, :, 1:2]
+    v2x = v2_shift[:, :, 0:1]
+    v2y = v2_shift[:, :, 1:2]
+
+    dx = v2x - v1x
+    dy = v2y - v1y
+
+    cos_e = ray_cos.expand(n_pairs, n_verts, n_rays)  # [N, n_verts, n_rays]
+    sin_e = ray_sin.expand(n_pairs, n_verts, n_rays)
+
+    det = -cos_e * dy + sin_e * dx
+    det_valid = det.abs() > 1e-10
+
+    t_num = (v1x - cx) * (-dy) + (v1y - cy) * dx
+    u_num = (v1x - cx) * (-sin_e) + (v1y - cy) * cos_e
+
+    safe_det = torch.where(det_valid, det, torch.ones_like(det))
+    t = t_num / safe_det
+    u = u_num / safe_det
+
+    valid = det_valid & (t > 1e-6) & (u >= 0) & (u <= 1)
+
+    large_val = torch.full_like(t, 1e10)
+    dists = torch.where(valid, t, large_val)
+    min_dists, _ = dists.min(dim=1)
+
+    diagonal_px = torch.as_tensor((vertices.max() - vertices.min()) * 2.0, device=device, dtype=dtype).clamp(min=256.0)
+    min_dists = min_dists.clamp(max=diagonal_px)
+
+    return min_dists
+
+
 def analytical_gt_rays(
     pred_xy_px: torch.Tensor,
     gt_vertices: torch.Tensor,
@@ -157,6 +225,9 @@ def analytical_gt_rays(
     crop_size: float,
 ):
     """Compute GT star-distance rays for matched prediction-GT pairs.
+
+    Uses the paired kernel (O(N)) rather than the full pairwise
+    kernel (O(N²)) since fg anchors are already 1:1 pre-matched.
 
     Args:
         pred_xy_px: [N_matched, 2] predicted centroids in pixel space
@@ -168,9 +239,8 @@ def analytical_gt_rays(
     Returns:
         gt_rays: [N_matched, n_rays] normalized GT ray lengths [0, 1]
     """
-    distances = analytical_ray_distances(pred_xy_px, gt_vertices, ray_cos, ray_sin)
-    diag = torch.arange(distances.shape[0], device=pred_xy_px.device)
-    gt_rays_norm = distances[diag, diag] / crop_size
+    distances = _analytical_ray_distances_paired(pred_xy_px, gt_vertices, ray_cos, ray_sin)
+    gt_rays_norm = distances / crop_size
     return gt_rays_norm
 
 
