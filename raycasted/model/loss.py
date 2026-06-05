@@ -721,12 +721,16 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 loss_binary = loss_binary * (1.0 + self.plb_cls_weight * plb_weights.unsqueeze(-1))
             loss[1] = loss_binary.sum() / max(fg_mask.sum(), 1)
 
-            # Class loss: CE on fg anchors only — inter-class discrimination
+            # Class loss: BCE (1-vs-rest) on fg anchors only — decoupled class decisions
             n_fg = max(fg_mask.sum(), 1)
             if fg_mask.any():
                 fg_pred_class = pred_class[fg_mask]  # [K, nc]
-                fg_class_labels = cls_targets[fg_mask].argmax(dim=-1)  # [K]
-                loss_class = F.cross_entropy(fg_pred_class, fg_class_labels, reduction='none')
+                fg_class_idxs = cls_targets[fg_mask].argmax(dim=-1)  # [K]
+                fg_class_onehot = torch.zeros_like(fg_pred_class)
+                fg_class_onehot.scatter_(1, fg_class_idxs.unsqueeze(1), 1.0)
+                loss_class = F.binary_cross_entropy_with_logits(
+                    fg_pred_class, fg_class_onehot, reduction='none'
+                ).mean(-1)
                 if plb_weights is not None:
                     fg_plb_cls = plb_weights[fg_mask]  # [K]
                     loss_class = loss_class * (1.0 + self.plb_cls_weight * fg_plb_cls)
