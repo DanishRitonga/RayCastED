@@ -82,9 +82,12 @@ def _apply_watershed(pred_masks, pred_confs):
 
 def _uncompile_module(model):
     """Unwrap torch._dynamo.OptimizedModule if present."""
-    if hasattr(torch, '_dynamo'):
-        unwrapped = torch._dynamo.eval_frame._optimized_module_unwrap(model)
-        return unwrapped if unwrapped is not None else model
+    try:
+        if hasattr(torch, '_dynamo') and hasattr(torch._dynamo.eval_frame, '_optimized_module_unwrap'):
+            unwrapped = torch._dynamo.eval_frame._optimized_module_unwrap(model)
+            return unwrapped if unwrapped is not None else model
+    except (AttributeError, RuntimeError):
+        pass
     return model
 
 
