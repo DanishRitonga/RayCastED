@@ -238,8 +238,8 @@ def load_model(weights_path: str, device: torch.device):
     register_raycast_head()
     ckpt = torch.load(weights_path, map_location=device, weights_only=False)
     model = ckpt.get('model') or ckpt.get('ema') if isinstance(ckpt, dict) else ckpt
+    model.model[-1].end2end = True
     model = model.float().to(device)
-    model.end2end = True
     model.eval()
     return model
 
