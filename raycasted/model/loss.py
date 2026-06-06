@@ -760,6 +760,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
             fg_target_xy = fg_target_xy.float()
             fg_pred_rays = fg_pred_rays.float()
             fg_target_rays = fg_target_rays.float()
+            fg_target_rays_static = fg_target_rays  # save for pIoU (static GT polygon)
 
             fg_pred_xy = pred_xy[fg_mask]
 
@@ -800,7 +801,10 @@ class RayCastDetectionLoss(v8DetectionLoss):
             # L_PolarIoU: -log(PolarIoU) — matches PolarMask formulation
             # clamp(min=1e-4) bounds gradient magnitude (~10^4 max) to prevent
             # AMP GradScaler from skipping steps when piou≈0 in early training
-            fg_piou = polar_iou_torch(fg_pred_rays, fg_target_rays)
+            # Use STATIC GT rays for pIoU even with analytical L1 targets —
+            # pIoU measures polygon overlap with the reference polygon, not
+            # whether rays reached the boundary from a shifted centroid.
+            fg_piou = polar_iou_torch(fg_pred_rays, fg_target_rays_static)
             piou_loss = -torch.log(fg_piou.clamp(min=1e-4))
             if fg_plb is not None:
                 piou_loss = piou_loss * fg_plb
