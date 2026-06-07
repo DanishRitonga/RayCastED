@@ -780,7 +780,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 matched_gt_vertices = gt_vertices[fg_batch_idx, fg_gt_idx]
 
                 analytical_target_rays = analytical_gt_rays(
-                    fg_pred_xy_px.detach(), matched_gt_vertices, ray_cos, ray_sin, crop_size_val
+                    fg_pred_xy_px, matched_gt_vertices, ray_cos, ray_sin, crop_size_val
                 )
                 fg_target_rays = analytical_target_rays.to(dtype=fg_target_rays.dtype)
 
