@@ -29,11 +29,11 @@ RAYCAST_DIM = 2 + _const.N_RAYS
 
 
 class RayRefinementBlock(nn.Module):
-    """3x3 depthwise conv + GroupNorm + SiLU + residual skip.
+    """3×3 depthwise conv + GroupNorm + SiLU + residual skip.
 
     Blends features from spatially neighbouring anchor points before
     committing to ray predictions — reduces jagged outputs without
-    Transformer overhead (CPP-Net design).
+    Transformer overhead (ConvNeXt-style block).
     """
 
     def __init__(self, channels: int):
