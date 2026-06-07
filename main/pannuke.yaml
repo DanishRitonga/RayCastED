@@ -169,7 +169,7 @@ training:
   lambda_cls: 2.0               # Classification weight
   lambda_xy: 500.0              # Centroid xy weight (high: compensates sigmoid→stride→imgsz attenuation)
   lambda_l1: 14.0               # L1 ray distance weight
-  lambda_piou: 6.5              # Polar IoU weight — halved: L1 provides shape signal with analytical rays
+  lambda_piou: 3.0              # Polar IoU weight — minimal: let analytical L1 dominate shape
 
   # Sigma annealing: DISABLED — train13 didn't use this, re-evaluate later
   sigma_anneal_start: 0         # 0 = disabled (use assigner_radius_scale)
