@@ -29,7 +29,7 @@ scales:
 backbone:
   - [-1, 1, ResoConvHybrid, [64]]           # 0-P1/2
   - [-1, 1, ResoConvHybrid, [128]]          # 1-P2/4
-  - [-1, 2, C3k2, [256, False, 0.25]]      # 2   (P2 features, 64x64)
+  - [-1, 2, C3k2_DCN, [256, False, 0.25]]    # 2  DCNv2 on P2
   - [-1, 1, ResoConvHybrid, [256]]          # 3-P3/8
   - [-1, 2, C3k2, [512, False, 0.25]]      # 4   (P3 features, 32x32)
   - [-1, 1, ResoConvHybrid, [512]]          # 5-P4/16

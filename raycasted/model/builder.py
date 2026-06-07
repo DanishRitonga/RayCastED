@@ -44,6 +44,7 @@ from ultralytics.nn.modules.transformer import AIFI
 from ultralytics.utils.ops import make_divisible
 
 from raycasted.model.blocks.head import RayCastDetect
+from raycasted.model.blocks.dcn_blocks import C3k2_DCN
 from raycasted.model.blocks.lk_block import C3k2_LK
 from raycasted.model.blocks.resoconv import (
     DWT_HF,
@@ -71,6 +72,7 @@ BASE_MODULES = frozenset(
         ResoConvDS_Hybrid,
         ResoConvHybrid,
         C3k2_LK,
+        C3k2_DCN,
     }
 )
 
@@ -79,6 +81,7 @@ REPEAT_MODULES = frozenset(
         C3k2,
         C2PSA,
         C3k2_LK,
+        C3k2_DCN,
         RepC3,
     }
 )
