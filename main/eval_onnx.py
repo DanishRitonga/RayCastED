@@ -164,8 +164,11 @@ def main():
         if hasattr(labels, 'numpy'):
             labels = labels.numpy()
         image_np = image.astype(np.float32)
-        blob = image_np.transpose(2, 0, 1)[np.newaxis] / 255.0
-        blob = np.ascontiguousarray(blob)
+        if image_np.ndim == 3 and image_np.shape[-1] == 3:
+            image_np = image_np.transpose(2, 0, 1)  # HWC → CHW
+        elif image_np.ndim == 3 and image_np.shape[0] == 3:
+            pass  # already CHW
+        blob = image_np[np.newaxis] / 255.0
 
         # Inference
         if use_trt:
