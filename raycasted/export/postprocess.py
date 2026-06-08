@@ -87,7 +87,7 @@ def postprocess_raw_output(
     det[:, 0] = cx[indices]
     det[:, 1] = cy[indices]
     det[:, 2:2 + n_rays] = rays_px[indices]
-    det[:, 2:2 + n_rays] = rays_px[mask]
+    det[:, 2:2 + n_rays] = rays_px[indices]
     det[:, raycast_dim] = max_scores[indices]
     det[:, raycast_dim + 1] = cls_idx[indices]
     return det
