@@ -36,13 +36,13 @@ class _ExportWrapper(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.model = model
-        head = model.model[-1]
-        self.head = head
-        self._hierarchical = getattr(head, 'hierarchical_cls', False)
+        inner = model.model if hasattr(model, 'model') else model
+        self.head = inner[-1]
+        self._inner = inner
 
     def forward(self, x):
         y = x
-        for i, m in enumerate(self.model.model[:-1]):
+        for i, m in enumerate(self._inner[:-1]):
             y = m(y)
         if not isinstance(y, (list, tuple)):
             y = [y]
@@ -99,12 +99,13 @@ def export_raycast_onnx(
 
     from raycasted.export.dcn_strip import strip_dcn_from_model
 
-    strip_dcn_from_model(model.model)
+    inner = model.model if hasattr(model, 'model') else model
+    strip_dcn_from_model(inner)
 
     wrapper = _ExportWrapper(model)
 
     dummy = torch.randn(1, 3, imgsz, imgsz)
-    head = model.model[-1]
+    head = inner[-1]
     hierarchical = getattr(head, 'hierarchical_cls', False)
 
     output_names = ['boxes', 'binary', 'class'] if hierarchical else ['boxes', 'scores']
@@ -176,7 +177,8 @@ def validate_onnx(
 
     from raycasted.export.dcn_strip import strip_dcn_from_model
 
-    strip_dcn_from_model(model.model)
+    inner = model.model if hasattr(model, 'model') else model
+    strip_dcn_from_model(inner)
 
     wrapper = _ExportWrapper(model)
     head = model.model[-1]
