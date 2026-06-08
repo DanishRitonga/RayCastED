@@ -195,12 +195,14 @@ def main():
             )
 
         # GT
-        gt_poly = labels.copy()
-        n_gt = labels.shape[0]
+        n_gt = labels.shape[0] if labels.ndim >= 2 else 0
         if n_gt > 0:
+            gt_poly = labels[:, 1:].copy()
             gt_poly[:, 0] *= imgsz
             gt_poly[:, 1] *= imgsz
             gt_poly[:, 2:] *= imgsz
+        else:
+            gt_poly = np.zeros((0, 2 + n_rays), dtype=np.float32)
 
         n_pred_total += det.shape[0]
         n_gt_total += n_gt
@@ -210,7 +212,7 @@ def main():
             'pred_confs': det[:, raycast_dim] if det.shape[0] > 0 else np.array([]),
             'pred_cls': det[:, raycast_dim + 1].astype(int) if det.shape[0] > 0 else np.array([]),
             'gt_polys': gt_poly,
-            'gt_cls': labels[:, 0].astype(int),
+            'gt_cls': labels[:, 0].astype(int) if labels.ndim >= 2 and labels.shape[0] > 0 else np.array([], dtype=int),
             'imgsz': imgsz,
         })
 
