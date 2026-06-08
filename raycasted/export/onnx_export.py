@@ -54,6 +54,7 @@ class _ExportWrapper(nn.Module):
 
         head_in = [y[j] for j in self._head_inputs]
         head = self._head
+        apply_isc = getattr(head, 'inter_scale_competition', False) and head.nl > 1
         if self._hierarchical:
             preds = head.forward_head(
                 head_in,
@@ -61,11 +62,21 @@ class _ExportWrapper(nn.Module):
                 cls_head_binary=head.one2one_cv3_binary,
                 cls_head_class=head.one2one_cv3_class,
             )
+            if apply_isc:
+                bp = preds['binary_scores'].sigmoid()
+                adjusted = head._apply_inter_scale_competition(bp, preds['feats'])
+                adjusted = adjusted.clamp(min=1e-7, max=1 - 1e-7)
+                preds['binary_scores'] = torch.log(adjusted / (1 - adjusted))
             return preds['boxes'], preds['binary_scores'], preds['class_scores']
         else:
             preds = head.forward_head(
                 head_in, box_head=head.one2one_cv2, cls_head=head.one2one_cv3,
             )
+            if apply_isc:
+                sp = preds['scores'].sigmoid()
+                adjusted = head._apply_inter_scale_competition(sp, preds['feats'])
+                adjusted = adjusted.clamp(min=1e-7, max=1 - 1e-7)
+                preds['scores'] = torch.log(adjusted / (1 - adjusted))
             return preds['boxes'], preds['scores']
 
 
