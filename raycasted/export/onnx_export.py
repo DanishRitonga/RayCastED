@@ -27,40 +27,44 @@ from raycasted.data.etl.utils import constants as _const
 class _ExportWrapper(nn.Module):
     """Wraps the RayCastED model to export raw o2o head logits.
 
-    Runs backbone+neck, then the o2o head's forward_head(). Exports
-    raw logits without activations, decoding, or post-processing.
+    Replicates ultralytics' internal forward loop (handling multi-source
+    Concat correctly), then calls forward_head() on the o2o head.
     """
 
     def __init__(self, model):
         super().__init__()
-        self.model = model
         inner = model.model if hasattr(model, 'model') else model
-        self.head = inner[-1]
         self._inner = inner
+        head = inner[-1]
+        self._head = head
+        self._save = getattr(inner, 'save', set())
+        self._head_inputs = getattr(head, 'f', head.f) if hasattr(head, 'f') else []
+        if isinstance(self._head_inputs, int):
+            self._head_inputs = [self._head_inputs]
+        self._hierarchical = getattr(head, 'hierarchical_cls', False)
 
     def forward(self, x):
-        y = x
+        y = []
         for i, m in enumerate(self._inner[:-1]):
-            y = m(y)
-        if not isinstance(y, (list, tuple)):
-            y = [y]
+            _f = getattr(m, 'f', -1)
+            if _f != -1:
+                x = y[_f] if isinstance(_f, int) else [x if j == -1 else y[j] for j in _f]
+            x = m(x)
+            y.append(x if i in self._save else None)
 
-        head = self.head
+        head_in = [y[j] for j in self._head_inputs]
+        head = self._head
         if self._hierarchical:
             preds = head.forward_head(
-                y,
+                head_in,
                 box_head=head.one2one_cv2,
                 cls_head_binary=head.one2one_cv3_binary,
                 cls_head_class=head.one2one_cv3_class,
             )
-            return (
-                preds['boxes'],          # [B, 66, N]
-                preds['binary_scores'],  # [B, 1, N]
-                preds['class_scores'],   # [B, nc, N]
-            )
+            return preds['boxes'], preds['binary_scores'], preds['class_scores']
         else:
             preds = head.forward_head(
-                y, box_head=head.one2one_cv2, cls_head=head.one2one_cv3
+                head_in, box_head=head.one2one_cv2, cls_head=head.one2one_cv3,
             )
             return preds['boxes'], preds['scores']
 

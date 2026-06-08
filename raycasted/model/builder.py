@@ -258,4 +258,6 @@ def raycasted_parse_model(d, ch, verbose=True):
             ch = []
         ch.append(c2)
 
-    return torch.nn.Sequential(*layers), sorted(save)
+    model = torch.nn.Sequential(*layers)
+    model.save = sorted(save)
+    return model, model.save
