@@ -178,6 +178,10 @@ def main():
             names = [n.name for n in session.get_outputs()]
             outputs = {names[j]: outputs_ort[j] for j in range(len(names))}
 
+        for k in outputs:
+            if outputs[k].ndim == 3:
+                outputs[k] = outputs[k][0].T  # [1, C, N] → [N, C]
+
         # Postprocess
         if hierarchical and 'binary' in outputs:
             det = postprocess_raw_output(
