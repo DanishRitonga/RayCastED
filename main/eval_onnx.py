@@ -193,11 +193,6 @@ def main():
             det = postprocess_raw_output(
                 outputs['boxes'], None, scores, strides, imgsz, conf_threshold, n_rays=n_rays,
             )
-        else:
-            scores = outputs.get('scores', outputs.get('class'))
-            det = postprocess_raw_output(
-                outputs['boxes'], None, scores, strides, imgsz, conf_threshold, n_rays=n_rays,
-            )
 
         # GT
         n_gt = labels.shape[0] if labels.ndim >= 2 else 0
