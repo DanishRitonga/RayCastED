@@ -20,6 +20,7 @@ def postprocess_raw_output(
     conf_threshold: float = 0.20,
     binary_threshold: float = 0.01,
     n_rays: int = 64,
+    max_det: int = 100,
 ) -> np.ndarray:
     """Post-process raw ONNX head output to polygon detections.
 
@@ -32,6 +33,7 @@ def postprocess_raw_output(
         conf_threshold: Confidence threshold for filtering.
         binary_threshold: Hard gate threshold for binary head.
         n_rays: Number of radial rays.
+        max_det: Maximum detections per image (top-K by confidence).
 
     Returns:
         [N_det, 4+n_rays] array: [cx, cy, d_1..d_n, score, cls_idx].
@@ -75,12 +77,19 @@ def postprocess_raw_output(
     if n_det == 0:
         return np.zeros((0, raycast_dim + 2), dtype=np.float32)
 
+    indices = np.where(mask)[0]
+    if n_det > max_det:
+        topk = np.argsort(-max_scores[indices])[:max_det]
+        indices = indices[topk]
+        n_det = max_det
+
     det = np.zeros((n_det, raycast_dim + 2), dtype=np.float32)
-    det[:, 0] = cx[mask]
-    det[:, 1] = cy[mask]
+    det[:, 0] = cx[indices]
+    det[:, 1] = cy[indices]
+    det[:, 2:2 + n_rays] = rays_px[indices]
     det[:, 2:2 + n_rays] = rays_px[mask]
-    det[:, raycast_dim] = max_scores[mask]
-    det[:, raycast_dim + 1] = cls_idx[mask]
+    det[:, raycast_dim] = max_scores[indices]
+    det[:, raycast_dim + 1] = cls_idx[indices]
     return det
 
 
