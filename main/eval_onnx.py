@@ -184,16 +184,15 @@ def main():
 
         # Postprocess
         if hierarchical and 'binary' in outputs:
-            det = postprocess_raw_output(...)
+            det = postprocess_raw_output(
+                outputs['boxes'], outputs['binary'], outputs['class'],
+                strides, imgsz, conf_threshold, binary_threshold, n_rays,
+            )
         else:
             scores = outputs.get('scores', outputs.get('class'))
             det = postprocess_raw_output(
                 outputs['boxes'], None, scores, strides, imgsz, conf_threshold, n_rays=n_rays,
             )
-
-        if i == 0:
-            boxes_debug = outputs['boxes'] if outputs['boxes'].ndim == 2 else outputs['boxes'][0]
-            print(f'  First image: boxes={boxes_debug.shape}, scores={scores.shape if \"scores\" in dir() else \"?\"}, det={det.shape[0]}, gt={n_gt}', flush=True)
         else:
             scores = outputs.get('scores', outputs.get('class'))
             det = postprocess_raw_output(
