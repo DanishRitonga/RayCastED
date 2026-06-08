@@ -164,16 +164,14 @@ def main():
         if hasattr(labels, 'numpy'):
             labels = labels.numpy()
         image_np = image.astype(np.float32)
+        blob = image_np.transpose(2, 0, 1)[np.newaxis] / 255.0
+        blob = np.ascontiguousarray(blob)
 
         # Inference
         if use_trt:
-            blob = image_np.transpose(2, 0, 1)[np.newaxis]
             outputs = run_trt(trt_ctx, blob)
         else:
-            blob = image_np.transpose(2, 0, 1)[np.newaxis]
-            outputs_ort = session.run(
-                None, {'images': blob.astype(np.float32)}
-            )
+            outputs_ort = session.run(None, {'images': blob})
             names = [n.name for n in session.get_outputs()]
             outputs = {names[j]: outputs_ort[j] for j in range(len(names))}
 
