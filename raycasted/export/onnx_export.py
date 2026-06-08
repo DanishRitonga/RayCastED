@@ -1,11 +1,17 @@
-"""RayCastED — ONNX Export Utilities (Phase 9).
+"""RayCastED — ONNX Export Utilities.
 
 Exports the RayCastED model to ONNX format for TensorRT deployment on
 NVIDIA Jetson. The ONNX graph contains raw head logits only — no
 activations, decoding, or post-processing. All post-processing runs
 on the Jetson host in Python/NumPy.
 
-Spec reference: docs/project.md section 16
+Exports three output tensors:
+  - boxes:    [B, raycast_dim, N] polygon logits (xy + rays)
+  - binary:   [B, 1, N]           fg/bg logits (hierarchical_cls)
+  - class:    [B, nc, N]          class logits
+
+For models without hierarchical_cls, binary and class are merged into
+a single 'scores' output.
 """
 
 import json
@@ -19,27 +25,12 @@ import torch.nn as nn
 
 from raycasted.data.etl.utils import constants as _const
 
-METADATA_KEYS = [
-    'crop_size',
-    'imgsz',
-    'nc',
-    'n_rays',
-    'ray_cos',
-    'ray_sin',
-    'strides',
-    'conf_threshold',
-    'dedup_radius_px',
-]
 
+class _ExportWrapper(nn.Module):
+    """Wraps the RayCastED model to export raw o2o head logits.
 
-class _RawHeadWrapper(nn.Module):
-    """Wraps the full YOLO model to export raw head logits.
-
-    Runs backbone+neck, then forward_head() only. No activations,
-    no _inference(), no postprocess(). Returns [B, N_anchors, nc + 34].
-
-    Args:
-        model: The full YOLO DetectionModel.
+    Runs backbone+neck, then the o2o head's forward_head(). Exports
+    raw logits without activations, decoding, or post-processing.
     """
 
     def __init__(self, model):
@@ -47,55 +38,52 @@ class _RawHeadWrapper(nn.Module):
         self.model = model
         head = model.model[-1]
         self.head = head
+        self._hierarchical = getattr(head, 'hierarchical_cls', False)
 
     def forward(self, x):
-        """Run backbone+neck, then raw head output.
-
-        Args:
-            x: [B, 3, H, W] input image tensor.
-
-        Returns:
-            [B, N_anchors, nc + 34] raw head logits.
-        """
-        # Run through all layers except the head
         y = x
         for i, m in enumerate(self.model.model[:-1]):
             y = m(y)
-
-        # y should be a list of feature maps for the head
         if not isinstance(y, (list, tuple)):
             y = [y]
 
-        # Run forward_head only — raw logits, no activations
         head = self.head
-        preds = head.forward_head(y, box_head=head.cv2, cls_head=head.cv3)
+        if self._hierarchical:
+            preds = head.forward_head(
+                y,
+                box_head=head.one2one_cv2,
+                cls_head_binary=head.one2one_cv3_binary,
+                cls_head_class=head.one2one_cv3_class,
+            )
+            return (
+                preds['boxes'],          # [B, 66, N]
+                preds['binary_scores'],  # [B, 1, N]
+                preds['class_scores'],   # [B, nc, N]
+            )
+        else:
+            preds = head.forward_head(
+                y, box_head=head.one2one_cv2, cls_head=head.one2one_cv3
+            )
+            return preds['boxes'], preds['scores']
 
-        boxes = preds['boxes']  # [B, 34, N_anchors]
-        scores = preds['scores']  # [B, nc, N_anchors]
-        return torch.cat([boxes, scores], dim=1).permute(0, 2, 1)  # [B, N, 34+nc]
 
-
-def export_polygon_yolo_onnx(
+def export_raycast_onnx(
     weights_path: str,
     output_path: str,
-    imgsz: int = 640,
+    imgsz: int = 256,
     opset: int = 17,
     simplify: bool = True,
     dynamic_batch: bool = False,
 ) -> str:
-    """Export RayCastED model to ONNX format.
-
-    The ONNX graph contains raw head logits only. Post-processing
-    (sigmoid, softplus, xy decoding, ray denormalisation, thresholding,
-    dedup) runs on the deployment target in Python/NumPy.
+    """Export RayCastED model to ONNX.
 
     Args:
         weights_path: Path to .pt checkpoint.
         output_path: Path to write .onnx file.
-        imgsz: Input image size (square). Default 640.
-        opset: ONNX opset version. 17 covers GroupNorm, Softplus, SiLU.
-        simplify: Run onnx-simplifier to fold constants. Default True.
-        dynamic_batch: Export with dynamic batch dimension. Default False.
+        imgsz: Input image size (square). Default 256.
+        opset: ONNX opset version.
+        simplify: Run onnx-simplifier to fold constants.
+        dynamic_batch: Export with dynamic batch dimension.
 
     Returns:
         Path to the exported .onnx file.
@@ -109,13 +97,23 @@ def export_polygon_yolo_onnx(
         model = model.float()
     model.eval()
 
-    wrapper = _RawHeadWrapper(model)
+    from raycasted.export.dcn_strip import strip_dcn_from_model
+
+    strip_dcn_from_model(model.model)
+
+    wrapper = _ExportWrapper(model)
 
     dummy = torch.randn(1, 3, imgsz, imgsz)
+    head = model.model[-1]
+    hierarchical = getattr(head, 'hierarchical_cls', False)
+
+    output_names = ['boxes', 'binary', 'class'] if hierarchical else ['boxes', 'scores']
 
     dynamic_axes = None
     if dynamic_batch:
-        dynamic_axes = {'images': {0: 'batch'}, 'output': {0: 'batch'}}
+        dynamic_axes = {'images': {0: 'batch'}}
+        for name in output_names:
+            dynamic_axes[name] = {0: 'batch'}
 
     torch.onnx.export(
         wrapper,
@@ -123,28 +121,23 @@ def export_polygon_yolo_onnx(
         output_path,
         opset_version=opset,
         input_names=['images'],
-        output_names=['output'],
+        output_names=output_names,
         dynamic_axes=dynamic_axes,
     )
 
-    # Validate ONNX model
     onnx_model = onnx.load(output_path)
     onnx.checker.check_model(onnx_model)
 
-    # Optionally simplify
     if simplify:
         try:
             import onnxsim
-
             onnx_model_simplified, check = onnxsim.simplify(onnx_model)
             if check:
                 onnx.save(onnx_model_simplified, output_path)
         except ImportError:
-            pass  # onnxsim not available, skip simplification
+            pass
 
-    # Write metadata sidecar
-    head = model.model[-1]
-    strides = head.stride.tolist() if hasattr(head, 'stride') else [8, 16, 32]
+    strides = head.stride.tolist() if hasattr(head, 'stride') else [4, 8, 16]
     meta = {
         'crop_size': imgsz,
         'imgsz': imgsz,
@@ -153,8 +146,9 @@ def export_polygon_yolo_onnx(
         'ray_cos': _const.RAY_COS.tolist(),
         'ray_sin': _const.RAY_SIN.tolist(),
         'strides': strides,
-        'conf_threshold': 0.25,
-        'dedup_radius_px': 5,
+        'conf_threshold': 0.20,
+        'hierarchical_cls': hierarchical,
+        'binary_threshold': getattr(head, 'hierarchical_binary_threshold', 0.01),
     }
     meta_path = Path(output_path).with_suffix('.meta.json')
     with open(meta_path, 'w') as f:
@@ -166,24 +160,11 @@ def export_polygon_yolo_onnx(
 def validate_onnx(
     onnx_path: str,
     weights_path: str,
-    imgsz: int = 640,
+    imgsz: int = 256,
     atol: float = 1e-5,
     rtol: float = 1e-4,
 ) -> dict:
-    """Validate ONNX export against PyTorch model.
-
-    Runs both models on the same input and checks numerical agreement.
-
-    Args:
-        onnx_path: Path to .onnx file.
-        weights_path: Path to .pt checkpoint.
-        imgsz: Input image size.
-        atol: Absolute tolerance.
-        rtol: Relative tolerance.
-
-    Returns:
-        dict with 'max_diff', 'mean_diff', 'passed' keys.
-    """
+    """Validate ONNX export against PyTorch model."""
     from raycasted.model.register import register_raycast_head
 
     register_raycast_head()
@@ -193,25 +174,41 @@ def validate_onnx(
         model = model.float()
     model.eval()
 
-    wrapper = _RawHeadWrapper(model)
+    from raycasted.export.dcn_strip import strip_dcn_from_model
+
+    strip_dcn_from_model(model.model)
+
+    wrapper = _ExportWrapper(model)
+    head = model.model[-1]
+    hierarchical = getattr(head, 'hierarchical_cls', False)
 
     dummy = torch.randn(1, 3, imgsz, imgsz)
 
     with torch.no_grad():
-        pt_output = wrapper(dummy).numpy()
+        pt_output = wrapper(dummy)
 
     session = ort.InferenceSession(onnx_path)
-    onnx_output = session.run(None, {'images': dummy.numpy()})[0]
+    onnx_output = session.run(None, {'images': dummy.numpy()})
 
-    max_diff = np.abs(pt_output - onnx_output).max()
-    mean_diff = np.abs(pt_output - onnx_output).mean()
-    passed = bool(np.allclose(pt_output, onnx_output, atol=atol, rtol=rtol))
+    if not isinstance(pt_output, tuple):
+        pt_output = (pt_output,)
+
+    max_diffs = []
+    all_passed = True
+    names = ['boxes', 'binary', 'class'] if hierarchical else ['boxes', 'scores']
+    for i, name in enumerate(names):
+        pt_val = pt_output[i].numpy()
+        onnx_val = onnx_output[i]
+        max_d = float(np.abs(pt_val - onnx_val).max())
+        mean_d = float(np.abs(pt_val - onnx_val).mean())
+        ok = bool(np.allclose(pt_val, onnx_val, atol=atol, rtol=rtol))
+        max_diffs.append({'name': name, 'max_diff': max_d, 'mean_diff': mean_d, 'passed': ok})
+        all_passed = all_passed and ok
 
     return {
-        'max_diff': float(max_diff),
-        'mean_diff': float(mean_diff),
-        'passed': passed,
-        'shape_match': pt_output.shape == onnx_output.shape,
-        'pt_shape': list(pt_output.shape),
-        'onnx_shape': list(onnx_output.shape),
+        'passed': all_passed,
+        'shape_match': all(
+            pt_output[i].shape == onnx_output[i].shape for i in range(len(names))
+        ),
+        'details': max_diffs,
     }
