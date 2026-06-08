@@ -31,13 +31,13 @@ class _ExportWrapper(nn.Module):
     Concat correctly), then calls forward_head() on the o2o head.
     """
 
-    def __init__(self, model):
+    def __init__(self, model, save_set=None):
         super().__init__()
         inner = model.model if hasattr(model, 'model') else model
         self._inner = inner
         head = inner[-1]
         self._head = head
-        self._save = getattr(inner, 'save', set())
+        self._save = save_set if save_set is not None else getattr(inner, 'save', set())
         self._head_inputs = getattr(head, 'f', head.f) if hasattr(head, 'f') else []
         if isinstance(self._head_inputs, int):
             self._head_inputs = [self._head_inputs]
@@ -106,9 +106,10 @@ def export_raycast_onnx(
     from raycasted.export.dcn_strip import strip_dcn_from_model
 
     inner = model.model if hasattr(model, 'model') else model
+    save_set = set(getattr(model, 'save', getattr(inner, 'save', [])))
     strip_dcn_from_model(inner)
 
-    wrapper = _ExportWrapper(model)
+    wrapper = _ExportWrapper(model, save_set)
 
     dummy = torch.randn(1, 3, imgsz, imgsz)
     head = inner[-1]
@@ -190,9 +191,10 @@ def validate_onnx(
     from raycasted.export.dcn_strip import strip_dcn_from_model
 
     inner = model.model if hasattr(model, 'model') else model
+    save_set = set(getattr(model, 'save', getattr(inner, 'save', [])))
     strip_dcn_from_model(inner)
 
-    wrapper = _ExportWrapper(model)
+    wrapper = _ExportWrapper(model, save_set)
     head = inner[-1]
     hierarchical = getattr(head, 'hierarchical_cls', False)
 
