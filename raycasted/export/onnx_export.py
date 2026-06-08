@@ -123,10 +123,8 @@ def export_raycast_onnx(
         for name in output_names:
             dynamic_axes[name] = {0: 'batch'}
 
-    traced = torch.jit.trace(wrapper, dummy)
-
     torch.onnx.export(
-        traced,
+        wrapper,
         dummy,
         output_path,
         opset_version=opset,
