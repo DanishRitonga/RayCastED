@@ -168,7 +168,7 @@ def main():
             image_np = image_np.transpose(2, 0, 1)  # HWC → CHW
         elif image_np.ndim == 3 and image_np.shape[0] == 3:
             pass  # already CHW
-        blob = image_np[np.newaxis] / 255.0
+        blob = image_np[np.newaxis]
 
         # Inference
         if use_trt:
