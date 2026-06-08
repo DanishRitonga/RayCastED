@@ -86,8 +86,8 @@ def export_raycast_onnx(
     Returns:
         Path to the exported .onnx file.
     """
-    import os
     import torch.onnx
+
     from raycasted.model.register import register_raycast_head
 
     register_raycast_head()
@@ -118,11 +118,10 @@ def export_raycast_onnx(
         for name in output_names:
             dynamic_axes[name] = {0: 'batch'}
 
-    # Suppress onnxscript import — use legacy TorchScript exporter
-    os.environ['TORCH_ONNX_USE_NEW_EXPORTER'] = '0'
+    traced = torch.jit.trace(wrapper, dummy)
 
     torch.onnx.export(
-        wrapper,
+        traced,
         dummy,
         output_path,
         opset_version=opset,
@@ -190,7 +189,7 @@ def validate_onnx(
     strip_dcn_from_model(inner)
 
     wrapper = _ExportWrapper(model)
-    head = model.model[-1]
+    head = inner[-1]
     hierarchical = getattr(head, 'hierarchical_cls', False)
 
     dummy = torch.randn(1, 3, imgsz, imgsz)
