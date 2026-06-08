@@ -159,6 +159,10 @@ def main():
             break
 
         image, labels, _ = batch[0]
+        if hasattr(image, 'numpy'):
+            image = image.numpy()
+        if hasattr(labels, 'numpy'):
+            labels = labels.numpy()
         image_np = image.astype(np.float32)
 
         # Inference
