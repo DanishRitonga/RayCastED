@@ -18,8 +18,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-import onnx
-import onnxruntime as ort
 import torch
 import torch.nn as nn
 
@@ -126,6 +124,8 @@ def export_raycast_onnx(
         dynamic_axes=dynamic_axes,
     )
 
+    import onnx
+
     onnx_model = onnx.load(output_path)
     onnx.checker.check_model(onnx_model)
 
@@ -188,6 +188,8 @@ def validate_onnx(
 
     with torch.no_grad():
         pt_output = wrapper(dummy)
+
+    import onnxruntime as ort
 
     session = ort.InferenceSession(onnx_path)
     onnx_output = session.run(None, {'images': dummy.numpy()})
