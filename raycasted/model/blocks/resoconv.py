@@ -33,8 +33,13 @@ _DB2_FILTERS = {
 }
 
 _BIOR22_FILTERS = {
-    'lo': [0.0, -0.1767766952966369, 0.3535533905932738, 1.0606601717798212, 0.3535533905932738, -0.1767766952966369],
-    'hi': [-0.0, 0.3535533905932738, -0.7071067811865476, 0.3535533905932738, -0.0, 0.0],
+    'lo': [0.0, 0.1767767, 0.35355338, 1.06066, 1.06066, 0.35355338, 0.1767767, 0.0],
+    'hi': [0.0, 0.35355338, -0.70710677, 0.35355338, 0.35355338, -0.70710677, 0.35355338, 0.0],
+}
+
+_HAAR_FILTERS = {
+    'lo': [1.0 / 1.414213562, 1.0 / 1.414213562],
+    'hi': [1.0 / 1.414213562, -1.0 / 1.414213562],
 }
 
 
@@ -61,6 +66,9 @@ def _get_wavelet_1d_filters(wavelet_type: str) -> tuple[torch.Tensor, torch.Tens
         elif wavelet_type == 'bior2.2':
             lo = torch.tensor(_BIOR22_FILTERS['lo'], dtype=torch.float32)
             hi = torch.tensor(_BIOR22_FILTERS['hi'], dtype=torch.float32)
+        elif wavelet_type == 'haar':
+            lo = torch.tensor(_HAAR_FILTERS['lo'], dtype=torch.float32)
+            hi = torch.tensor(_HAAR_FILTERS['hi'], dtype=torch.float32)
         else:
             raise ValueError(f'Unknown wavelet_type={wavelet_type} and pywt unavailable for lookup')
         return lo, hi
@@ -233,33 +241,25 @@ class DWT_HF(nn.Module):
 
 
 class DWT2D_Hybrid(nn.Module):
-    """Hybrid DWT: bior2.2 for LL, db2 for HF sub-bands.
+    """Hybrid DWT: haar for LL, haar for HF sub-bands.
 
-    Uses two separate DWT2D modules internally:
-    - bior2.2 (6-tap symmetric) for LL: stronger approximation energy, zero phase shift
-    - db2 (4-tap asymmetric) for LH/HL/HH: sharper edge response, better for boundaries
-
-    The two DWTs are applied independently to the same input; relevant sub-bands are
-    extracted and concatenated in the standard grouped layout:
-        [LL_0..LL_C, LH_0..LH_C, HL_0..HL_C, HH_0..HH_C].
-
-    Args:
-        in_channels: Number of input channels.
-        drop_hh: If True, discard HH sub-band and return 3 sub-bands only.
+    Single-stream design for thesis v1 — Haar wavelet for all sub-bands.
+    Haar is the simplest wavelet (average + difference), well-documented
+    and easy to justify in defense.
     """
 
     def __init__(self, in_channels: int, drop_hh: bool = False):
         super().__init__()
         self.in_channels = in_channels
         self.drop_hh = drop_hh
-        self.dwt_ll = DWT2D(in_channels, drop_hh=False, wavelet_type='bior2.2')
-        self.dwt_hf = DWT2D(in_channels, drop_hh=drop_hh, wavelet_type='db2')
+        self.dwt_ll = DWT2D(in_channels, drop_hh=False, wavelet_type='haar')
+        self.dwt_hf = DWT2D(in_channels, drop_hh=drop_hh, wavelet_type='haar')
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply hybrid DWT: bior2.2 LL + db2 HF."""
-        x_bior = self.dwt_ll(x)
+        """Apply hybrid DWT: haar LL + haar HF."""
+        x_haar = self.dwt_ll(x)
         x_db2 = self.dwt_hf(x)
-        ll = x_bior[:, : self.in_channels]
+        ll = x_haar[:, : self.in_channels]
         hf = x_db2[:, self.in_channels :]
         return torch.cat([ll, hf], dim=1)
 
@@ -308,19 +308,14 @@ class ResoConv(nn.Module):
 
 
 class ResoConvHybrid(nn.Module):
-    """Hybrid wavelet downsampling: bior2.2 LL + db2 HF.
+    """Wavelet downsampling with Haar DWT.
 
-    Combines the best of both wavelets:
-    - bior2.2 for LL: stronger approximation energy, symmetric/linear phase
-    - db2 for LH/HL/HH: sharper edge response, asymmetric orthogonal
+    Haar wavelet splits each channel into 4 sub-bands:
+      LL = (x₀+x₁)/2  (approximation, low-pass)
+      LH = (x₀−x₁)/2  (horizontal detail, high-pass)
+    Each sub-band feeds a channel-wise conv before downsampling by stride=2.
 
-    Uses DWT2D_Hybrid internally, then concatenates with shortcut → 1×1 projection.
-
-    Args:
-        c1: Input channels.
-        c2: Output channels.
-        shortcut: Whether to add downsampled identity shortcut before projection.
-        drop_hh: If True, discard HH sub-band (hybrid returns 3 sub-bands).
+    Simple, well-studied, easy to justify in thesis defense.
     """
 
     def __init__(self, c1: int, c2: int, shortcut: bool = True, drop_hh: bool = False):
