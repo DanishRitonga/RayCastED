@@ -58,7 +58,7 @@ def build_engine(
         str(trtexec_path),
         f'--onnx={onnx_path}',
         f'--saveEngine={engine_path}',
-        f'--workspace={workspace}',
+        f'--memPoolSize=workspace:{workspace}',
         '--verbose',
     ]
 
