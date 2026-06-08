@@ -73,7 +73,7 @@ def export_raycast_onnx(
     simplify: bool = True,
     dynamic_batch: bool = False,
 ) -> str:
-    """Export RayCastED model to ONNX.
+    """Export RayCastED model to ONNX (TorchScript-based export).
 
     Args:
         weights_path: Path to .pt checkpoint.
@@ -86,6 +86,8 @@ def export_raycast_onnx(
     Returns:
         Path to the exported .onnx file.
     """
+    import os
+    import torch.onnx
     from raycasted.model.register import register_raycast_head
 
     register_raycast_head()
@@ -115,6 +117,9 @@ def export_raycast_onnx(
         dynamic_axes = {'images': {0: 'batch'}}
         for name in output_names:
             dynamic_axes[name] = {0: 'batch'}
+
+    # Suppress onnxscript import — use legacy TorchScript exporter
+    os.environ['TORCH_ONNX_USE_NEW_EXPORTER'] = '0'
 
     torch.onnx.export(
         wrapper,
