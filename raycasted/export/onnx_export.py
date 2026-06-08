@@ -91,6 +91,8 @@ def export_raycast_onnx(
     register_raycast_head()
 
     model = torch.load(weights_path, map_location='cpu', weights_only=False)
+    if isinstance(model, dict):
+        model = model.get('model') or model.get('ema') or model
     if hasattr(model, 'float'):
         model = model.float()
     model.eval()
@@ -171,6 +173,8 @@ def validate_onnx(
     register_raycast_head()
 
     model = torch.load(weights_path, map_location='cpu', weights_only=False)
+    if isinstance(model, dict):
+        model = model.get('model') or model.get('ema') or model
     if hasattr(model, 'float'):
         model = model.float()
     model.eval()
