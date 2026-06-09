@@ -79,6 +79,48 @@ def _polygon_area(poly: np.ndarray) -> float:
     return 0.5 * abs(np.dot(vx, np.roll(vy, 1)) - np.dot(vy, np.roll(vx, 1)))
 
 
+def _diagnose_tissue(results):
+    """Break down recall by tissue origin."""
+    panuke_tissues = [
+        "Adrenal", "BileDuct", "Bladder", "Breast", "Cervix", "Colorectal",
+        "Esophagus", "Head&Neck", "Kidney", "Liver", "Lung", "Ovarian",
+        "Pancreatic", "Prostate", "Skin", "Stomach", "Testis", "Thyroid", "Uterus",
+    ]
+    tissue_total = [0] * 19
+    tissue_matched = [0] * 19
+    for r in results:
+        tissue = int(r.get('tissue', 0))
+        gt_polys = r['gt_polys']
+        pred_polys = r['pred_polys']
+        n_gt = len(gt_polys)
+        if n_gt == 0:
+            continue
+        matched = np.zeros(n_gt, dtype=bool)
+        if len(pred_polys) > 0:
+            dist = np.linalg.norm(gt_polys[:, :2][:, None] - pred_polys[:, :2][None, :], axis=2)
+            ri, ci = linear_sum_assignment(dist)
+            matched[ri[(dist[ri, ci] <= 12)]] = True
+        tissue_total[tissue] += n_gt
+        tissue_matched[tissue] += matched.sum()
+
+    print('\n' + '=' * 65)
+    print('Tissue Origin Breakdown')
+    print('=' * 65)
+    print(f'  {"Tissue":<14} {"Images":>6} {"GT":>8} {"Matched":>8} {"Recall":>8}')
+    print(f'  {"-" * 14} {"-" * 6} {"-" * 8} {"-" * 8} {"-" * 8}')
+    for t in range(19):
+        if tissue_total[t] == 0:
+            continue
+        name = panuke_tissues[t]
+        n_imgs = sum(1 for r in results if int(r.get('tissue', 0)) == t)
+        rec = tissue_matched[t] / tissue_total[t]
+        print(f'  {name:<14} {n_imgs:>6} {tissue_total[t]:>8} {tissue_matched[t]:>8} {rec:>8.4f}')
+    total_g = sum(tissue_total)
+    total_m = sum(tissue_matched)
+    print(f'  {"TOTAL":<14} {len(results):>6} {total_g:>8} {total_m:>8} {total_m/total_g:>8.4f}' if total_g else '')
+    print('=' * 65)
+
+
 def _diagnose_recall(results, num_classes):
     """Break down recall by GT size bin, class, and nearest-prediction distance."""
     panuke_names = ['Neoplastic', 'Inflammatory', 'Connective', 'Necrosis', 'Epithelial']
@@ -300,6 +342,7 @@ def run_inference(model, dataloader, device, conf_threshold=0.20):
                         'pred_cls': pred_cls,
                         'gt_cls': gt_cls.astype(int),
                         'imgsz': crop_size,
+                        'tissue': batch.get('tissue', [0] * batch_size)[si] if 'tissue' in batch else 0,
                     }
                 )
 
@@ -771,6 +814,12 @@ def _main(args):
     print(f'Total predictions: {n_pred_total}')
     print(f'Total GT instances: {n_gt_total}')
 
+    # --- Tissue-origin breakdown ---
+    try:
+        _diagnose_tissue(results)
+    except Exception as exc:
+        print(f'\n[TISSUE DIAG ERROR] {exc}', flush=True)
+
     # --- Recall diagnosis ---
     try:
         _diagnose_recall(results, num_classes=nc)
@@ -787,6 +836,10 @@ def _simple_collate(batch):
 
     images = _torch.stack([item[0] for item in batch])
     labels_list = [item[1] for item in batch]
+    tissue_list = []
+    for _, _, path in batch:
+        data = dict(np.load(path, allow_pickle=True))
+        tissue_list.append(int(data.get('tissue', 0)))
 
     target_list = []
     for batch_idx, labels in enumerate(labels_list):
@@ -806,6 +859,7 @@ def _simple_collate(batch):
         'batch_idx': targets[:, 0],
         'cls': targets[:, 1],
         'bboxes': targets[:, 2:],
+        'tissue': tissue_list,
     }
 
 
