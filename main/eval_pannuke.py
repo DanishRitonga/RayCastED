@@ -129,14 +129,49 @@ def _per_group_metrics(results, names, key, title, metrics=None):
         sep += f' {{"-" * 7}} {{"-" * 7}} {{"-" * 7}}'
         fmt += f' {{aji:>7.4f}} {{bpq:>7.4f}} {{mpq:>7.4f}}'
 
-    w = 70 if has_mask else 42
-    print(f'\n{"=" * w}')
+    has_mask = bool(metrics)
+    w = 85 if has_mask else 60
+    sep = '=' * w
+
+    hdr_fmt = '  {:<14} {:>5} {:>7} {:>7} {:>7}'
+    row_fmt = '  {:<14} {:>5} {:>7.4f} {:>7.4f} {:>7.4f}'
+    if has_mask:
+        hdr_fmt += ' {:>7} {:>7} {:>7}'
+        row_fmt += ' {:>7.4f} {:>7.4f} {:>7.4f}'
+
+    print(f'\n{sep}')
     print(f'  {title}')
-    w2 = 42 if not has_mask else 70
-    print(f'{{"=" * {w2}}}')
-    print(f'  {title}')
-    print(f'{{"=" * {w2}}}')
-    return {k: {'tp': tp[i], 'fp': fp[i], 'fn': fn[i]} for i, k in enumerate(names)}
+    print(sep)
+    col = ['Group', 'Imgs', 'Prec', 'Recall', 'F1']
+    if has_mask: col += ['AJI', 'bPQ', 'mPQ']
+    print(hdr_fmt.format(*col))
+    sep2 = '  ' + '-' * 14 + ' ' + '-' * 5 + ' ' + '-' * 7 + ' ' + '-' * 7 + ' ' + '-' * 7
+    if has_mask: sep2 += ' ' + '-' * 7 + ' ' + '-' * 7 + ' ' + '-' * 7
+    print(sep2)
+
+    for g in range(n_groups):
+        if n_gt[g] == 0: continue
+        prec = tp[g] / (tp[g] + fp[g]) if (tp[g] + fp[g]) else 0
+        rec = tp[g] / (tp[g] + fn[g]) if (tp[g] + fn[g]) else 0
+        f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0
+        vals = [names[g], len(seen[g]), prec, rec, f1]
+        if has_mask:
+            aji = float(np.mean(t_aji.get(g))) if t_aji.get(g) else 0.0
+            bpq = float(np.mean(t_bpq.get(g))) if t_bpq.get(g) else 0.0
+            mpq_vals = [np.mean(v) for v in t_mpq.get(g, {}).values() if v]
+            mpq = float(np.mean(mpq_vals)) if mpq_vals else 0.0
+            vals += [aji, bpq, mpq]
+        print(row_fmt.format(*vals))
+
+    tot_tp = sum(tp); tot_fp = sum(fp); tot_fn = sum(fn)
+    p_t = tot_tp / (tot_tp + tot_fp) if (tot_tp + tot_fp) else 0
+    r_t = tot_tp / (tot_tp + tot_fn) if (tot_tp + tot_fn) else 0
+    f_t = 2 * p_t * r_t / (p_t + r_t) if (p_t + r_t) else 0
+    vals = ['TOTAL', len(results), p_t, r_t, f_t]
+    if has_mask:
+        vals += [metrics['aji'], metrics['bpq'], metrics['mpq']]
+    print(row_fmt.format(*vals))
+    print(sep)
 
 
 def _per_nuclei_class_metrics(results, num_classes, names):
