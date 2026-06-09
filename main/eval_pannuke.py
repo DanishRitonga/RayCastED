@@ -158,7 +158,7 @@ def _per_group_metrics(results, names, key, title, metrics=None):
         if has_mask:
             aji = float(np.mean(t_aji.get(g))) if t_aji.get(g) else 0.0
             bpq = float(np.mean(t_bpq.get(g))) if t_bpq.get(g) else 0.0
-            mpq_vals = [np.mean(v) for v in t_mpq.get(g, {}).values() if v]
+            mpq_vals = [np.mean([x for x in v if x > 0]) for v in t_mpq.get(g, {}).values() if v and any(x > 0 for x in v)]
             mpq = float(np.mean(mpq_vals)) if mpq_vals else 0.0
             vals += [aji, bpq, mpq]
         print(row_fmt.format(*vals))
