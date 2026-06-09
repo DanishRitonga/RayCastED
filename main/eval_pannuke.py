@@ -724,6 +724,15 @@ def _main(args):
     n_params = sum(p.numel() for p in model.parameters())
     params_m = n_params / 1e6
 
+    # Fused: after fuse() removes o2m heads, keeps only o2o
+    try:
+        head = model.model[-1]
+        head.fuse()
+        n_fused = sum(p.numel() for p in model.parameters())
+        fused_m = n_fused / 1e6
+    except Exception:
+        fused_m = 0.0
+
     # GFLOPs: static value from training logs (5.52G at 256px).
     # model_info tracing fails on ultralytics Concat with custom architecture.
     gflops = 5.52
@@ -752,6 +761,7 @@ def _main(args):
     print(f'{"Precision (centroid)":<25} {f12["precision"]:>12.4f}')
     print(f'{"Recall (centroid)":<25} {f12["recall"]:>12.4f}')
     print(f'{"Params (M)":<25} {params_m:>12.2f}')
+    print(f'{"Params fused (M)":<25} {fused_m:>12.2f}')
     print(f'{"GFLOPs":<25} {gflops:>12.2f}')
     print(f'{"Inference Time (ms/img)":<25} {avg_ms:>12.2f}')
     print('=' * 37)
