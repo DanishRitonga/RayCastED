@@ -343,27 +343,19 @@ class ResoConvHybrid(nn.Module):
     Simple, well-studied, easy to justify in thesis defense.
     """
 
-    def __init__(self, c1: int, c2: int, shortcut: bool = True, drop_hh: bool = False):
+    def __init__(self, c1: int, c2: int, shortcut: bool = False, drop_hh: bool = False):
         super().__init__()
         self.shortcut = shortcut
         self.dwt = DWT2D_Hybrid(c1, drop_hh=drop_hh)
 
         n_sub = 3 if drop_hh else 4
         self.eca = ECA(c1 * n_sub)  # ECA on wavelet sub-bands only
-        in_proj = c1 * n_sub + (c1 if shortcut else 0)
+        in_proj = c1 * n_sub
         self.proj = Conv(in_proj, c2, k=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply ResoConv: DWT → ECA (sub-bands) → concat shortcut → 1×1 project."""
-        x_dwt = self.eca(self.dwt(x))
-
-        if self.shortcut:
-            x_down = F.avg_pool2d(x, kernel_size=2, stride=2)
-            x_cat = torch.cat([x_down, x_dwt], dim=1)
-        else:
-            x_cat = x_dwt
-
-        return self.proj(x_cat)
+        """Apply ResoConv: DWT → ECA → 1×1 project."""
+        return self.proj(self.eca(self.dwt(x)))
 
 
 class ResoConvDS(nn.Module):
