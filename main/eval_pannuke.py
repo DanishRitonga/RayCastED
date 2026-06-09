@@ -79,14 +79,14 @@ def _polygon_area(poly: np.ndarray) -> float:
     return 0.5 * abs(np.dot(vx, np.roll(vy, 1)) - np.dot(vy, np.roll(vx, 1)))
 
 
-def _diagnose_tissue(results):
-    """Per-tissue centroid F1, recall, precision."""
+def _diagnose_tissue(results, metrics):
+    """Per-tissue centroid F1 + AJI/bPQ/mPQ."""
     panuke_tissues = [
         "Adrenal", "BileDuct", "Bladder", "Breast", "Cervix", "Colorectal",
         "Esophagus", "Head&Neck", "Kidney", "Liver", "Lung", "Ovarian",
         "Pancreatic", "Prostate", "Skin", "Stomach", "Testis", "Thyroid", "Uterus",
     ]
-    return _per_group_metrics(results, panuke_tissues, 'tissue', "Tissue Type Breakdown")
+    _per_group_metrics(results, panuke_tissues, 'tissue', "Tissue Type Breakdown", metrics)
 
 
 def _diagnose_nuclei(results, num_classes):
@@ -95,61 +95,66 @@ def _diagnose_nuclei(results, num_classes):
     return _per_nuclei_class_metrics(results, num_classes, panuke_names)
 
 
-def _per_group_metrics(results, names, key, title):
-    """Compute per-group centroid F1."""
+def _per_group_metrics(results, names, key, title, metrics=None):
+    """Compute per-group centroid F1 + optional AJI/bPQ/mPQ."""
     n_groups = len(names)
-    tp = [0] * n_groups
-    fp = [0] * n_groups
-    fn = [0] * n_groups
-    n_gt = [0] * n_groups
-    n_pred = [0] * n_groups
-    n_imgs = [0] * n_groups
-    seen = [set() for _ in range(n_groups)]
+    tp = [0] * n_groups; fp = [0] * n_groups; fn = [0] * n_groups
+    n_gt = [0] * n_groups; n_pred = [0] * n_groups
+    n_imgs = [0] * n_groups; seen = [set() for _ in range(n_groups)]
 
     for ri, r in enumerate(results):
         g = int(r.get(key, 0))
-        if g >= n_groups:
-            continue
+        if g >= n_groups: continue
         seen[g].add(ri)
         gt_p, pred_p = r['gt_polys'], r['pred_polys']
-        n_gt_g = len(gt_p)
-        n_pred_g = len(pred_p)
-        n_gt[g] += n_gt_g
-        n_pred[g] += n_pred_g
-        if n_gt_g == 0:
-            fp[g] += n_pred_g
-            continue
-        if n_pred_g == 0:
-            fn[g] += n_gt_g
-            continue
-        dist = np.linalg.norm(gt_p[:, :2][:, None] - pred_p[:, :2][None, :], axis=2)
+        n_gt_g = len(gt_p); n_pred_g = len(pred_p)
+        n_gt[g] += n_gt_g; n_pred[g] += n_pred_g
+        if n_gt_g == 0: fp[g] += n_pred_g; continue
+        if n_pred_g == 0: fn[g] += n_gt_g; continue
+        dist = np.linalg.norm(gt_p[:,:2][:,None] - pred_p[:,:2][None,:], axis=2)
         ri_, ci_ = linear_sum_assignment(dist)
-        t = int((dist[ri_, ci_] <= 12).sum())
-        tp[g] += t
-        fp[g] += n_pred_g - t
-        fn[g] += n_gt_g - t
+        t = int((dist[ri_,ci_] <= 12).sum())
+        tp[g] += t; fp[g] += n_pred_g - t; fn[g] += n_gt_g - t
 
-    print(f'\n{"=" * 70}')
+    t_aji = metrics.get('tissue_aji',{}) if metrics else {}
+    t_bpq = metrics.get('tissue_bpq',{}) if metrics else {}
+    t_mpq = metrics.get('tissue_mpq',{}) if metrics else {}
+    has_mask = bool(metrics)
+
+    hdr = f'  {{"Group":<14}} {{"Imgs":>5}} {{"Prec":>7}} {{"Recall":>7}} {{"F1":>7}}'
+    sep = f'  {{"-" * 14}} {{"-" * 5}} {{"-" * 7}} {{"-" * 7}} {{"-" * 7}}'
+    fmt = f'  {{name:<14}} {{ni:>5}} {{prec:>7.4f}} {{rec:>7.4f}} {{f1:>7.4f}}'
+    if has_mask:
+        hdr += f' {{"AJI":>7}} {{"bPQ":>7}} {{"mPQ":>7}}'
+        sep += f' {{"-" * 7}} {{"-" * 7}} {{"-" * 7}}'
+        fmt += f' {{aji:>7.4f}} {{bpq:>7.4f}} {{mpq:>7.4f}}'
+
+    print(f'\n{{"=" * (42 if not has_mask else 70)}}')
     print(f'  {title}')
-    print(f'{"=" * 70}')
-    print(f'  {"Group":<14} {"Imgs":>5} {"Pred":>6} {"GT":>6} {"Prec":>7} {"Recall":>7} {"F1":>7}')
-    print(f'  {"-" * 14} {"-" * 5} {"-" * 6} {"-" * 6} {"-" * 7} {"-" * 7} {"-" * 7}')
+    print(f'{{"=" * (42 if not has_mask else 70)}}')
+    print(hdr)
+    print(sep)
     for g in range(n_groups):
-        if n_gt[g] == 0:
-            continue
-        name = names[g]
-        prec = tp[g] / (tp[g] + fp[g]) if (tp[g] + fp[g]) else 0
-        rec = tp[g] / (tp[g] + fn[g]) if (tp[g] + fn[g]) else 0
-        f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0
-        print(f'  {name:<14} {len(seen[g]):>5} {n_pred[g]:>6} {n_gt[g]:>6} {prec:>7.4f} {rec:>7.4f} {f1:>7.4f}')
-    tot_tp = sum(tp)
-    tot_fp = sum(fp)
-    tot_fn = sum(fn)
-    prec_t = tot_tp / (tot_tp + tot_fp) if (tot_tp + tot_fp) else 0
-    rec_t = tot_tp / (tot_tp + tot_fn) if (tot_tp + tot_fn) else 0
-    f1_t = 2 * prec_t * rec_t / (prec_t + rec_t) if (prec_t + rec_t) else 0
-    print(f'  {"TOTAL":<14} {len(results):>5} {sum(n_pred):>6} {sum(n_gt):>6} {prec_t:>7.4f} {rec_t:>7.4f} {f1_t:>7.4f}')
-    print(f'{"=" * 70}')
+        if n_gt[g] == 0: continue
+        p = tp[g]/(tp[g]+fp[g]) if (tp[g]+fp[g]) else 0
+        r = tp[g]/(tp[g]+fn[g]) if (tp[g]+fn[g]) else 0
+        f1_ = 2*p*r/(p+r) if (p+r) else 0
+        aji = np.mean(t_aji.get(g)) if t_aji.get(g) else 0
+        bpq = np.mean(t_bpq.get(g)) if t_bpq.get(g) else 0
+        mpq_vals = [np.mean(v) for v in t_mpq.get(g,{}).values() if v]
+        mpq = np.mean(mpq_vals) if mpq_vals else 0
+        vals = dict(name=names[g], ni=len(seen[g]), prec=p, rec=r, f1=f1_, aji=aji, bpq=bpq, mpq=mpq)
+        print(fmt.format(**vals))
+    tot_tp=sum(tp); tot_fp=sum(fp); tot_fn=sum(fn)
+    p_t=tot_tp/(tot_tp+tot_fp) if (tot_tp+tot_fp) else 0
+    r_t=tot_tp/(tot_tp+tot_fn) if (tot_tp+tot_fn) else 0
+    f1_t=2*p_t*r_t/(p_t+r_t) if (p_t+r_t) else 0
+    vals = dict(name="TOTAL", ni=len(results), prec=p_t, rec=r_t, f1=f1_t,
+                aji=metrics.get('aji',0) if metrics else 0,
+                bpq=metrics.get('bpq',0) if metrics else 0,
+                mpq=metrics.get('mpq',0) if metrics else 0)
+    print(fmt.format(**vals))
+    print(f'{{"=" * (42 if not has_mask else 70)}}')
     return {k: {'tp': tp[i], 'fp': fp[i], 'fn': fn[i]} for i, k in enumerate(names)}
 
 
@@ -894,7 +899,7 @@ def _main(args):
 
     # --- Tissue-origin breakdown ---
     try:
-        _diagnose_tissue(results)
+        _diagnose_tissue(results, metrics)
         _diagnose_nuclei(results, nc)
     except Exception as exc:
         print(f'\n[TISSUE DIAG ERROR] {exc}', flush=True)
