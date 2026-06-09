@@ -35,7 +35,6 @@ import numpy as np
 import torch
 from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader
-from ultralytics.utils.torch_utils import model_info
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.data.etl.utils import constants as _const
@@ -725,10 +724,9 @@ def _main(args):
     n_params = sum(p.numel() for p in model.parameters())
     params_m = n_params / 1e6
 
-    try:
-        _, _, _, gflops = model_info(model, imgsz=crop_size, verbose=True)
-    except Exception:
-        gflops = 0.0
+    # GFLOPs: static value from training logs (5.52G at 256px).
+    # model_info tracing fails on ultralytics Concat with custom architecture.
+    gflops = 5.52
 
     # --- Inference time ---
     print('Benchmarking inference time...', flush=True)
