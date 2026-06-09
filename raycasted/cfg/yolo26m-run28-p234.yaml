@@ -19,7 +19,7 @@ nc: 5
 end2end: True
 reg_max: 1
 depth_multiple: 1.0
-width_multiple: 1.0
+width_multiple: 1.5
 scales:
   n: [0.50, 0.25, 1024]
   s: [0.50, 0.50, 1024]
