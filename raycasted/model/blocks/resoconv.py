@@ -23,8 +23,6 @@ References:
 - DWT-UNet: DWT-based U-Net for Medical Image Segmentation, IEEE 2021
 """
 
-import math
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -311,24 +309,27 @@ class ResoConv(nn.Module):
         return self.proj(x_cat)
 
 
-class ECA(nn.Module):
-    """Efficient Channel Attention (Wang et al., CVPR 2020).
+class SE(nn.Module):
+    """Squeeze-and-Excitation channel attention (Hu et al., CVPR 2018).
 
-    1D convolution over channels for lightweight channel attention.
-    Kernel size adaptively computed: k = |(log₂(C)/γ + b/γ)|odd
+    GAP → FC(reduce) → ReLU → FC(restore) → Sigmoid → gate.
+    2D FC weights — compatible with Muon optimizer.
     """
 
-    def __init__(self, channels: int, gamma: int = 2, b: int = 1):
+    def __init__(self, channels: int, reduction: int = 16):
         super().__init__()
-        k = int(abs(math.log2(channels) / gamma + b / gamma))
-        k = k if k % 2 == 1 else k + 1
-        self.conv = nn.Conv1d(1, 1, k, padding=k // 2, bias=False)
         self.gap = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, max(channels // reduction, 4), bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(max(channels // reduction, 4), channels, bias=False),
+            nn.Sigmoid(),
+        )
 
     def forward(self, x):
-        att = self.gap(x).squeeze(-1).transpose(-1, -2)  # [B, C, 1] → [B, 1, C]
-        att = self.conv(att).sigmoid().transpose(-1, -2).unsqueeze(-1)  # [B, C, 1, 1]
-        return x * att
+        b, c, _, _ = x.shape
+        att = self.gap(x).view(b, c)
+        return x * self.fc(att).view(b, c, 1, 1)
 
 
 class ResoConvHybrid(nn.Module):
@@ -349,13 +350,13 @@ class ResoConvHybrid(nn.Module):
         self.dwt = DWT2D_Hybrid(c1, drop_hh=drop_hh)
 
         n_sub = 3 if drop_hh else 4
-        self.eca = ECA(c1 * n_sub)  # ECA on wavelet sub-bands only
         in_proj = c1 * n_sub
+        self.se = SE(in_proj)
         self.proj = Conv(in_proj, c2, k=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply ResoConv: DWT → ECA → 1×1 project."""
-        return self.proj(self.eca(self.dwt(x)))
+        """Apply ResoConv: DWT → SE → 1×1 project."""
+        return self.proj(self.se(self.dwt(x)))
 
 
 class ResoConvDS(nn.Module):
