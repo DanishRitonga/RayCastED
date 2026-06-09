@@ -75,6 +75,9 @@ class RayCastPipeline:
 
         # Resolve training config: None → legacy defaults, dict → TrainingSettings values
         self.training_config = self.config.training  # dict or None
+        if self.training_config is None:
+            self.training_config = {}
+        self.training_config['n_rays'] = self.config.global_settings.get('n_rays', 64)
 
     def run(self, stage: str = 'all', dataset: str | None = None) -> None:
         """Run pipeline stages up to and including the specified one.
