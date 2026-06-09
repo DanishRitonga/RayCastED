@@ -333,7 +333,7 @@ class SE(nn.Module):
 
 
 class ResoConvHybrid(nn.Module):
-    """Wavelet downsampling with Haar DWT + ECA channel attention.
+    """Wavelet downsampling with Haar DWT + SE channel attention.
 
     Haar wavelet splits each channel into 4 sub-bands:
       LL = (x₀+x₁)/2  (approximation, low-pass)
