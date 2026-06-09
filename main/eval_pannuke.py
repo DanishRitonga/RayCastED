@@ -590,9 +590,13 @@ def compute_metrics_streaming(results, num_classes):
 
         # --- mPQ / mMPQ ---
         class_pq_img = [0.0] * num_classes
+        gt_idx_counts = [0] * num_classes
+        pred_idx_counts = [0] * num_classes
         for cls_id in range(num_classes):
             pred_idx = [j for j, c in enumerate(pred_cls) if c == cls_id]
             gt_idx = [j for j, c in enumerate(gt_cls) if c == cls_id]
+            gt_idx_counts[cls_id] = len(gt_idx)
+            pred_idx_counts[cls_id] = len(pred_idx)
 
             pred_cls_masks = [pred_masks[j] for j in pred_idx]
             gt_cls_masks = [gt_masks[j] for j in gt_idx]
@@ -669,7 +673,8 @@ def compute_metrics_streaming(results, num_classes):
             tissue_aji[tissue].append(aji_val)
             tissue_bpq[tissue].append(bpq)
             for cls_id in range(num_classes):
-                tissue_mpq[tissue][cls_id].append(class_pq_img[cls_id])
+                if gt_idx_counts[cls_id] > 0 or pred_idx_counts[cls_id] > 0:
+                    tissue_mpq[tissue][cls_id].append(class_pq_img[cls_id])
 
         if (i + 1) % 500 == 0:
             mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
