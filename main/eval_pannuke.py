@@ -80,45 +80,123 @@ def _polygon_area(poly: np.ndarray) -> float:
 
 
 def _diagnose_tissue(results):
-    """Break down recall by tissue origin."""
+    """Per-tissue centroid F1, recall, precision."""
     panuke_tissues = [
         "Adrenal", "BileDuct", "Bladder", "Breast", "Cervix", "Colorectal",
         "Esophagus", "Head&Neck", "Kidney", "Liver", "Lung", "Ovarian",
         "Pancreatic", "Prostate", "Skin", "Stomach", "Testis", "Thyroid", "Uterus",
     ]
-    tissue_total = [0] * 19
-    tissue_matched = [0] * 19
-    for r in results:
-        tissue = int(r.get('tissue', 0))
-        gt_polys = r['gt_polys']
-        pred_polys = r['pred_polys']
-        n_gt = len(gt_polys)
-        if n_gt == 0:
-            continue
-        matched = np.zeros(n_gt, dtype=bool)
-        if len(pred_polys) > 0:
-            dist = np.linalg.norm(gt_polys[:, :2][:, None] - pred_polys[:, :2][None, :], axis=2)
-            ri, ci = linear_sum_assignment(dist)
-            matched[ri[(dist[ri, ci] <= 12)]] = True
-        tissue_total[tissue] += n_gt
-        tissue_matched[tissue] += matched.sum()
+    return _per_group_metrics(results, panuke_tissues, 'tissue', "Tissue Type Breakdown")
 
-    print('\n' + '=' * 65)
-    print('Tissue Origin Breakdown')
-    print('=' * 65)
-    print(f'  {"Tissue":<14} {"Images":>6} {"GT":>8} {"Matched":>8} {"Recall":>8}')
-    print(f'  {"-" * 14} {"-" * 6} {"-" * 8} {"-" * 8} {"-" * 8}')
-    for t in range(19):
-        if tissue_total[t] == 0:
+
+def _diagnose_nuclei(results, num_classes):
+    """Per-class centroid F1 metrics."""
+    panuke_names = ['Neoplastic', 'Inflammatory', 'Connective', 'Necrosis', 'Epithelial']
+    return _per_nuclei_class_metrics(results, num_classes, panuke_names)
+
+
+def _per_group_metrics(results, names, key, title):
+    """Compute per-group centroid F1."""
+    n_groups = len(names)
+    tp = [0] * n_groups
+    fp = [0] * n_groups
+    fn = [0] * n_groups
+    n_gt = [0] * n_groups
+    n_pred = [0] * n_groups
+    n_imgs = [0] * n_groups
+    seen = [set() for _ in range(n_groups)]
+
+    for ri, r in enumerate(results):
+        g = int(r.get(key, 0))
+        if g >= n_groups:
             continue
-        name = panuke_tissues[t]
-        n_imgs = sum(1 for r in results if int(r.get('tissue', 0)) == t)
-        rec = tissue_matched[t] / tissue_total[t]
-        print(f'  {name:<14} {n_imgs:>6} {tissue_total[t]:>8} {tissue_matched[t]:>8} {rec:>8.4f}')
-    total_g = sum(tissue_total)
-    total_m = sum(tissue_matched)
-    print(f'  {"TOTAL":<14} {len(results):>6} {total_g:>8} {total_m:>8} {total_m/total_g:>8.4f}' if total_g else '')
-    print('=' * 65)
+        seen[g].add(ri)
+        gt_p, pred_p = r['gt_polys'], r['pred_polys']
+        n_gt_g = len(gt_p)
+        n_pred_g = len(pred_p)
+        n_gt[g] += n_gt_g
+        n_pred[g] += n_pred_g
+        if n_gt_g == 0:
+            fp[g] += n_pred_g
+            continue
+        if n_pred_g == 0:
+            fn[g] += n_gt_g
+            continue
+        dist = np.linalg.norm(gt_p[:, :2][:, None] - pred_p[:, :2][None, :], axis=2)
+        ri_, ci_ = linear_sum_assignment(dist)
+        t = int((dist[ri_, ci_] <= 12).sum())
+        tp[g] += t
+        fp[g] += n_pred_g - t
+        fn[g] += n_gt_g - t
+
+    print(f'\n{"=" * 70}')
+    print(f'  {title}')
+    print(f'{"=" * 70}')
+    print(f'  {"Group":<14} {"Imgs":>5} {"Pred":>6} {"GT":>6} {"Prec":>7} {"Recall":>7} {"F1":>7}')
+    print(f'  {"-" * 14} {"-" * 5} {"-" * 6} {"-" * 6} {"-" * 7} {"-" * 7} {"-" * 7}')
+    for g in range(n_groups):
+        if n_gt[g] == 0:
+            continue
+        name = names[g]
+        prec = tp[g] / (tp[g] + fp[g]) if (tp[g] + fp[g]) else 0
+        rec = tp[g] / (tp[g] + fn[g]) if (tp[g] + fn[g]) else 0
+        f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0
+        print(f'  {name:<14} {len(seen[g]):>5} {n_pred[g]:>6} {n_gt[g]:>6} {prec:>7.4f} {rec:>7.4f} {f1:>7.4f}')
+    tot_tp = sum(tp)
+    tot_fp = sum(fp)
+    tot_fn = sum(fn)
+    prec_t = tot_tp / (tot_tp + tot_fp) if (tot_tp + tot_fp) else 0
+    rec_t = tot_tp / (tot_tp + tot_fn) if (tot_tp + tot_fn) else 0
+    f1_t = 2 * prec_t * rec_t / (prec_t + rec_t) if (prec_t + rec_t) else 0
+    print(f'  {"TOTAL":<14} {len(results):>5} {sum(n_pred):>6} {sum(n_gt):>6} {prec_t:>7.4f} {rec_t:>7.4f} {f1_t:>7.4f}')
+    print(f'{"=" * 70}')
+    return {k: {'tp': tp[i], 'fp': fp[i], 'fn': fn[i]} for i, k in enumerate(names)}
+
+
+def _per_nuclei_class_metrics(results, num_classes, names):
+    """Per-class centroid F1."""
+    tp = [0] * num_classes
+    fp = [0] * num_classes
+    fn = [0] * num_classes
+    for r in results:
+        gt_p, pred_p = r['gt_polys'], r['pred_polys']
+        gt_c, pred_c = r['gt_cls'], r['pred_cls']
+        n_gt = len(gt_p)
+        n_pred = len(pred_p)
+        if n_gt == 0 or n_pred == 0:
+            continue
+        dist = np.linalg.norm(gt_p[:, :2][:, None] - pred_p[:, :2][None, :], axis=2)
+        ri_, ci_ = linear_sum_assignment(dist)
+        matched_gt = set()
+        matched_pred = set()
+        for ri, ci in zip(ri_, ci_):
+            if dist[ri, ci] <= 12:
+                if gt_c[ri] == pred_c[ci]:
+                    tp[int(gt_c[ri])] += 1
+                matched_gt.add(ri)
+                matched_pred.add(ci)
+
+    print(f'\n{"=" * 70}')
+    print(f'  Nuclei Class Breakdown (Centroid F1, class-matched)')
+    print(f'{"=" * 70}')
+    print(f'  {"Class":<14} {"Prec":>7} {"Recall":>7} {"F1":>7}')
+    print(f'  {"-" * 14} {"-" * 7} {"-" * 7} {"-" * 7}')
+    # Need total GT and pred per class from all images
+    class_gt = [0] * num_classes
+    class_pred = [0] * num_classes
+    for r in results:
+        for c in r['gt_cls']:
+            class_gt[int(c)] += 1
+        for c in r['pred_cls']:
+            if int(c) < num_classes:
+                class_pred[int(c)] += 1
+    for c in range(num_classes):
+        name = names[c] if c < len(names) else f'cls_{c}'
+        prec = tp[c] / class_pred[c] if class_pred[c] else 0
+        rec = tp[c] / class_gt[c] if class_gt[c] else 0
+        f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0
+        print(f'  {name:<14} {prec:>7.4f} {rec:>7.4f} {f1:>7.4f}')
+    print(f'{"=" * 70}')
 
 
 def _diagnose_recall(results, num_classes):
@@ -817,6 +895,7 @@ def _main(args):
     # --- Tissue-origin breakdown ---
     try:
         _diagnose_tissue(results)
+        _diagnose_nuclei(results, nc)
     except Exception as exc:
         print(f'\n[TISSUE DIAG ERROR] {exc}', flush=True)
 
