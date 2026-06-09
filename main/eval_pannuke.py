@@ -735,6 +735,9 @@ def compute_metrics_streaming(results, num_classes):
         'mmpq': mean_mmpq,
         'ap': ap_results,
         'centroid': {'precision': prec, 'recall': rec, 'f1': f1},
+        'tissue_aji': tissue_aji,
+        'tissue_bpq': tissue_bpq,
+        'tissue_mpq': tissue_mpq,
     }
 
 
