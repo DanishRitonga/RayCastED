@@ -1,8 +1,10 @@
 """ResoConv: Wavelet-based downsampling convolution.
 
 Replaces strided 3x3 Conv in backbone/neck with DWT-based downsampling:
-- Configurable wavelet (db2, bior2.2, etc.) splits input into 4 sub-bands (LL, LH, HL, HH)
-- Concatenate sub-bands with identity shortcut → 1x1 Conv projection
+- Configurable wavelet (db2, bior2.2, haar) splits input into 4 sub-bands (LL, LH, HL, HH)
+- Concatenate sub-bands with identity shortcut
+- ECA (Efficient Channel Attention) re-weights sub-band mix
+- 1×1 Conv projection
 - Output is at half spatial resolution (H/2 x W/2) — same as strided Conv
 - Explicitly preserves high-frequency information in LH, HL, HH sub-bands
 
@@ -20,6 +22,8 @@ References:
 - WaveCNet: Williams & Li, "Wavelet-based Pooling for Deep CNNs", CVPR 2020
 - DWT-UNet: DWT-based U-Net for Medical Image Segmentation, IEEE 2021
 """
+
+import math
 
 import torch
 import torch.nn as nn
@@ -307,13 +311,34 @@ class ResoConv(nn.Module):
         return self.proj(x_cat)
 
 
+class ECA(nn.Module):
+    """Efficient Channel Attention (Wang et al., CVPR 2020).
+
+    1D convolution over channels for lightweight channel attention.
+    Kernel size adaptively computed: k = |(log₂(C)/γ + b/γ)|odd
+    """
+
+    def __init__(self, channels: int, gamma: int = 2, b: int = 1):
+        super().__init__()
+        k = int(abs(math.log2(channels) / gamma + b / gamma))
+        k = k if k % 2 == 1 else k + 1
+        self.conv = nn.Conv1d(1, 1, k, padding=k // 2, bias=False)
+        self.gap = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self, x):
+        att = self.gap(x).squeeze(-1).transpose(-1, -2)  # [B, C, 1] → [B, 1, C]
+        att = self.conv(att).sigmoid().transpose(-1, -2).unsqueeze(-1)  # [B, C, 1, 1]
+        return x * att
+
+
 class ResoConvHybrid(nn.Module):
-    """Wavelet downsampling with Haar DWT.
+    """Wavelet downsampling with Haar DWT + ECA channel attention.
 
     Haar wavelet splits each channel into 4 sub-bands:
       LL = (x₀+x₁)/2  (approximation, low-pass)
       LH = (x₀−x₁)/2  (horizontal detail, high-pass)
     Each sub-band feeds a channel-wise conv before downsampling by stride=2.
+    ECA learns to re-weight channels dynamically based on global context.
 
     Simple, well-studied, easy to justify in thesis defense.
     """
@@ -324,12 +349,13 @@ class ResoConvHybrid(nn.Module):
         self.dwt = DWT2D_Hybrid(c1, drop_hh=drop_hh)
 
         n_sub = 3 if drop_hh else 4
-        in_proj = c1 * (1 + n_sub) if shortcut else c1 * n_sub
+        self.eca = ECA(c1 * n_sub)  # ECA on wavelet sub-bands only
+        in_proj = c1 * n_sub + (c1 if shortcut else 0)
         self.proj = Conv(in_proj, c2, k=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply hybrid ResoConv: DWT → concat shortcut → 1×1 project."""
-        x_dwt = self.dwt(x)
+        """Apply ResoConv: DWT → ECA (sub-bands) → concat shortcut → 1×1 project."""
+        x_dwt = self.eca(self.dwt(x))
 
         if self.shortcut:
             x_down = F.avg_pool2d(x, kernel_size=2, stride=2)
