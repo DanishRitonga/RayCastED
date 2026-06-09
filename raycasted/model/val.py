@@ -117,8 +117,10 @@ class RayCastDetMetrics(DetMetrics):
 
     @property
     def fitness(self):
-        """Fitness based on mAP50-95 (stable for early stopping)."""
-        return self.shapely.fitness()
+        """Fitness: 0.5×mAP50 + 0.5×bPQ — balances detection and mask quality."""
+        mAP50 = self.shapely.mean_results()[2]
+        bpq = self.bpq_sum / max(self.bpq_count, 1)
+        return 0.5 * mAP50 + 0.5 * bpq
 
     @property
     def results_dict(self):
