@@ -129,32 +129,13 @@ def _per_group_metrics(results, names, key, title, metrics=None):
         sep += f' {{"-" * 7}} {{"-" * 7}} {{"-" * 7}}'
         fmt += f' {{aji:>7.4f}} {{bpq:>7.4f}} {{mpq:>7.4f}}'
 
-    print(f'\n{{"=" * (42 if not has_mask else 70)}}')
+    w = 70 if has_mask else 42
+    print(f'\n{"=" * w}')
     print(f'  {title}')
-    print(f'{{"=" * (42 if not has_mask else 70)}}')
-    print(hdr)
-    print(sep)
-    for g in range(n_groups):
-        if n_gt[g] == 0: continue
-        p = tp[g]/(tp[g]+fp[g]) if (tp[g]+fp[g]) else 0
-        r = tp[g]/(tp[g]+fn[g]) if (tp[g]+fn[g]) else 0
-        f1_ = 2*p*r/(p+r) if (p+r) else 0
-        aji = np.mean(t_aji.get(g)) if t_aji.get(g) else 0
-        bpq = np.mean(t_bpq.get(g)) if t_bpq.get(g) else 0
-        mpq_vals = [np.mean(v) for v in t_mpq.get(g,{}).values() if v]
-        mpq = np.mean(mpq_vals) if mpq_vals else 0
-        vals = dict(name=names[g], ni=len(seen[g]), prec=p, rec=r, f1=f1_, aji=aji, bpq=bpq, mpq=mpq)
-        print(fmt.format(**vals))
-    tot_tp=sum(tp); tot_fp=sum(fp); tot_fn=sum(fn)
-    p_t=tot_tp/(tot_tp+tot_fp) if (tot_tp+tot_fp) else 0
-    r_t=tot_tp/(tot_tp+tot_fn) if (tot_tp+tot_fn) else 0
-    f1_t=2*p_t*r_t/(p_t+r_t) if (p_t+r_t) else 0
-    vals = dict(name="TOTAL", ni=len(results), prec=p_t, rec=r_t, f1=f1_t,
-                aji=metrics.get('aji',0) if metrics else 0,
-                bpq=metrics.get('bpq',0) if metrics else 0,
-                mpq=metrics.get('mpq',0) if metrics else 0)
-    print(fmt.format(**vals))
-    print(f'{{"=" * (42 if not has_mask else 70)}}')
+    w2 = 42 if not has_mask else 70
+    print(f'{{"=" * {w2}}}')
+    print(f'  {title}')
+    print(f'{{"=" * {w2}}}')
     return {k: {'tp': tp[i], 'fp': fp[i], 'fn': fn[i]} for i, k in enumerate(names)}
 
 
@@ -516,6 +497,9 @@ def compute_metrics_streaming(results, num_classes):
     centroid_tp = 0
     centroid_fp = 0
     centroid_fn = 0
+    tissue_aji = {t: [] for t in range(19)}
+    tissue_bpq = {t: [] for t in range(19)}
+    tissue_mpq = {t: {c: [] for c in range(num_classes)} for t in range(19)}
 
     # AP accumulators — per class, per threshold
     class_set = set()
@@ -545,7 +529,8 @@ def compute_metrics_streaming(results, num_classes):
             pred_masks = resolve_mask_overlaps(pred_masks)
 
         # --- AJI ---
-        aji_scores.append(compute_aji(pred_masks, gt_masks))
+        aji_val = compute_aji(pred_masks, gt_masks)
+        aji_scores.append(aji_val)
 
         # --- bPQ / bMPQ ---
         if len(pred_masks) > 0:
@@ -569,6 +554,7 @@ def compute_metrics_streaming(results, num_classes):
         bmpq_scores.append(bmpq)
 
         # --- mPQ / mMPQ ---
+        class_pq_img = [0.0] * num_classes
         for cls_id in range(num_classes):
             pred_idx = [j for j, c in enumerate(pred_cls) if c == cls_id]
             gt_idx = [j for j, c in enumerate(gt_cls) if c == cls_id]
@@ -578,6 +564,7 @@ def compute_metrics_streaming(results, num_classes):
 
             pq, _, _ = _compute_pq_masked(pred_cls_masks, gt_cls_masks)
             class_pq[cls_id].append(pq)
+            class_pq_img[cls_id] = pq
 
             if len(gt_masks) > 0:
                 gt_any = np.stack(gt_masks).max(axis=0).astype(np.uint8)
@@ -640,6 +627,14 @@ def compute_metrics_streaming(results, num_classes):
 
         # Free masks for this image
         del gt_masks, pred_masks
+
+        # Per-tissue tracking
+        tissue = int(r.get('tissue', 0))
+        if tissue < 19 and aji_val > -1:
+            tissue_aji[tissue].append(aji_val)
+            tissue_bpq[tissue].append(bpq)
+            for cls_id in range(num_classes):
+                tissue_mpq[tissue][cls_id].append(class_pq_img[cls_id])
 
         if (i + 1) % 500 == 0:
             mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
