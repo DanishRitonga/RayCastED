@@ -222,23 +222,33 @@ def _compute_aji(pred_masks, gt_masks):
 
     n_pred = len(pred_masks)
     n_gt = len(gt_masks)
-    if n_pred == 0 and n_gt == 0:
-        return 1.0
-    if n_pred == 0:
-        return 0.0
     if n_gt == 0:
         return 0.0
+    if n_pred == 0:
+        return 0.0
+
     iou = _mask_iou_matrix(pred_masks, gt_masks)
     row_ind, col_ind = linear_sum_assignment(-iou)
-    matched_iou = iou[row_ind, col_ind]
-    matched_union = np.zeros(n_gt, dtype=np.float64)
-    matched_inter = np.zeros(n_gt, dtype=np.float64)
-    for pi, gi in zip(row_ind, col_ind):
-        inter = (pred_masks[pi] & gt_masks[gi]).sum()
-        union = (pred_masks[pi] | gt_masks[gi]).sum()
-        matched_inter[gi] = inter
-        matched_union[gi] = union
-    return float(np.sum(matched_inter) / np.sum(matched_union)) if matched_union.sum() > 0 else 0.0
+    valid = iou[row_ind, col_ind] >= 0.5
+    match_pred = set(row_ind[valid].tolist())
+    match_gt = set(col_ind[valid].tolist())
+
+    total_inter = 0.0
+    total_union = 0.0
+    for r, c in zip(row_ind[valid], col_ind[valid]):
+        p = pred_masks[r].astype(np.float64)
+        g = gt_masks[c].astype(np.float64)
+        total_inter += (p * g).sum()
+        total_union += (p + g - p * g).sum()
+
+    for i in range(n_pred):
+        if i not in match_pred:
+            total_union += pred_masks[i].astype(np.float64).sum()
+    for j in range(n_gt):
+        if j not in match_gt:
+            total_union += gt_masks[j].astype(np.float64).sum()
+
+    return float(total_inter / total_union) if total_union > 0 else 0.0
 
 
 def _resolve_overlaps(masks):
