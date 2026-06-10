@@ -63,8 +63,9 @@ class JetsonRuntime:
             host_mem = cuda.pagelocked_empty(size, dtype)
             device_mem = cuda.mem_alloc(host_mem.nbytes)
             self.bindings.append(int(device_mem))
+            trt_input = getattr(trt, 'TensorIOMode', getattr(trt, 'TensorMode', None)).INPUT
 
-            if self.engine.get_tensor_mode(name) == trt.TensorMode.INPUT:
+            if self.engine.get_tensor_mode(name) == trt_input:
                 self._input = {'name': name, 'host': host_mem, 'device': device_mem, 'shape': shape}
             else:
                 self._output[name] = {'host': host_mem, 'device': device_mem, 'shape': shape}

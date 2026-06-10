@@ -149,11 +149,12 @@ def load_trt_engine(engine_path: str):
         name = engine.get_tensor_name(i)
         shape = engine.get_tensor_shape(name)
         dtype = engine.get_tensor_dtype(name)
-        dtype = {trt.DataType.FLOAT: np.float32, trt.DataType.HALF: np.float16}.get(dtype, np.float32)
+        np_dtype = {trt.DataType.FLOAT: np.float32, trt.DataType.HALF: np.float16}.get(dtype, np.float32)
         size = int(np.prod(shape))
-        h_mem = cuda.pagelocked_empty(size, dtype)
+        h_mem = cuda.pagelocked_empty(size, np_dtype)
         d_mem = cuda.mem_alloc(h_mem.nbytes)
-        if engine.get_tensor_mode(name) == trt.TensorMode.INPUT:
+        trt_input = getattr(trt, 'TensorIOMode', getattr(trt, 'TensorMode', None)).INPUT
+        if engine.get_tensor_mode(name) == trt_input:
             d_input = {'host': h_mem, 'device': d_mem, 'shape': shape}
         else:
             buffers[name] = {'host': h_mem, 'device': d_mem, 'shape': shape}
