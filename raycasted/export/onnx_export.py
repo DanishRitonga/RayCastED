@@ -142,6 +142,7 @@ def export_raycast_onnx(
         input_names=['images'],
         output_names=output_names,
         dynamic_axes=dynamic_axes,
+        dynamo=False,
     )
 
     import onnx
@@ -159,6 +160,7 @@ def export_raycast_onnx(
             pass
 
     strides = head.stride.tolist() if hasattr(head, 'stride') else [4, 8, 16]
+    _const.configure_rays(head.n_rays)
     meta = {
         'crop_size': imgsz,
         'imgsz': imgsz,
@@ -239,3 +241,32 @@ def validate_onnx(
         ),
         'details': max_diffs,
     }
+
+
+def main():
+    """CLI: Export RayCastED checkpoint to ONNX."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Export RayCastED model to ONNX')
+    parser.add_argument('--weights', required=True, help='Path to .pt checkpoint')
+    parser.add_argument('--output', default=None, help='Path to output .onnx (default: same dir as weights)')
+    parser.add_argument('--imgsz', type=int, default=256, help='Input image size (default: 256)')
+    parser.add_argument('--opset', type=int, default=17, help='ONNX opset version (default: 17)')
+    parser.add_argument('--no-simplify', action='store_true', help='Skip onnx-simplifier')
+    parser.add_argument('--validate', action='store_true', help='Validate ONNX against PyTorch')
+    args = parser.parse_args()
+
+    out = args.output or str(Path(args.weights).with_suffix('.onnx'))
+    path = export_raycast_onnx(args.weights, out, args.imgsz, args.opset, simplify=not args.no_simplify)
+    print(f'Exported: {path}')
+
+    if args.validate:
+        result = validate_onnx(path, args.weights, args.imgsz)
+        status = 'PASSED' if result['passed'] else 'FAILED'
+        print(f'Validation: {status} | shape_match: {result["shape_match"]}')
+        for d in result['details']:
+            print(f'  {d["name"]}: max_diff={d["max_diff"]:.2e} mean_diff={d["mean_diff"]:.2e}')
+
+
+if __name__ == '__main__':
+    main()
