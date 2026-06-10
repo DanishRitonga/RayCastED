@@ -243,26 +243,24 @@ class DWT_HF(nn.Module):
 
 
 class DWT2D_Hybrid(nn.Module):
-    """Hybrid DWT: haar for LL, haar for HF sub-bands.
+    """DWT: configurable wavelet for LL and HF sub-bands.
 
-    Single-stream design for thesis v1 — Haar wavelet for all sub-bands.
-    Haar is the simplest wavelet (average + difference), well-documented
-    and easy to justify in defense.
+    Splits input into LL (approximation) and HF (detail) sub-bands.
+    Can use Haar, db2, db4, bior2.2, or any pywt-supported wavelet.
     """
 
-    def __init__(self, in_channels: int, drop_hh: bool = False):
+    def __init__(self, in_channels: int, drop_hh: bool = False, wavelet_type: str = 'haar'):
         super().__init__()
         self.in_channels = in_channels
         self.drop_hh = drop_hh
-        self.dwt_ll = DWT2D(in_channels, drop_hh=False, wavelet_type='haar')
-        self.dwt_hf = DWT2D(in_channels, drop_hh=drop_hh, wavelet_type='haar')
+        self.dwt_ll = DWT2D(in_channels, drop_hh=False, wavelet_type=wavelet_type)
+        self.dwt_hf = DWT2D(in_channels, drop_hh=drop_hh, wavelet_type=wavelet_type)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply hybrid DWT: haar LL + haar HF."""
-        x_haar = self.dwt_ll(x)
-        x_db2 = self.dwt_hf(x)
-        ll = x_haar[:, : self.in_channels]
-        hf = x_db2[:, self.in_channels :]
+        x_ll = self.dwt_ll(x)
+        x_hf = self.dwt_hf(x)
+        ll = x_ll[:, : self.in_channels]
+        hf = x_hf[:, self.in_channels :]
         return torch.cat([ll, hf], dim=1)
 
 
@@ -344,10 +342,10 @@ class ResoConvHybrid(nn.Module):
     Simple, well-studied, easy to justify in thesis defense.
     """
 
-    def __init__(self, c1: int, c2: int, shortcut: bool = False, drop_hh: bool = False):
+    def __init__(self, c1: int, c2: int, wavelet_type: str = 'haar', shortcut: bool = False, drop_hh: bool = False):
         super().__init__()
         self.shortcut = shortcut
-        self.dwt = DWT2D_Hybrid(c1, drop_hh=drop_hh)
+        self.dwt = DWT2D_Hybrid(c1, drop_hh=drop_hh, wavelet_type=wavelet_type)
 
         n_sub = 3 if drop_hh else 4
         in_proj = c1 * n_sub
@@ -355,8 +353,15 @@ class ResoConvHybrid(nn.Module):
         self.proj = Conv(in_proj, c2, k=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply ResoConv: DWT → SE → 1×1 project."""
-        return self.proj(self.se(self.dwt(x)))
+        """Apply ResoConv: DWT → [shortcut] → [SE] → 1×1 project."""
+        out = self.dwt(x)
+        c_proj = self.proj.conv.in_channels
+        if c_proj == out.shape[1] + x.shape[1]:
+            x_down = F.avg_pool2d(x, kernel_size=2, stride=2)
+            out = torch.cat([x_down, out], dim=1)
+        if hasattr(self, 'se'):
+            out = self.se(out)
+        return self.proj(out)
 
 
 class ResoConvDS(nn.Module):
