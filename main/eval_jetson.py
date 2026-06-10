@@ -324,6 +324,11 @@ def main():
         blob = image.transpose(2, 0, 1)[np.newaxis]
         outputs = run_trt(trt_ctx, blob)
 
+        # TRT returns [1, C, N] — transpose to [N, C] for postprocess
+        for k in outputs:
+            if outputs[k].ndim == 3:
+                outputs[k] = outputs[k][0].T
+
         # Post-process
         if hierarchical and 'binary' in outputs:
             det = postprocess(outputs['boxes'], outputs['binary'], outputs['class'],
