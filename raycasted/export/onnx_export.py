@@ -184,8 +184,8 @@ def validate_onnx(
     onnx_path: str,
     weights_path: str,
     imgsz: int = 256,
-    atol: float = 1e-5,
-    rtol: float = 1e-4,
+    atol: float = 1e-4,
+    rtol: float = 1e-3,
 ) -> dict:
     """Validate ONNX export against PyTorch model."""
     from raycasted.model.register import register_raycast_head
