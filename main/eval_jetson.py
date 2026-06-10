@@ -114,16 +114,21 @@ def postprocess(boxes_raw, binary_raw, class_raw, strides, imgsz,
     rays_px = rays * imgsz
 
     mask = max_scores > conf_threshold
-    n_det = int(mask.sum())
+    indices = np.where(mask)[0]
+    n_det = len(indices)
     if n_det == 0:
         return np.zeros((0, raycast_dim + 2), dtype=np.float32)
+    if n_det > 100:
+        topk = np.argsort(-max_scores[indices])[:100]
+        indices = indices[topk]
+        n_det = 100
 
     det = np.zeros((n_det, raycast_dim + 2), dtype=np.float32)
-    det[:, 0] = cx[mask]
-    det[:, 1] = cy[mask]
-    det[:, 2:2 + n_rays] = rays_px[mask]
-    det[:, raycast_dim] = max_scores[mask]
-    det[:, raycast_dim + 1] = cls_idx[mask]
+    det[:, 0] = cx[indices]
+    det[:, 1] = cy[indices]
+    det[:, 2:2 + n_rays] = rays_px[indices]
+    det[:, raycast_dim] = max_scores[indices]
+    det[:, raycast_dim + 1] = cls_idx[indices]
     return det
 
 
