@@ -2,7 +2,7 @@ global_settings:
   root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
   variant: "s"        # YOLO26 variant: n, s, m, l, x
   model: "raycasted/cfg/yolo26s-run28-p234.yaml"
-  n_rays: 32
+  n_rays: 16
   max_size: 256
   crop_size: 256
   output_mpp: 0.25
