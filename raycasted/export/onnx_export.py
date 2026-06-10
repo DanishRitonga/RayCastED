@@ -256,8 +256,9 @@ def main():
     parser.add_argument('--validate', action='store_true', help='Validate ONNX against PyTorch')
     args = parser.parse_args()
 
-    out = args.output or str(Path(args.weights).with_suffix('.onnx'))
-    path = export_raycast_onnx(args.weights, out, args.imgsz, args.opset, simplify=not args.no_simplify)
+    out = Path(args.output or str(Path(args.weights).with_suffix('.onnx')))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    path = export_raycast_onnx(args.weights, str(out), args.imgsz, args.opset, simplify=not args.no_simplify)
     print(f'Exported: {path}')
 
     if args.validate:
