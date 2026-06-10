@@ -153,9 +153,10 @@ def load_trt_engine(engine_path: str):
         size = int(np.prod(shape))
         h_mem = cuda.pagelocked_empty(size, np_dtype)
         d_mem = cuda.mem_alloc(h_mem.nbytes)
+        context.set_tensor_address(name, int(d_mem))
         trt_input = getattr(trt, 'TensorIOMode', getattr(trt, 'TensorMode', None)).INPUT
         if engine.get_tensor_mode(name) == trt_input:
-            d_input = {'host': h_mem, 'device': d_mem, 'shape': shape}
+            d_input = {'name': name, 'host': h_mem, 'device': d_mem, 'shape': shape}
         else:
             buffers[name] = {'host': h_mem, 'device': d_mem, 'shape': shape}
     return engine, context, stream, d_input, buffers, cuda
@@ -333,10 +334,10 @@ def main():
                               strides, imgsz, args.conf, n_rays=n_rays)
 
         # GT
-        gt_poly = labels.copy()
+        gt_poly = labels[:, 1:].copy()
         n_gt = labels.shape[0]
         if n_gt > 0:
-            gt_poly[:, 1:] *= imgsz  # cx, cy, rays
+            gt_poly *= imgsz
 
         n_pred_total += det.shape[0]
         n_gt_total += n_gt
