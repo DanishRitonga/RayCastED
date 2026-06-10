@@ -317,10 +317,10 @@ def main():
 
     for i, f_path in enumerate(files):
         data = dict(np.load(f_path, allow_pickle=True))
-        image = data['image'].astype(np.float32)
+        image = data['image'].astype(np.float32) / 255.0  # uint8→float [0,1]
         labels = data['annotations']
 
-        # TRT inference
+        # TRT inference — model expects CHW float32 [0,1]
         blob = image.transpose(2, 0, 1)[np.newaxis]
         outputs = run_trt(trt_ctx, blob)
 
@@ -333,11 +333,9 @@ def main():
             det = postprocess(outputs['boxes'], None, scores,
                               strides, imgsz, args.conf, n_rays=n_rays)
 
-        # GT
+        # GT — labels are already in pixel coordinates
         gt_poly = labels[:, 1:].copy()
         n_gt = labels.shape[0]
-        if n_gt > 0:
-            gt_poly *= imgsz
 
         n_pred_total += det.shape[0]
         n_gt_total += n_gt
