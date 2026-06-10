@@ -177,12 +177,10 @@ def run_trt(ctx, blob: np.ndarray):
 
 
 # ============================================================
-# Mask IoU metrics (inlined from eval_pannuke.py — numpy+scipy)
+# Reference metric functions (exact copies from eval_pannuke.py + metrics.py)
 # ============================================================
 
 def _mask_iou_matrix(pred_masks, gt_masks):
-    from scipy.optimize import linear_sum_assignment
-
     n_pred = len(pred_masks)
     n_gt = len(gt_masks)
     if n_pred == 0 or n_gt == 0:
@@ -196,9 +194,53 @@ def _mask_iou_matrix(pred_masks, gt_masks):
     return np.divide(intersection, union, out=np.zeros_like(intersection, dtype=np.float64), where=union > 0)
 
 
-def _compute_pq(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
-    from scipy.optimize import linear_sum_assignment
+def resolve_mask_overlaps(masks):
+    if len(masks) == 0:
+        return masks
+    n = len(masks)
+    h, w = masks[0].shape
+    stack = np.stack(masks)
+    areas = stack.sum(axis=(1, 2))
+    sorted_indices = np.argsort(-areas)
+    occupied = np.zeros((h, w), dtype=bool)
+    resolved = [np.zeros((h, w), dtype=np.uint8) for _ in range(n)]
+    for idx in sorted_indices:
+        resolved[idx] = stack[idx] & ~occupied
+        occupied |= resolved[idx].astype(bool)
+    return resolved
 
+
+def compute_aji(pred_masks, gt_masks, iou_threshold=0.5):
+    from scipy.optimize import linear_sum_assignment
+    if len(gt_masks) == 0:
+        return 0.0
+    if len(pred_masks) == 0:
+        return 0.0
+    iou_matrix = _mask_iou_matrix(pred_masks, gt_masks)
+    row_ind, col_ind = linear_sum_assignment(-iou_matrix)
+    valid = iou_matrix[row_ind, col_ind] >= iou_threshold
+    match_pred = set(row_ind[valid].tolist())
+    match_gt = set(col_ind[valid].tolist())
+    total_intersection = 0.0
+    total_union = 0.0
+    for r, c in zip(row_ind[valid], col_ind[valid]):
+        p = pred_masks[r].astype(np.float64)
+        g = gt_masks[c].astype(np.float64)
+        total_intersection += (p * g).sum()
+        total_union += (p + g - p * g).sum()
+    for i in range(len(pred_masks)):
+        if i not in match_pred:
+            total_union += pred_masks[i].astype(np.float64).sum()
+    for j in range(len(gt_masks)):
+        if j not in match_gt:
+            total_union += gt_masks[j].astype(np.float64).sum()
+    if total_union == 0:
+        return 0.0
+    return float(total_intersection / total_union)
+
+
+def _compute_pq_masked(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
+    from scipy.optimize import linear_sum_assignment
     n_pred = len(pred_masks)
     n_gt = len(gt_masks)
     if n_gt == 0 or n_pred == 0:
@@ -217,55 +259,6 @@ def _compute_pq(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
     return float(sq * dq), float(sq), float(dq)
 
 
-def _compute_aji(pred_masks, gt_masks):
-    from scipy.optimize import linear_sum_assignment
-
-    n_pred = len(pred_masks)
-    n_gt = len(gt_masks)
-    if n_gt == 0:
-        return 0.0
-    if n_pred == 0:
-        return 0.0
-
-    iou = _mask_iou_matrix(pred_masks, gt_masks)
-    row_ind, col_ind = linear_sum_assignment(-iou)
-    valid = iou[row_ind, col_ind] >= 0.5
-    match_pred = set(row_ind[valid].tolist())
-    match_gt = set(col_ind[valid].tolist())
-
-    total_inter = 0.0
-    total_union = 0.0
-    for r, c in zip(row_ind[valid], col_ind[valid]):
-        p = pred_masks[r].astype(np.float64)
-        g = gt_masks[c].astype(np.float64)
-        total_inter += (p * g).sum()
-        total_union += (p + g - p * g).sum()
-
-    for i in range(n_pred):
-        if i not in match_pred:
-            total_union += pred_masks[i].astype(np.float64).sum()
-    for j in range(n_gt):
-        if j not in match_gt:
-            total_union += gt_masks[j].astype(np.float64).sum()
-
-    return float(total_inter / total_union) if total_union > 0 else 0.0
-
-
-def _resolve_overlaps(masks):
-    if len(masks) <= 1:
-        return masks
-    overlap = np.stack(masks).sum(axis=0) > 1
-    if not overlap.any():
-        return masks
-    areas = np.array([m.sum() for m in masks])
-    order = np.argsort(-areas)
-    resolved = [m.copy() for m in masks]
-    for i_idx, i in enumerate(order):
-        for j in order[i_idx + 1:]:
-            resolved[j] = resolved[j] & ~resolved[i]
-    return resolved
-
-
 def _compute_ap(recall, precision):
     mrec = np.concatenate(([0.0], recall, [1.0]))
     mpre = np.concatenate(([1.0], precision, [0.0]))
@@ -273,6 +266,142 @@ def _compute_ap(recall, precision):
         mpre[i] = max(mpre[i], mpre[i + 1])
     indices = np.where(mrec[1:] != mrec[:-1])[0]
     return float(np.sum((mrec[indices + 1] - mrec[indices]) * mpre[indices + 1]))
+
+
+# ============================================================
+# Streaming metrics (exact copy from eval_pannuke.py)
+# ============================================================
+
+def compute_metrics_streaming(results, num_classes):
+    from scipy.optimize import linear_sum_assignment
+
+    iou_thresholds = sorted(set(round(x, 2) for x in np.arange(0.5, 1.0, 0.05)))
+    aji_scores, bpq_scores, bmpq_scores = [], [], []
+    class_pq = {c: [] for c in range(num_classes)}
+    class_mpq = {c: [] for c in range(num_classes)}
+    centroid_tp, centroid_fp, centroid_fn = 0, 0, 0
+
+    class_set = set()
+    for r in results:
+        class_set.update(r['gt_cls'].tolist())
+        class_set.update(r['pred_cls'].tolist())
+
+    ap_stats = {c: {t: {'tp': [], 'fp': [], 'conf': [], 'n_gt': 0} for t in iou_thresholds} for c in sorted(class_set)}
+
+    for i, r in enumerate(results):
+        imgsz = r['imgsz']
+        pred_polys = r['pred_polys']
+        gt_polys = r['gt_polys']
+        pred_cls = r['pred_cls']
+        gt_cls = r['gt_cls']
+        pred_confs = r['pred_confs']
+
+        gt_masks = _polygons_to_masks(gt_polys, imgsz, imgsz) if len(gt_polys) > 0 else []
+        pred_masks = _polygons_to_masks(pred_polys, imgsz, imgsz) if len(pred_polys) > 0 else []
+        if pred_masks:
+            pred_masks = resolve_mask_overlaps(pred_masks)
+
+        aji_scores.append(compute_aji(pred_masks, gt_masks))
+
+        pred_binary = np.stack(pred_masks).max(axis=0).astype(np.uint8) if pred_masks else np.zeros((imgsz, imgsz), dtype=np.uint8)
+        gt_binary = np.stack(gt_masks).max(axis=0).astype(np.uint8) if gt_masks else np.zeros((imgsz, imgsz), dtype=np.uint8)
+        bpq, _, _ = _compute_pq_masked([pred_binary], [gt_binary])
+        bpq_scores.append(bpq)
+        if gt_binary.sum() > 0:
+            bmpq, _, _ = _compute_pq_masked([pred_binary], [gt_binary], mask=gt_binary > 0)
+        else:
+            bmpq = 0.0
+        bmpq_scores.append(bmpq)
+
+        gt_idx_counts = [0] * num_classes
+        pred_idx_counts = [0] * num_classes
+        for cls_id in range(num_classes):
+            pred_idx = [j for j, c in enumerate(pred_cls) if c == cls_id]
+            gt_idx = [j for j, c in enumerate(gt_cls) if c == cls_id]
+            gt_idx_counts[cls_id] = len(gt_idx)
+            pred_idx_counts[cls_id] = len(pred_idx)
+            pq, _, _ = _compute_pq_masked([pred_masks[j] for j in pred_idx], [gt_masks[j] for j in gt_idx])
+            class_pq[cls_id].append(pq)
+            if len(gt_masks) > 0:
+                gt_any = np.stack(gt_masks).max(axis=0).astype(np.uint8)
+                mpq, _, _ = _compute_pq_masked([pred_masks[j] for j in pred_idx], [gt_masks[j] for j in gt_idx], mask=gt_any > 0)
+            else:
+                mpq = 0.0
+            class_mpq[cls_id].append(mpq)
+
+        for cls_id in sorted(class_set):
+            cls_pred_masks = [pred_masks[j] for j in range(len(pred_masks)) if j < len(pred_cls) and pred_cls[j] == cls_id]
+            cls_gt_masks = [gt_masks[j] for j in range(len(gt_masks)) if j < len(gt_cls) and gt_cls[j] == cls_id]
+            cls_confs = pred_confs[pred_cls == cls_id]
+            n_pc, n_gc = len(cls_pred_masks), len(cls_gt_masks)
+            for t in iou_thresholds:
+                ap_stats[cls_id][t]['n_gt'] += n_gc
+            if n_pc > 0 and n_gc > 0:
+                iou_mat = _mask_iou_matrix(cls_pred_masks, cls_gt_masks)
+                ri, ci = linear_sum_assignment(-iou_mat)
+                matched_iou = iou_mat[ri, ci]
+            else:
+                ri, matched_iou = np.array([], dtype=int), np.array([], dtype=float)
+            for t in iou_thresholds:
+                matched_pred = set(ri[np.where(matched_iou >= t)[0]].tolist()) if n_gc > 0 else set()
+                for pi in range(n_pc):
+                    is_tp = pi in matched_pred
+                    ap_stats[cls_id][t]['conf'].append(float(cls_confs[pi]) if pi < len(cls_confs) else 0.0)
+                    ap_stats[cls_id][t]['tp'].append(is_tp)
+                    ap_stats[cls_id][t]['fp'].append(not is_tp)
+
+        n_pred, n_gt = len(pred_polys), len(gt_polys)
+        if n_pred > 0 and n_gt > 0:
+            dist = np.linalg.norm(pred_polys[:, :2][:, None, :] - gt_polys[:, :2][None, :, :], axis=2)
+            ri, ci = linear_sum_assignment(dist)
+            tp = int((dist[ri, ci] <= 12).sum())
+        elif n_pred > 0:
+            tp = 0
+        else:
+            tp = 0
+        centroid_tp += tp
+        centroid_fp += n_pred - tp
+        centroid_fn += n_gt - tp
+
+        if (i + 1) % 500 == 0:
+            print(f'  {i+1}/{len(results)} images', flush=True)
+
+    mean_aji = np.mean(aji_scores)
+    mean_bpq = np.mean(bpq_scores)
+    mean_bmpq = np.mean(bmpq_scores)
+    mpq_values = [np.mean([v for v in class_pq[c] if v > 0]) for c in range(num_classes) if any(v > 0 for v in class_pq[c])]
+    mean_mpq = np.mean(mpq_values) if mpq_values else 0.0
+    mmpq_values = [np.mean([v for v in class_mpq[c] if v > 0]) for c in range(num_classes) if any(v > 0 for v in class_mpq[c])]
+    mean_mmpq = np.mean(mmpq_values) if mmpq_values else 0.0
+
+    ap_results = {}
+    for t in iou_thresholds:
+        aps = []
+        for cls_id in sorted(class_set):
+            s = ap_stats[cls_id][t]
+            if s['n_gt'] == 0:
+                continue
+            confs, tps, fps = np.array(s['conf']), np.array(s['tp']), np.array(s['fp'])
+            if len(confs) == 0:
+                aps.append(0.0)
+                continue
+            order = np.argsort(-confs)
+            tps, fps = tps[order], fps[order]
+            cum_tp, cum_fp = np.cumsum(tps), np.cumsum(fps)
+            precision = cum_tp / (cum_tp + cum_fp)
+            recall = cum_tp / s['n_gt']
+            aps.append(_compute_ap(recall, precision))
+        ap_results[t] = {'AP': np.mean(aps) if aps else 0.0}
+
+    prec = centroid_tp / (centroid_tp + centroid_fp) if (centroid_tp + centroid_fp) > 0 else 0.0
+    rec = centroid_tp / (centroid_tp + centroid_fn) if (centroid_tp + centroid_fn) > 0 else 0.0
+    f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
+
+    return {
+        'aji': mean_aji, 'bpq': mean_bpq, 'bmpq': mean_bmpq,
+        'mpq': mean_mpq, 'mmpq': mean_mmpq, 'ap': ap_results,
+        'centroid': {'precision': prec, 'recall': rec, 'f1': f1},
+    }
 
 
 # ============================================================
@@ -309,37 +438,28 @@ def main():
     print(f'Loading engine: {args.engine}')
     trt_ctx = load_trt_engine(args.engine)
 
-    bpq_scores = []
-    aji_scores = []
-    class_pq = {c: [] for c in range(nc)}
-    centroid_tp = 0
-    centroid_fp = 0
-    centroid_fn = 0
-    iou_thresholds = sorted(set(round(x, 2) for x in np.arange(0.5, 1.0, 0.05)))
-    class_set = set()
-    ap_stats = {}
-    all_results = []
     n_pred_total = 0
     n_gt_total = 0
 
     t_start = time.perf_counter()
     print(f'Running {len(files)} images (conf={args.conf})...')
 
+    all_results = []
+    n_pred_total = 0
+    n_gt_total = 0
+
     for i, f_path in enumerate(files):
         data = dict(np.load(f_path, allow_pickle=True))
-        image = data['image'].astype(np.float32) / 255.0  # uint8→float [0,1]
+        image = data['image'].astype(np.float32) / 255.0
         labels = data['annotations']
 
-        # TRT inference — model expects CHW float32 [0,1]
         blob = image.transpose(2, 0, 1)[np.newaxis]
         outputs = run_trt(trt_ctx, blob)
 
-        # TRT returns [1, C, N] — transpose to [N, C] for postprocess
         for k in outputs:
             if outputs[k].ndim == 3:
                 outputs[k] = outputs[k][0].T
 
-        # Post-process
         if hierarchical and 'binary' in outputs:
             det = postprocess(outputs['boxes'], outputs['binary'], outputs['class'],
                               strides, imgsz, args.conf, binary_threshold, n_rays)
@@ -348,80 +468,20 @@ def main():
             det = postprocess(outputs['boxes'], None, scores,
                               strides, imgsz, args.conf, n_rays=n_rays)
 
-        # GT — labels are already in pixel coordinates
         gt_poly = labels[:, 1:].copy()
         n_gt = labels.shape[0]
 
         n_pred_total += det.shape[0]
         n_gt_total += n_gt
 
-        # Rasterize
-        gt_masks = _polygons_to_masks(gt_poly, imgsz, imgsz) if n_gt > 0 else []
-        pred_masks = _polygons_to_masks(det[:, :raycast_dim], imgsz, imgsz) if det.shape[0] > 0 else []
-        if pred_masks:
-            pred_masks = _resolve_overlaps(pred_masks)
-
-        # AJI
-        aji_scores.append(_compute_aji(pred_masks, gt_masks))
-
-        # bPQ
-        if pred_masks:
-            pred_bin = np.stack(pred_masks).max(axis=0).astype(np.uint8)
-        else:
-            pred_bin = np.zeros((imgsz, imgsz), dtype=np.uint8)
-        if gt_masks:
-            gt_bin = np.stack(gt_masks).max(axis=0).astype(np.uint8)
-        else:
-            gt_bin = np.zeros((imgsz, imgsz), dtype=np.uint8)
-        bpq, _, _ = _compute_pq([pred_bin], [gt_bin])
-        bpq_scores.append(bpq)
-
-        # mPQ (per-class)
-        for c in range(nc):
-            c_pred = [i for i, lbl in enumerate(det[:, raycast_dim + 1].astype(int)) if lbl == c] if det.shape[0] > 0 else []
-            c_gt = [i for i, lbl in enumerate(labels[:, 0].astype(int)) if lbl == c]
-            pc = [pred_masks[i] for i in c_pred]
-            gc = [gt_masks[i] for i in c_gt]
-            pq, _, _ = _compute_pq(pc, gc)
-            class_pq[c].append(pq)
-            class_set.add(c)
-
-        # AP accumulators
-        for c in sorted(class_set):
-            if c not in ap_stats:
-                ap_stats[c] = {t: {'tp': [], 'fp': [], 'conf': [], 'n_gt': 0} for t in iou_thresholds}
-
-        for c in sorted(class_set):
-            c_pred_idx = [j for j in range(len(pred_masks))
-                          if j < det.shape[0] and int(det[j, raycast_dim + 1]) == c]
-            c_gt_idx = [j for j in range(len(gt_masks))
-                        if j < n_gt and int(labels[j, 0]) == c]
-            c_pm = [pred_masks[j] for j in c_pred_idx]
-            c_gm = [gt_masks[j] for j in c_gt_idx]
-            c_conf = det[c_pred_idx, raycast_dim] if c_pred_idx else np.array([])
-
-            n_pc = len(c_pm)
-            n_gc = len(c_gm)
-            for t in iou_thresholds:
-                ap_stats[c][t]['n_gt'] += n_gc
-
-            if n_pc > 0 and n_gc > 0:
-                iou_mat = _mask_iou_matrix(c_pm, c_gm)
-                from scipy.optimize import linear_sum_assignment
-                ri, ci = linear_sum_assignment(-iou_mat)
-                matched_iou = iou_mat[ri, ci]
-            else:
-                ri, matched_iou = np.array([], dtype=int), np.array([], dtype=float)
-
-            for t in iou_thresholds:
-                matched_pred = set(ri[np.where(matched_iou >= t)[0]].tolist()) if n_gc > 0 else set()
-                for pi in range(n_pc):
-                    is_tp = pi in matched_pred
-                    ap_stats[c][t]['conf'].append(float(c_conf[pi]) if pi < len(c_conf) else 0.0)
-                    ap_stats[c][t]['tp'].append(is_tp)
-                    ap_stats[c][t]['fp'].append(not is_tp)
-
-        del gt_masks, pred_masks
+        all_results.append({
+            'pred_polys': det[:, :raycast_dim] if det.shape[0] > 0 else np.zeros((0, raycast_dim)),
+            'pred_confs': det[:, raycast_dim] if det.shape[0] > 0 else np.array([]),
+            'pred_cls': det[:, raycast_dim + 1].astype(int) if det.shape[0] > 0 else np.array([], dtype=int),
+            'gt_polys': gt_poly,
+            'gt_cls': labels[:, 0].astype(int) if labels.ndim >= 2 and labels.shape[0] > 0 else np.array([], dtype=int),
+            'imgsz': imgsz,
+        })
 
         if (i + 1) % 500 == 0:
             e = time.perf_counter() - t_start
@@ -432,46 +492,28 @@ def main():
     print(f'  Done: {len(files)} images in {elapsed:.1f}s ({ms_per_img:.1f} ms/img)')
     print(f'  Predictions: {n_pred_total}, GT: {n_gt_total}')
 
-    # Aggregate
-    mean_aji = np.mean(aji_scores)
-    mean_bpq = np.mean(bpq_scores)
-    mpq_values = [np.mean([v for v in class_pq[c] if v > 0]) for c in range(nc) if any(v > 0 for v in class_pq[c])]
-    mean_mpq = np.mean(mpq_values) if mpq_values else 0.0
-
-    ap_results = {}
-    for t in iou_thresholds:
-        aps = []
-        for c in sorted(class_set):
-            s = ap_stats[c][t]
-            if s['n_gt'] == 0:
-                continue
-            confs = np.array(s['conf'])
-            tps = np.array(s['tp'])
-            fps = np.array(s['fp'])
-            if len(confs) == 0:
-                aps.append(0.0)
-                continue
-            order = np.argsort(-confs)
-            tps = tps[order]
-            fps = fps[order]
-            cum_tp = np.cumsum(tps)
-            cum_fp = np.cumsum(fps)
-            prec = cum_tp / (cum_tp + cum_fp + 1e-12)
-            rec = cum_tp / s['n_gt']
-            aps.append(_compute_ap(rec, prec))
-        ap_results[t] = {'AP': np.mean(aps) if aps else 0.0}
-
-    ap50 = ap_results.get(0.5, {}).get('AP', 0.0)
-    ap50_95 = np.mean([ap_results[t]['AP'] for t in sorted(ap_results.keys())])
+    print('Computing metrics...')
+    metrics = compute_metrics_streaming(all_results, num_classes=nc)
+    ap = metrics['ap']
+    ap50 = ap.get(0.5, {}).get('AP', 0.0)
+    ap50_95 = np.mean([ap[t]['AP'] for t in sorted(ap.keys())])
+    f12 = metrics['centroid']
 
     print('\n' + '=' * 60)
     print('Jetson TensorRT Evaluation Results')
     print('=' * 60)
-    print(f'{"AJI":<25} {mean_aji:>12.4f}')
+    print(f'{"Metric":<25} {"Value":>12}')
+    print('-' * 37)
+    print(f'{"AJI":<25} {metrics["aji"]:>12.4f}')
     print(f'{"AP@0.5":<25} {ap50:>12.4f}')
     print(f'{"AP@0.5:0.05:0.95":<25} {ap50_95:>12.4f}')
-    print(f'{"bPQ":<25} {mean_bpq:>12.4f}')
-    print(f'{"mPQ":<25} {mean_mpq:>12.4f}')
+    print(f'{"bPQ":<25} {metrics["bpq"]:>12.4f}')
+    print(f'{"bMPQ":<25} {metrics["bmpq"]:>12.4f}')
+    print(f'{"mPQ":<25} {metrics["mpq"]:>12.4f}')
+    print(f'{"mMPQ":<25} {metrics["mmpq"]:>12.4f}')
+    print(f'{"F1 (r=12)":<25} {f12["f1"]:>12.4f}')
+    print(f'{"Precision":<25} {f12["precision"]:>12.4f}')
+    print(f'{"Recall":<25} {f12["recall"]:>12.4f}')
     print(f'{"Inference (ms/img)":<25} {ms_per_img:>12.1f}')
     print('=' * 37)
 
