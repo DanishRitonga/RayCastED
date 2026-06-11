@@ -53,6 +53,7 @@ def load_trt_engine(engine_path: str):
         size = int(np.prod(shape))
         h_mem = cuda.pagelocked_empty(size, dtype)
         d_mem = cuda.mem_alloc(h_mem.nbytes)
+        context.set_tensor_address(name, int(d_mem))
         trt_input = getattr(trt, 'TensorIOMode', getattr(trt, 'TensorMode', None)).INPUT
 
         if engine.get_tensor_mode(name) == trt_input:
