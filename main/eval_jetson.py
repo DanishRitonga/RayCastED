@@ -357,7 +357,9 @@ def compute_metrics_streaming(results, num_classes):
 
         n_pred, n_gt = len(pred_polys), len(gt_polys)
         if n_pred > 0 and n_gt > 0:
-            dist = np.linalg.norm(pred_polys[:, :2][:, None, :] - gt_polys[:, :2][None, :, :], axis=2)
+            p_centroids = np.nan_to_num(pred_polys[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
+            g_centroids = np.nan_to_num(gt_polys[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
+            dist = np.linalg.norm(p_centroids[:, None, :] - g_centroids[None, :, :], axis=2)
             ri, ci = linear_sum_assignment(dist)
             tp = int((dist[ri, ci] <= 12).sum())
         elif n_pred > 0:
