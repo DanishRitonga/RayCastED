@@ -176,7 +176,7 @@ def _per_group_metrics(results, names, key, title, metrics=None):
         vals += [metrics['aji'], metrics['bpq'], metrics['mpq']]
     print(row_fmt.format(*vals))
 
-    # Average ± STD across tissues
+    # Average ± STD across tissues (mask metrics only)
     if has_mask:
         per_t_aji = [float(np.mean(t_aji.get(g))) for g in range(n_groups) if t_aji.get(g)]
         per_t_bpq = [float(np.mean(t_bpq.get(g))) for g in range(n_groups) if t_bpq.get(g)]
@@ -184,19 +184,14 @@ def _per_group_metrics(results, names, key, title, metrics=None):
         for g in range(n_groups):
             v = t_mpq.get(g, {})
             if v:
-                vals_pq = [np.mean([x for x in lst if x > 0]) for lst in v.values() if lst and any(x > 0 for x in lst)]
-                if vals_pq:
-                    per_t_mpq.append(float(np.mean(vals_pq)))
+                vp = [np.mean([x for x in lst if x > 0]) for lst in v.values() if lst and any(x > 0 for x in lst)]
+                if vp:
+                    per_t_mpq.append(float(np.mean(vp)))
         am = np.mean(per_t_aji) if per_t_aji else 0; as_ = np.std(per_t_aji) if len(per_t_aji)>1 else 0
         bm = np.mean(per_t_bpq) if per_t_bpq else 0; bs_ = np.std(per_t_bpq) if len(per_t_bpq)>1 else 0
         mm = np.mean(per_t_mpq) if per_t_mpq else 0; ms_ = np.std(per_t_mpq) if len(per_t_mpq)>1 else 0
-        vals_avg = ['Avg ± std', '', 0, 0, 0]
-        vals_avg += [am, bm, mm]
-        print(row_fmt.format(*vals_avg))
-        std_vals = ['', '', 0, 0, 0, as_, bs_, ms_]
-        # Overwrite the last line to show std inline
-        avg_line = f'  {"Avg ± std":<14} {"":>5} {"":>7} {"":>7} {"":>7} {am:>7.4f}±{as_:.4f} {bm:>7.4f}±{bs_:.4f} {mm:>7.4f}±{ms_:.4f}'
-        print(avg_line)
+        print(f'  {"Avg":<14} {"":>5} {"":>7} {"":>7} {"":>7} {am:>7.4f} {bm:>7.4f} {mm:>7.4f}')
+        print(f'  {"Std":<14} {"":>5} {"":>7} {"":>7} {"":>7} {as_:>7.4f} {bs_:>7.4f} {ms_:>7.4f}')
     print(sep)
 
 
