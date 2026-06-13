@@ -977,12 +977,15 @@ def _main(args):
     try:
         p_metrics = compute_polygon_metrics_streaming(results, n_rays)
         print('\n' + '=' * 60)
-        print('Polygon-Level Metrics (no rasterization)')
+        print('Polygon-Level Metrics (geometric, no rasterization)')
         print('=' * 60)
+        print(f'  bPQ (polygon IoU):    {p_metrics["bPQ"]:>8.4f}')
+        print(f'  bSQ (polygon IoU):    {p_metrics["bSQ"]:>8.4f}')
+        print(f'  bDQ (polygon IoU):    {p_metrics["bDQ"]:>8.4f}')
         print(f'  Centroid L2 (px):    {p_metrics["centroid_l2"]:>8.2f}')
         print(f'  Ray L1 (px):         {p_metrics["ray_l1"]:>8.2f}')
-        print(f'  Area IoU:            {p_metrics["poly_iou"]:>8.4f}')
-        print(f'  Matched pairs:       {p_metrics["n_matched"]:>8}')
+        print(f'  Poly IoU (mean):     {p_metrics["poly_iou"]:>8.4f}')
+        print(f'  Matched/Total:       {p_metrics["n_matched"]}/{p_metrics["n_gt_total"]}')
         print('=' * 60)
     except Exception:
         pass
