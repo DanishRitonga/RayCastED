@@ -43,6 +43,7 @@ from raycasted.model.metrics import (
     resolve_mask_overlaps,
 )
 from raycasted.model.register import register_raycast_head
+from eval_polygon import compute_polygon_metrics_streaming
 
 
 def _polygons_to_masks_fast(detections: np.ndarray, img_h: int, img_w: int) -> list[np.ndarray]:
@@ -971,6 +972,20 @@ def _main(args):
 
         print(f'\n[DIAG ERROR] _diagnose_recall failed: {exc}', flush=True)
         traceback.print_exc()
+
+    # --- Polygon-based metrics (no raster) ---
+    try:
+        p_metrics = compute_polygon_metrics_streaming(results, n_rays)
+        print('\n' + '=' * 60)
+        print('Polygon-Level Metrics (no rasterization)')
+        print('=' * 60)
+        print(f'  Centroid L2 (px):    {p_metrics["centroid_l2"]:>8.2f}')
+        print(f'  Ray L1 (px):         {p_metrics["ray_l1"]:>8.2f}')
+        print(f'  Area IoU:            {p_metrics["poly_iou"]:>8.4f}')
+        print(f'  Matched pairs:       {p_metrics["n_matched"]:>8}')
+        print('=' * 60)
+    except Exception:
+        pass
 
 
 def _simple_collate(batch):
