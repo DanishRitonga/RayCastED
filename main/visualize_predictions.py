@@ -170,7 +170,8 @@ def main():
     backend = parser.add_mutually_exclusive_group(required=True)
     backend.add_argument('--weights', help='PyTorch checkpoint')
     backend.add_argument('--engine', help='TensorRT engine (--meta required)')
-    parser.add_argument('--meta', help='Metadata JSON (required with --engine)')
+    backend.add_argument('--onnx', help='ONNX model (--meta required)')
+    parser.add_argument('--meta', help='Metadata JSON (required with --engine/--onnx)')
     args = parser.parse_args()
 
     files = sorted(Path(args.data_dir).glob('*.npz'))
@@ -192,18 +193,26 @@ def main():
         imgsz = 256
         strides = [4, 8, 16]
         use_trt = False
+        use_onnx = False
         print(f'Loaded PyTorch model: n_rays={n_rays}')
     else:
         if not args.meta:
-            parser.error('--meta required with --engine')
+            parser.error('--meta required with --engine/--onnx')
         with open(args.meta) as f:
             meta = json.load(f)
         n_rays = meta['n_rays']
         imgsz = meta['imgsz']
         strides = meta.get('strides', [4, 8, 16])
-        trt_ctx = load_trt_engine(args.engine)
-        use_trt = True
-        print(f'Loaded TRT engine: n_rays={n_rays} imgsz={imgsz}')
+        use_trt = args.engine is not None
+        use_onnx = args.onnx is not None
+        if use_trt:
+            trt_ctx = load_trt_engine(args.engine)
+            print(f'Loaded TRT engine: n_rays={n_rays} imgsz={imgsz}')
+        else:
+            import onnxruntime as ort
+
+            ort_session = ort.InferenceSession(args.onnx)
+            print(f'Loaded ONNX model: n_rays={n_rays} imgsz={imgsz}')
 
     _configure_rays(n_rays)
     raycast_dim = 2 + n_rays
@@ -239,6 +248,12 @@ def main():
 
             det = postprocess(outputs['boxes'], None,
                               outputs.get('scores', outputs.get('class')),
+                              strides, imgsz, args.conf, n_rays=n_rays)
+        elif use_onnx:
+            blob = image.astype(np.float32) / 255.0
+            blob = blob.transpose(2, 0, 1)[np.newaxis]
+            ort_outs = ort_session.run(None, {'images': blob})
+            det = postprocess(ort_outs[0], None, ort_outs[1],
                               strides, imgsz, args.conf, n_rays=n_rays)
         else:
             import torch
