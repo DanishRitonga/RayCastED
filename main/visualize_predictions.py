@@ -259,7 +259,11 @@ def main():
         pred_img = image.copy()
         draw_pred(pred_img, det, raycast_dim)
 
+        img_h = image.shape[0]
         legend = create_legend(200)
+        if img_h > legend.shape[0]:
+            pad = np.zeros((img_h - legend.shape[0], legend.shape[1], 3), dtype=np.uint8)
+            legend = np.vstack([legend, pad])
         legend[10:30, :] = (255, 255, 255)
         cv2.putText(legend, f'Pred: {det.shape[0]}', (10, 45),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
