@@ -253,7 +253,7 @@ def main():
             blob = image.astype(np.float32) / 255.0
             blob = blob.transpose(2, 0, 1)[np.newaxis]
             ort_outs = ort_session.run(None, {'images': blob})
-            det = postprocess(ort_outs[0], None, ort_outs[1],
+            det = postprocess(ort_outs[0][0].T, None, ort_outs[1][0].T,
                               strides, imgsz, args.conf, n_rays=n_rays)
         else:
             import torch
