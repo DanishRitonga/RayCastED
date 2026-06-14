@@ -919,9 +919,10 @@ def _main(args):
     except Exception:
         fused_m = 0.0
 
-    # GFLOPs: static value from training logs (5.52G at 256px).
+    # GFLOPs: scale quadratically with width_multiple from s-scale baseline (5.52G).
     # model_info tracing fails on ultralytics Concat with custom architecture.
-    gflops = 5.52
+    width_m = training_args.get('width_multiple', 1.0)
+    gflops = 5.52 * (width_m ** 2)
 
     # --- Inference time ---
     print('Benchmarking inference time...', flush=True)
