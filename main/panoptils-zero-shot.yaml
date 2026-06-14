@@ -1,0 +1,45 @@
+# PanopTILs — Zero-Shot Generalization Test
+# Binary foreground detection — all classes mapped to fg
+
+global_settings:
+  root_dir: "/home/n207/projects-Danish/RayCastED/raycasted/data/dataset"
+  variant: "s"
+  model: "raycasted/cfg/yolo26s-run28-p234.yaml"
+  n_rays: 64
+  max_size: 256
+  crop_size: 256
+  output_mpp: 0.25
+  patching_overlap_pct: 0
+  annotation_type: "raycast"
+  global_cell_map:
+    "Nuclei": 0
+
+datasets:
+  PanopTILs:
+    root_dir: "PanopTILs"
+    ingestor: csv_poly
+    native_mpp: 0.25
+    split_separation: "physical"
+    split_dirs:
+      train_dir: "BootstrapNucleiManualRegions_TCGA/tcga"
+      val_dir: "ManualNucleiManualRegions"
+    modality_separation: "physical_parallel"
+    modality_dirs:
+      image_dir: "rgbs"
+      mask_dir: "csv"
+    modality_pairing_rule:
+      match_extension: ".csv"
+    csv_column_map:
+      x_coords: "coords_x"
+      y_coords: "coords_y"
+      category: "group"
+    namespace_map:
+      'CancerEpithelium': 'Nuclei'
+      'UnknownOrAmbiguousCell': 'Nuclei'
+      'StromalCellNOS': 'Nuclei'
+      'ActiveStromalCellNOS': 'Nuclei'
+      'TILsCell': 'Nuclei'
+      'ActiveTILsCell': 'Nuclei'
+      'OtherCell': 'Nuclei'
+      'NormalEpithelium': 'Nuclei'
+    tissue_type: "Breast"

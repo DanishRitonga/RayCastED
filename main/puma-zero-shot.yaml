@@ -1,0 +1,45 @@
+# PUMA — Zero-Shot Generalization Test
+#
+# Models: same YOLO26s backbone, trained on PanNuke (n_rays=64)
+# Eval: binary foreground detection (all classes → fg)
+
+global_settings:
+  root_dir: "/home/n207/projects-Danish/RayCastED/raycasted/data/dataset"
+  variant: "s"
+  model: "raycasted/cfg/yolo26s-run28-p234.yaml"
+  n_rays: 64
+  max_size: 256
+  crop_size: 256
+  output_mpp: 0.22
+  patching_overlap_pct: 0
+  annotation_type: "raycast"
+  global_cell_map:
+    "Nuclei": 0
+
+datasets:
+  PUMA:
+    root_dir: "PUMA"
+    ingestor: geojson
+    native_mpp: 0.22
+    split_separation: "filename_regex"
+    split_args:
+      regex: "(training_set)"
+    modality_separation: "physical_parallel"
+    modality_dirs:
+      image_dir: "01_training_dataset_tif_ROIs"
+      mask_dir: "01_training_dataset_geojson_nuclei"
+    modality_pairing_rule:
+      match_extension: ".geojson"
+      add_suffix: "_nuclei"
+    namespace_map:
+      'nuclei_tumor': 'Nuclei'
+      'nuclei_lymphocyte': 'Nuclei'
+      'nuclei_plasma_cell': 'Nuclei'
+      'nuclei_histiocyte': 'Nuclei'
+      'nuclei_melanophage': 'Nuclei'
+      'nuclei_neutrophil': 'Nuclei'
+      'nuclei_stroma': 'Nuclei'
+      'nuclei_endothelium': 'Nuclei'
+      'nuclei_epithelium': 'Nuclei'
+      'nuclei_apoptosis': 'Nuclei'
+    tissue_type: "Melanoma"

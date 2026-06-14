@@ -1,0 +1,36 @@
+# MoNuSAC — Zero-Shot Generalization Test
+# Binary foreground detection — all classes mapped to fg
+
+global_settings:
+  root_dir: "/home/n207/projects-Danish/RayCastED/raycasted/data/dataset"
+  variant: "s"
+  model: "raycasted/cfg/yolo26s-run28-p234.yaml"
+  n_rays: 64
+  max_size: 256
+  crop_size: 256
+  output_mpp: 0.25
+  patching_overlap_pct: 0
+  annotation_type: "raycast"
+  global_cell_map:
+    "Nuclei": 0
+
+datasets:
+  MoNuSAC:
+    root_dir: "MoNuSAC/data"
+    ingestor: parquet
+    native_mpp: 0.25
+    split_separation: "filename_regex"
+    split_args:
+      regex: "(train|test)"
+    modality_separation: "bundled_archive"
+    namespace_map:
+      '0': 'Nuclei'
+      '1': 'Nuclei'
+      '2': 'Nuclei'
+      '3': 'Nuclei'
+      '4': 'Nuclei'
+    tissue_map:
+      '0': 'Breast'
+      '1': 'Kidney'
+      '2': 'Lung'
+      '3': 'Prostate'
