@@ -33,21 +33,8 @@ from raycasted.data.etl.ops.convert import decode_to_vertices
 from raycasted.data.etl.utils.constants import configure_rays
 from raycasted.model.register import register_raycast_head
 
-CLASS_NAMES = ['Neoplastic', 'Inflammatory', 'Connective', 'Dead', 'Epithelial']
-CLASS_COLORS_GT = [
-    (0, 255, 0),
-    (0, 255, 255),
-    (255, 255, 0),
-    (255, 0, 255),
-    (0, 165, 255),
-]
-CLASS_COLORS_PRED = [
-    (0, 200, 0),
-    (0, 200, 200),
-    (200, 200, 0),
-    (200, 0, 200),
-    (0, 130, 200),
-]
+CLASS_COLORS_GT = [(0, 255, 0)]
+CLASS_COLORS_PRED = [(255, 0, 0)]
 
 
 def load_model(weights_path: str, device: torch.device):
@@ -90,13 +77,10 @@ def run_inference(model, images: torch.Tensor, device: torch.device, conf_thresh
 def draw_polygons(
     img: np.ndarray,
     polys: np.ndarray,
-    cls_labels: np.ndarray,
     colors: list[tuple[int, int, int]],
-    confs: np.ndarray | None = None,
     thickness: int = 1,
-    label_prefix: str = '',
 ) -> np.ndarray:
-    """Draw polygon overlays on an image."""
+    """Draw polygon outlines on an image (no labels, no centroids)."""
     if polys.shape[0] == 0:
         return img
 
@@ -106,18 +90,9 @@ def draw_polygons(
     vertices = decode_to_vertices(rays, cx, cy)
 
     for i in range(polys.shape[0]):
-        cls_id = int(cls_labels[i]) if i < len(cls_labels) else 0
-        color = colors[min(cls_id, len(colors) - 1)]
+        color = colors[0]  # single color for all
         pts = vertices[i].astype(np.int32).reshape(-1, 1, 2)
         cv2.polylines(img, [pts], isClosed=True, color=color, thickness=thickness, lineType=cv2.LINE_AA)
-
-        cx_px, cy_px = int(cx[i]), int(cy[i])
-        cv2.circle(img, (cx_px, cy_px), 2, color, -1)
-
-        label = f'{label_prefix}{CLASS_NAMES[min(cls_id, len(CLASS_NAMES) - 1)]}'
-        if confs is not None and i < len(confs):
-            label += f' {confs[i]:.2f}'
-        cv2.putText(img, label, (cx_px + 4, cy_px - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1, cv2.LINE_AA)
 
     return img
 
@@ -270,13 +245,9 @@ def main():
 
             if args.mode == 'overlay':
                 if n_gt > 0:
-                    vis_img = draw_polygons(
-                        vis_img, gt_poly_denorm, gt_cls, CLASS_COLORS_GT, thickness=1, label_prefix='GT '
-                    )
+                    vis_img = draw_polygons(vis_img, gt_poly_denorm, CLASS_COLORS_GT, thickness=1)
                 if n_pred > 0:
-                    vis_img = draw_polygons(
-                        vis_img, pred_poly, pred_cls, CLASS_COLORS_PRED, confs=pred_conf, thickness=2, label_prefix=''
-                    )
+                    vis_img = draw_polygons(vis_img, pred_poly, CLASS_COLORS_PRED, thickness=2)
                 out_path = out_dir / f'{global_idx:04d}_overlay_gt{n_gt}_pred{n_pred}.png'
                 cv2.imwrite(str(out_path), cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
 
@@ -284,13 +255,9 @@ def main():
                 gt_img = vis_img.copy()
                 pred_img = vis_img.copy()
                 if n_gt > 0:
-                    gt_img = draw_polygons(
-                        gt_img, gt_poly_denorm, gt_cls, CLASS_COLORS_GT, thickness=1, label_prefix='GT '
-                    )
+                    gt_img = draw_polygons(gt_img, gt_poly_denorm, CLASS_COLORS_GT, thickness=1)
                 if n_pred > 0:
-                    pred_img = draw_polygons(
-                        pred_img, pred_poly, pred_cls, CLASS_COLORS_PRED, confs=pred_conf, thickness=2, label_prefix=''
-                    )
+                    pred_img = draw_polygons(pred_img, pred_poly, CLASS_COLORS_PRED, thickness=2)
                 combined = np.concatenate([gt_img, pred_img], axis=1)
                 label_h = 20
                 header = np.zeros((label_h, combined.shape[1], 3), dtype=np.uint8)
@@ -310,17 +277,13 @@ def main():
 
             elif args.mode == 'pred_only':
                 if n_pred > 0:
-                    vis_img = draw_polygons(
-                        vis_img, pred_poly, pred_cls, CLASS_COLORS_PRED, confs=pred_conf, thickness=2, label_prefix=''
-                    )
+                    vis_img = draw_polygons(vis_img, pred_poly, CLASS_COLORS_PRED, thickness=2)
                 out_path = out_dir / f'{global_idx:04d}_pred{n_pred}.png'
                 cv2.imwrite(str(out_path), cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
 
             elif args.mode == 'gt_only':
                 if n_gt > 0:
-                    vis_img = draw_polygons(
-                        vis_img, gt_poly_denorm, gt_cls, CLASS_COLORS_GT, thickness=1, label_prefix='GT '
-                    )
+                    vis_img = draw_polygons(vis_img, gt_poly_denorm, CLASS_COLORS_GT, thickness=1)
                 out_path = out_dir / f'{global_idx:04d}_gt{n_gt}.png'
                 cv2.imwrite(str(out_path), cv2.cvtColor(vis_img, cv2.COLOR_RGB2BGR))
 
