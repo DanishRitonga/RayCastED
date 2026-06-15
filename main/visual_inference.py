@@ -118,6 +118,11 @@ def main():
 
     # Tissue-based sampling: pick n-images from each tissue
     if args.tissue:
+        TISSUE_NAMES = [
+            "Adrenal", "BileDuct", "Bladder", "Breast", "Cervix", "Colorectal",
+            "Esophagus", "Head&Neck", "Kidney", "Liver", "Lung", "Ovarian",
+            "Pancreatic", "Prostate", "Skin", "Stomach", "Testis", "Thyroid", "Uterus",
+        ]
         tissue_pools = {}
         for i, path in enumerate(dataset.tile_paths):
             data = dict(np.load(path, allow_pickle=True))
@@ -129,8 +134,10 @@ def main():
             n = min(args.n_images, len(pool))
             chosen = np.random.default_rng(42).choice(pool, n, replace=False)
             indices.extend(chosen)
+            name = TISSUE_NAMES[t] if t < len(TISSUE_NAMES) else f"t{t}"
+            print(f'  {name}: {n}/{len(pool)}')
         indices = sorted(indices)
-        print(f'Tissue: sampled {len(indices)} from {len(tissue_pools)} tissues ({len(dataset)} total)')
+        print(f'Tissue: {len(indices)} from {len(tissue_pools)} tissues ({len(dataset)} total)')
     else:
         indices = list(range(min(args.n_images, len(dataset))))
         print(f'Visualising {len(indices)}/{len(dataset)} images')
@@ -167,14 +174,18 @@ def main():
                 gt_poly = np.zeros((0, raycast_dim), dtype=np.float32)
 
             pred = batch_results[si]
+            tissue_id = int(tile_data.get('tissue', 0))
+
+            tissue_dir = out_dir / f'tissue_{tissue_id:02d}' if args.tissue else out_dir
+            tissue_dir.mkdir(parents=True, exist_ok=True)
 
             # GT
             gt_img = draw_polygons(raw_img.copy(), gt_poly, gt_cls, thickness=1)
-            cv2.imwrite(str(out_dir / f'{idx:04d}_gt.png'), cv2.cvtColor(gt_img, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(str(tissue_dir / f'{idx:04d}_gt.png'), cv2.cvtColor(gt_img, cv2.COLOR_RGB2BGR))
 
             # Pred
             pred_img = draw_polygons(raw_img.copy(), pred['pred_polys'], pred['pred_cls'], thickness=1)
-            cv2.imwrite(str(out_dir / f'{idx:04d}_pred.png'), cv2.cvtColor(pred_img, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(str(tissue_dir / f'{idx:04d}_pred.png'), cv2.cvtColor(pred_img, cv2.COLOR_RGB2BGR))
 
             saved += 1; idx += 1
 
