@@ -1,10 +1,10 @@
 """Ray-count quality analysis: polygon IoU between GT mask and raycast reconstruction.
 
-Loads one PanNuke image, ingests with 8/16/32/64 rays, computes polygon IoU
-between GT binary mask (from contour) and raycast-rasterized mask.
-Saves visualizations as PNG.
+Loads PanNuke images, ingests with 8/16/32/64 rays, computes per-nucleus polygon IoU.
+Saves visualizations as PNG and results as CSV.
 """
 
+import csv
 import io
 from pathlib import Path
 
@@ -144,6 +144,16 @@ def main():
         a = np.array(agg[n_rays])
         print(f"  {n_rays:>3} rays: mean={a.mean():.4f} ± {a.std():.4f}, min={a.min():.4f}, median={np.median(a):.4f}, max={a.max():.4f}")
     print(f"{'='*60}")
+
+    # Save CSV
+    csv_path = OUT_DIR / f"ray_quality_fold{args.fold}_n{n_total}.csv"
+    with open(csv_path, 'w', newline='') as f:
+        w = csv.writer(f)
+        w.writerow(['n_rays', 'nuclei', 'mean', 'std', 'median', 'min', 'max'])
+        for n_rays in RAY_COUNTS:
+            a = np.array(agg[n_rays])
+            w.writerow([n_rays, len(a), f'{a.mean():.4f}', f'{a.std():.4f}', f'{np.median(a):.4f}', f'{a.min():.4f}', f'{a.max():.4f}'])
+    print(f"Saved: {csv_path}")
 
 
 if __name__ == '__main__':
