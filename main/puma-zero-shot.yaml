@@ -4,7 +4,7 @@
 # Eval: binary foreground detection (all classes → fg)
 
 global_settings:
-  root_dir: "/home/n207/projects-Danish/RayCastED/raycasted/data/dataset"
+  root_dir: "/mnt/data/projects/RayCastED/raycasted/data/dataset"
   variant: "s"
   model: "raycasted/cfg/yolo26s-run28-p234.yaml"
   n_rays: 64
