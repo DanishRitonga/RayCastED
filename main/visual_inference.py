@@ -96,6 +96,7 @@ def main():
     parser.add_argument('--conf', type=float, default=0.20)
     parser.add_argument('--n-images', type=int, default=50)
     parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--tissue', action='store_true', help='Sample n-images PER tissue type')
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -114,10 +115,31 @@ def main():
     configure_rays(n_rays)
 
     dataset = RayCastTileDataset(data_dir=str(data_dir), crop_size=crop_size, augment=False)
-    n_total = min(args.n_images, len(dataset))
-    print(f'Visualising {n_total}/{len(dataset)} images')
 
-    dl = DataLoader(dataset, batch_size=args.batch, shuffle=False,
+    # Tissue-based sampling: pick n-images from each tissue
+    if args.tissue:
+        tissue_pools = {}
+        for i, path in enumerate(dataset.tile_paths):
+            data = dict(np.load(path, allow_pickle=True))
+            t = int(data.get('tissue', 0))
+            tissue_pools.setdefault(t, []).append(i)
+        indices = []
+        for t in sorted(tissue_pools):
+            pool = tissue_pools[t]
+            n = min(args.n_images, len(pool))
+            chosen = np.random.default_rng(42).choice(pool, n, replace=False)
+            indices.extend(chosen)
+        indices = sorted(indices)
+        print(f'Tissue: sampled {len(indices)} from {len(tissue_pools)} tissues ({len(dataset)} total)')
+    else:
+        indices = list(range(min(args.n_images, len(dataset))))
+        print(f'Visualising {len(indices)}/{len(dataset)} images')
+
+    n_total = len(indices)
+
+    from torch.utils.data import Subset
+    subset = Subset(dataset, indices)
+    dl = DataLoader(subset, batch_size=args.batch, shuffle=False,
                     num_workers=args.workers, collate_fn=_simple_collate)
 
     saved = 0; idx = 0
@@ -129,7 +151,8 @@ def main():
         for si in range(images.shape[0]):
             if saved >= n_total: break
 
-            tile_data = np.load(dataset.tile_paths[idx])
+            orig_idx = indices[idx]
+            tile_data = np.load(dataset.tile_paths[orig_idx])
             raw_img = tile_data['image']
             if raw_img.ndim == 2:
                 raw_img = np.stack([raw_img]*3, axis=-1)
