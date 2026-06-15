@@ -150,7 +150,7 @@ def main():
             cv2.imwrite(str(out_dir / f'{idx:04d}_gt.png'), cv2.cvtColor(gt_img, cv2.COLOR_RGB2BGR))
 
             # Pred
-            pred_img = draw_polygons(raw_img.copy(), pred['pred_polys'], pred['pred_cls'], thickness=2)
+            pred_img = draw_polygons(raw_img.copy(), pred['pred_polys'], pred['pred_cls'], thickness=1)
             cv2.imwrite(str(out_dir / f'{idx:04d}_pred.png'), cv2.cvtColor(pred_img, cv2.COLOR_RGB2BGR))
 
             saved += 1; idx += 1
