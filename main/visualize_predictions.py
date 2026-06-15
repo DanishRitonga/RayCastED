@@ -187,6 +187,8 @@ def main():
         model = torch.load(args.weights, map_location='cpu', weights_only=False)
         if isinstance(model, dict):
             model = model.get('model') or model.get('ema') or model
+        if hasattr(model, 'float'):
+            model = model.float()
         model.eval()
         head = model.model[-1]
         n_rays = head.n_rays
@@ -259,6 +261,7 @@ def main():
             import torch
 
             tensor = torch.from_numpy(image.transpose(2, 0, 1)).float().unsqueeze(0) / 255.0
+            tensor = tensor.to(next(model.parameters()).device)
             with torch.no_grad():
                 det = model(tensor)[0]
             if det is None or len(det) == 0:
