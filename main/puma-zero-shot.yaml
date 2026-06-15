@@ -15,6 +15,8 @@ global_settings:
   annotation_type: "raycast"
   global_cell_map:
     "Nuclei": 0
+  global_tissue_map:
+    "Melanoma": 0
 
 datasets:
   PUMA:

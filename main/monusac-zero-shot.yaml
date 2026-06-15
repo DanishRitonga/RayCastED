@@ -13,6 +13,11 @@ global_settings:
   annotation_type: "raycast"
   global_cell_map:
     "Nuclei": 0
+  global_tissue_map:
+    "Breast": 0
+    "Kidney": 1
+    "Lung": 2
+    "Prostate": 3
 
 datasets:
   MoNuSAC:
