@@ -268,6 +268,10 @@ def main():
                 det = np.zeros((0, raycast_dim + 2), dtype=np.float32)
             elif hasattr(det, 'cpu'):
                 det = det.cpu().numpy()
+            if det.ndim == 3:
+                det = det.squeeze(0)
+            if det.ndim == 1 and det.shape[0] > 0:
+                det = det.reshape(-1, det.shape[0])
 
         elapsed = (time.perf_counter() - t0) * 1000
 
