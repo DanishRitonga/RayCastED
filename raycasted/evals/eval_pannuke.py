@@ -12,13 +12,13 @@ to match LSP-DETR exactly.
 
 Usage:
     # With pre-transformed test tiles
-    uv run python -m raycasted.scripts.eval_pannuke \
+    uv run python -m raycasted.evals.eval_pannuke \
         --weights train4/weights/best.pt \
         --data-dir output/pannuke/transformed/test \
         --batch 16 --device 0
 
     # Auto-transform from config
-    uv run python -m raycasted.scripts.eval_pannuke \
+    uv run python -m raycasted.evals.eval_pannuke \
         --config main/pannuke.yaml \
         --output output/pannuke \
         --weights train4/weights/best.pt \
@@ -43,7 +43,7 @@ from raycasted.model.metrics import (
     resolve_mask_overlaps,
 )
 from raycasted.model.register import register_raycast_head
-from raycasted.scripts.eval_polygon import compute_polygon_metrics_streaming
+from raycasted.evals.eval_polygon import compute_polygon_metrics_streaming
 
 
 def _polygons_to_masks_fast(detections: np.ndarray, img_h: int, img_w: int) -> list[np.ndarray]:

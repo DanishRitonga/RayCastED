@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.data.etl.utils import constants as _const
-from raycasted.scripts.eval_pannuke import load_model, run_inference, _simple_collate
+from raycasted.evals.eval_pannuke import load_model, run_inference, _simple_collate
 
 
 def main():
@@ -58,7 +58,7 @@ def main():
         r['pred_cls'] = np.zeros(len(r['pred_cls']), dtype=int)
         r['gt_cls'] = np.zeros(len(r['gt_cls']), dtype=int)
 
-    from raycasted.scripts.eval_pannuke import compute_metrics_streaming
+    from raycasted.evals.eval_pannuke import compute_metrics_streaming
 
     metrics = compute_metrics_streaming(results, num_classes=1)
     f12 = metrics['centroid']

@@ -41,7 +41,7 @@ bash clean_cache.sh
 - `raycasted/model/loss.py` — RayCastDetectionLoss + RayCastE2ELoss (dual assignment)
 - `raycasted/model/tal.py` — RayCastAssigner (greedy TAL) + HungarianRayCastAssigner (unused)
 - `raycasted/data/etl/utils/constants.py` — N_RAYS, ANGLE, RAY_COS/SIN state (module-level, late-binding)
-- `raycasted/scripts/eval_pannuke.py` — streaming eval (AJI, bPQ, mPQ, AP, F1)
+- `raycasted/evals/eval_pannuke.py` — streaming eval (AJI, bPQ, mPQ, AP, F1)
 
 **Execution flow:**
 ```
@@ -166,7 +166,7 @@ When adding a new config parameter:
 
 ### Eval Script
 
-26. **`raycasted/scripts/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
+26. **`raycasted/evals/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
 
 27. **Eval must call `configure_rays(n_rays)` before rasterization**: `_polygons_to_masks_fast` uses `_const.RAY_COS`/`_const.RAY_SIN` (late-binding module attributes).
 

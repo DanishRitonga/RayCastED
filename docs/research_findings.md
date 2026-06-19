@@ -243,7 +243,7 @@ nn.Conv2d(c3, nc, 1)
 
 **What it does:** Uses Euclidean Distance Transform (EDT) to resolve overlapping instance masks. Each overlapping pixel assigned to instance with highest EDT value (closest to center). More principled than area-based priority.
 
-**Implementation:** Add as post-rasterization step in `raycasted/scripts/eval_pannuke.py`. Low effort (scipy.ndimage.distance_transform_edt).
+**Implementation:** Add as post-rasterization step in `raycasted/evals/eval_pannuke.py`. Low effort (scipy.ndimage.distance_transform_edt).
 
 ---
 

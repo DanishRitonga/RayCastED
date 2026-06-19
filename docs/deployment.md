@@ -85,7 +85,7 @@ print('Engine built')
 ### Desktop (full test set)
 
 ```bash
-uv run python -m raycasted.scripts.eval_onnx \
+uv run python -m raycasted.evals.eval_onnx \
     --engine export/raycast_model.engine \
     --meta export/raycast_model.meta.json \
     --data-dir /path/to/test_tiles \
@@ -98,7 +98,7 @@ inference time.
 ### Jetson Orin Nano
 
 ```bash
-uv run --no-sync python -m raycasted.scripts.eval_jetson \
+uv run --no-sync python -m raycasted.evals.eval_jetson \
     --engine ./onnx/v1.engine \
     --meta ./onnx/v1.meta.json \
     --data-dir /path/to/test_tiles \
@@ -113,15 +113,15 @@ scipy, opencv-python, pycuda, and system tensorrt. Uses the same
 
 ```bash
 # PyTorch (desktop)
-uv run python -m raycasted.scripts.visualize_predictions --weights docs/runs/v1.1/best.pt \
+uv run python -m raycasted.evals.visualize_predictions --weights docs/runs/v1.1/best.pt \
     --data-dir output/visualTest --conf 0.49
 
 # ONNX Runtime (any platform)
-uv run python -m raycasted.scripts.visualize_predictions --onnx export/raycast_model.onnx \
+uv run python -m raycasted.evals.visualize_predictions --onnx export/raycast_model.onnx \
     --meta export/raycast_model.meta.json --data-dir output/visualTest --conf 0.49
 
 # TensorRT (desktop or Jetson)
-uv run python -m raycasted.scripts.visualize_predictions --engine export/raycast_model.engine \
+uv run python -m raycasted.evals.visualize_predictions --engine export/raycast_model.engine \
     --meta export/raycast_model.meta.json --data-dir output/visualTest --conf 0.49
 ```
 

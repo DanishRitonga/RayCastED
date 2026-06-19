@@ -5,11 +5,11 @@ Works on both x86 (ONNX Runtime) and Jetson (TensorRT).
 
 Usage:
     # On x86 — validate ONNX export
-    python -m raycasted.scripts.eval_onnx --onnx export/model.onnx --meta export/model.meta.json
+    python -m raycasted.evals.eval_onnx --onnx export/model.onnx --meta export/model.meta.json
         --data-dir output/pannuke_64/transformed/test --conf 0.5
 
     # On Jetson — TensorRT engine
-    python -m raycasted.scripts.eval_onnx --engine export/model.engine --meta export/model.meta.json
+    python -m raycasted.evals.eval_onnx --engine export/model.engine --meta export/model.meta.json
         --data-dir output/pannuke_64/transformed/test --conf 0.5
 """
 
@@ -254,7 +254,7 @@ def main():
     print(f'  Predictions: {n_pred_total}, GT: {n_gt_total}')
 
     # Metrics (reuse eval_pannuke.py streaming)
-    from raycasted.scripts.eval_pannuke import compute_metrics_streaming, _diagnose_recall
+    from raycasted.evals.eval_pannuke import compute_metrics_streaming, _diagnose_recall
 
     print('Computing metrics...')
     metrics = compute_metrics_streaming(results, num_classes=nc)

@@ -5,11 +5,11 @@ Works with both PyTorch (desktop) and TensorRT (Jetson).
 
 USAGE:
   # Desktop (PyTorch)
-  uv run python -m raycasted.scripts.visualize_predictions \
+  uv run python -m raycasted.evals.visualize_predictions \
       --weights docs/runs/v1.1/best.pt --data-dir output/visualTest --conf 0.5
 
   # Jetson (TensorRT)
-  uv run python -m raycasted.scripts.visualize_predictions \
+  uv run python -m raycasted.evals.visualize_predictions \
       --engine ./onnx/v1.engine --meta ./onnx/v1.meta.json \
       --data-dir output/visualTest --conf 0.5
 """

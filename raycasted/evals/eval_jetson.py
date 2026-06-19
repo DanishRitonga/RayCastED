@@ -11,7 +11,7 @@ DEPENDENCIES (pip install):
   - opencv-python (mask rasterization)
 
 USAGE:
-  python -m raycasted.scripts.eval_jetson \
+  python -m raycasted.evals.eval_jetson \
       --engine raycasted.256.engine \
       --meta raycasted.256.meta.json \
       --data-dir output/pannuke_64/transformed/test \
