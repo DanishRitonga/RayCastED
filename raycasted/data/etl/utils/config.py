@@ -159,35 +159,12 @@ class TrainingSettings(BaseModel):
     aux_xy_weight: float = 0.0  # Huber loss weight (0 = disabled, 10.0 = recommended)
     aux_xy_ramp_epochs: int = 100  # epochs over which aux weight decays
 
-    # Prediction-level self-attention on top-K scored predictions (o2o branch only).
-    # After FCN scores all 5376 anchors, top-K=100 by confidence are selected.
-    # These K predictions (mostly fg) undergo TransformerEncoder self-attention,
-    # producing per-prediction suppression weights. Fundamentally different from
-    # feature-level attention (train31/32/34 dead ends) which operated on 5376
-    # bg-dominated anchor features.
-    prediction_refinement_weight: float = 0.0  # BCE loss weight (0 = disabled, 1.0 = recommended)
-    prediction_refinement_topk: int = 100  # number of top predictions to refine
-
     # Knowledge distillation: o2m cls heads → o2o cls heads.
     # BCE loss between detached o2m sigmoid probs and o2o logits on ALL anchors.
     # Fixes gradient starvation: o2o cls sees ~28 fg with bg_fg_ratio_o2o=0
     # vs o2m's 420 fg (15x). Self-distillation gives o2o the full 5376-anchor
     # soft signal from a richer head without changing 1:1 assignment.
     o2o_distill_weight: float = 0.0  # 0=disabled, 0.5=recommended
-
-    # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band for overlaps.
-    # loss = max(r_gt*(1-eps) - r_pred, 0) + max(r_pred - r_gt*(1+eps), 0)
-    # Zero if prediction falls within [r_gt*(1-eps), r_gt*(1+eps)].
-    # r_max extends to infinity in overlap regions (natural overlap handling).
-    # Supplements pIoU (kept for assignment metric). 0 = disabled.
-    range_l1_weight: float = 0.0
-    range_l1_eps: float = 0.1  # tolerance fraction (0.1 = ±10% of r_gt)
-
-    # Asymmetric max() bound loss (LSP-DETR criterion.py:16-27):
-    # loss = max(relu(r_gt*(1-eps) - r_pred), relu(r_pred - r_gt*(1+eps)))
-    # Takes worst violation per ray instead of summing. 0 = disabled.
-    bound_l1_weight: float = 0.0
-    bound_l1_eps: float = 0.1  # tolerance fraction (0.1 = ±10% of r_gt)
 
     # Inter-scale competition: softmax across scales to suppress cross-scale duplicates.
     # Upsamples P3/P4 cls to P2 resolution, stacks, softmax across scale dim,

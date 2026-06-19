@@ -170,5 +170,5 @@ The assigner just needs to trust it.
 - **NWD** (t78): Smoother than pIoU — two anchors 4px apart on 4px nucleus both get NWD>0.8, assigner can't pick winner. pIoU's sharper cliff creates genuine competition.
 - **Suppress loss** (t24): O(N²) pairwise repulsion too aggressive for dense nuclei. Inter-scale softmax (§2) handles this better.
 - **2-stage threshold** (t72): Binary gate is no-op with 28.6x fg/bg gap. Product inference is equivalent and simpler.
-- **PredictionRefinementAttention**: Implemented but never trained (prediction_refinement_weight=0.0).
+- **PredictionRefinementAttention**: Removed in cleanup. Implemented but never trained successfully.
 - See `docs/effective_techniques.md` for the full list of dead ends.

@@ -61,7 +61,7 @@ Collated batch adds leading `batch_idx`: `(sum_M, 2+R+2)`. Normalisation (divide
 - `raycasted/data/etl/ops/` — single source of truth for ALL geometry (PyTorch variants use lazy imports)
 - `raycasted/data/etl/utils/constants.py` — angular convention, format indices (`RAY_START_IDX`, etc.)
 - `raycasted/model/blocks/head.py` — `RayCastDetect` head (subclasses `Detect`, replaces bbox with raycast)
-- `raycasted/model/loss.py` — `RayCastE2ELoss` (5-term polygon loss: xy/cls/L1/piou/smooth + aux_xy)
+- `raycasted/model/loss.py` — `RayCastE2ELoss` (5-term polygon loss: xy/cls/L1/piou/smooth + distill + aux_xy)
 - `raycasted/model/tal.py` — `RayCastAssigner` (Polar-IoU matching) + `HungarianRayCastAssigner` (one2one)
 - `raycasted/model/train.py` — `RayCastTrainer` (subclasses `DetectionTrainer`)
 - `raycasted/model/builder.py` — `raycasted_parse_model()` (custom YAML parser for ResoConv, C3k2_LK blocks)

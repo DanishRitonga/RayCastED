@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 #  GradNorm — Gradient Normalisation for Multi-Task Loss Balancing
 # ──────────────────────────────────────────────────────────────────────
 
-_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth', 'range_l1', 'bound_l1')
+_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth')
 
 
 class GradNormManager:
@@ -336,10 +336,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         class_weights: torch.Tensor | None = None,
         lambda_cls: float = 2.0,
         lambda_xy: float = 500.0,
-        range_l1_weight: float = 0.0,
-        range_l1_eps: float = 0.1,
-        bound_l1_weight: float = 0.0,
-        bound_l1_eps: float = 0.1,
         hierarchical_cls: bool = False,
         nc_override: int | None = None,
         nwd_enabled: bool = False,
@@ -417,18 +413,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.bg_fg_ratio = bg_fg_ratio
         self.ohem_bg_ratio = ohem_bg_ratio
 
-        # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band
-        self.range_l1_weight = range_l1_weight
-        self.range_l1_eps = range_l1_eps
-
-        # Asymmetric max() bound loss (LSP-DETR criterion.py:16-27): per-ray
-        # tolerance band where loss = max(relu(min-pred), relu(pred-max)).
-        # Unlike range_l1 which sums violations, this takes the WORST violation
-        # per ray — one badly-predicted ray produces full penalty regardless of
-        # how good the others are. Zero inside [r_gt*(1-eps), r_gt*(1+eps)].
-        self.bound_l1_weight = bound_l1_weight
-        self.bound_l1_eps = bound_l1_eps
-
     def preprocess(self, targets, batch_size, scale_tensor=None):
         """Preprocess polygon targets.
 
@@ -481,7 +465,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         Returns:
             (assignment_info, loss_5vec, loss_detach)
         """
-        loss = torch.zeros(8, device=self.device)  # [xy, cls, L1, piou, smooth, suppress, range_l1, bound_l1]
+        loss = torch.zeros(5, device=self.device)  # [xy, cls, L1, piou, smooth]
 
         # --- Prediction parsing ---
         pred_distri = preds['boxes'].permute(0, 2, 1).contiguous()  # [B, N, raycast_dim]
@@ -753,39 +737,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
             if fg_plb is not None:
                 smooth_loss = smooth_loss * fg_plb
             loss[4] = smooth_loss.sum() / n_fg
-
-            # L_range_l1: Range-based L1 loss (LSP-DETR-inspired)
-            # Per-ray tolerance band: loss = max(r_gt*(1-eps) - r_pred, 0)
-            #                            + max(r_pred - r_gt*(1+eps), 0)
-            # Zero if prediction falls within [r_gt*(1-eps), r_gt*(1+eps)].
-            # Naturally handles overlapping nuclei — upper bound extends for
-            # rays that project into overlap regions (future: compute r_max
-            # from mask geometry; current: symmetric tolerance band).
-            if self.range_l1_weight > 0:
-                r_min = fg_target_rays * (1.0 - self.range_l1_eps)
-                r_max = fg_target_rays * (1.0 + self.range_l1_eps)
-                under_pred = F.relu(r_min - fg_pred_rays)
-                over_pred = F.relu(fg_pred_rays - r_max)
-                range_loss = (under_pred + over_pred).mean(-1)
-                if fg_plb is not None:
-                    range_loss = range_loss * fg_plb
-                loss[6] = range_loss.sum() / n_fg
-
-            # L_bound_l1: Asymmetric max() bound loss (LSP-DETR criterion.py:16-27)
-            # Per-ray tolerance band with max() instead of sum():
-            #   loss = max(relu(r_gt*(1-eps) - r_pred), relu(r_pred - r_gt*(1+eps)))
-            # Takes worst violation per ray — one badly-predicted ray produces
-            # full penalty regardless of how good the other rays are.
-            # Zero inside [r_gt*(1-eps), r_gt*(1+eps)].
-            if self.bound_l1_weight > 0:
-                r_min = fg_target_rays * (1.0 - self.bound_l1_eps)
-                r_max = fg_target_rays * (1.0 + self.bound_l1_eps)
-                under_pred = F.relu(r_min - fg_pred_rays)
-                over_pred = F.relu(fg_pred_rays - r_max)
-                bound_loss = torch.max(under_pred, over_pred).mean(-1)
-                if fg_plb is not None:
-                    bound_loss = bound_loss * fg_plb
-                loss[7] = bound_loss.sum() / n_fg
         else:
             self._fg_piou = None
             self._fg_mask = None
@@ -796,8 +747,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[2] += (pred_rays * 0).sum()
             loss[3] += (pred_rays * 0).sum()
             loss[4] += (pred_rays * 0).sum()
-            loss[5] += (pred_xy * 0).sum()
-            loss[7] += (pred_rays * 0).sum()
 
         # --- Diagnostic: log raw (unweighted) losses + fg count every 100 steps ---
         _branch = getattr(self, 'branch_name', '???')
@@ -831,8 +780,8 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # --- Apply loss weights ---
         # If GradNorm is active, use its dynamic weights; otherwise use static lambdas.
         if self.gradnorm_manager is not None and self.gradnorm_manager.enabled:
-            w = self.gradnorm_manager.get_weights()  # [5] or [6] or [7]
-            for i in range(min(len(w), 7)):
+            w = self.gradnorm_manager.get_weights()  # [5]
+            for i in range(min(len(w), 5)):
                 loss[i] *= w[i]
         else:
             loss[0] *= self.lambda_xy
@@ -840,8 +789,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
             loss[2] *= self.lambda_l1
             loss[3] *= self.lambda_piou
             loss[4] *= self.lambda_smooth
-            loss[6] *= self.range_l1_weight
-            loss[7] *= self.bound_l1_weight
 
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
@@ -915,11 +862,6 @@ class RayCastE2ELoss(E2ELoss):
         fg_cls_quality_scale: float = 0.0,
         fg_cls_quality_scale_o2o: float | None = None,
         steps_per_epoch: int = 0,
-        prediction_refinement_weight: float = 0.0,
-        range_l1_weight: float = 0.0,
-        range_l1_eps: float = 0.1,
-        bound_l1_weight: float = 0.0,
-        bound_l1_eps: float = 0.1,
         hierarchical_cls: bool = False,
         nc_override: int | None = None,
         nwd_enabled: bool = False,
@@ -962,10 +904,6 @@ class RayCastE2ELoss(E2ELoss):
             lambda_cls=lambda_cls,
             lambda_xy=lambda_xy,
             fg_cls_quality_scale=fg_cls_quality_scale,
-            range_l1_weight=range_l1_weight,
-            range_l1_eps=range_l1_eps,
-            bound_l1_weight=bound_l1_weight,
-            bound_l1_eps=bound_l1_eps,
             hierarchical_cls=hierarchical_cls,
             nc_override=nc_override,
             nwd_enabled=nwd_enabled,
@@ -1093,9 +1031,6 @@ class RayCastE2ELoss(E2ELoss):
         self.aux_xy_lambda = lambda_aux_xy
         self._max_epochs = max_epochs
         self.aux_xy_decay_epoch = max(1, aux_xy_ramp_epochs)
-
-        # Prediction refinement weight: BCE loss for inter-prediction attention (0 = disabled)
-        self._prediction_refinement_weight = prediction_refinement_weight
 
         # O2M→O2O knowledge distillation: BCE between detached o2m sigmoid probs
         # and o2o logits on all anchors. Fixes gradient starvation in o2o cls.
@@ -1262,76 +1197,6 @@ class RayCastE2ELoss(E2ELoss):
             else:
                 loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
         else:
-            loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
-
-        # Prediction refinement loss: BCE on attention output for top-K predictions
-        # Target: 1.0 for best anchor per GT among the top-K, 0.0 for duplicates.
-        # The attention module sees only top-K=100 predictions (mostly fg) so
-        # inter-prediction competition is meaningful — unlike feature-level attention
-        # (train31/32/34) which operated on 5376 bg-dominated anchor features.
-        has_refine = (
-            self._prediction_refinement_weight > 0
-            and 'refine_raw' in one2one_preds
-            and hasattr(self.one2one, '_fg_mask')
-            and self.one2one._fg_mask is not None
-        )
-        if has_refine:
-            refine_raw = one2one_preds['refine_raw']  # [B, K, 1]
-            topk_idx = one2one_preds['refine_topk_idx']  # [B, K]
-            fg_mask = self.one2one._fg_mask  # [B, N]
-            fg_quality = self.one2one._fg_quality if hasattr(self.one2one, '_fg_quality') else None
-            target_gt_idx = self.one2one._target_gt_idx  # [B, N]
-            bs, K, _ = refine_raw.shape
-            n_fg = max(fg_mask.sum(), 1)
-
-            refine_target = torch.zeros(bs, K, 1, device=refine_raw.device, dtype=refine_raw.dtype)
-            if fg_quality is not None and fg_mask.any():
-                fg_idx = fg_mask.nonzero(as_tuple=False)
-                batch_idx = fg_idx[:, 0]
-                anchor_idx = fg_idx[:, 1]
-                assigned_gt = target_gt_idx[batch_idx, anchor_idx].clamp(min=0)
-                fg_qual_max = fg_quality[batch_idx, anchor_idx].max(dim=-1).values
-
-                n_gt_max = target_gt_idx.shape[1]
-                composite = batch_idx * n_gt_max + assigned_gt
-                sort_order = fg_qual_max.argsort(descending=True)
-                sorted_composite = composite[sort_order]
-                sorted_anchor = anchor_idx[sort_order]
-
-                n_groups = fg_mask.shape[0] * n_gt_max
-                best_anchor = torch.full((n_groups,), -1, dtype=torch.long, device=refine_raw.device)
-                best_anchor.scatter_(0, sorted_composite, sorted_anchor)
-
-                valid = best_anchor >= 0
-                valid_groups = valid.nonzero(as_tuple=False).squeeze(-1)
-                valid_batch = valid_groups // n_gt_max
-                valid_anchors = best_anchor[valid_groups]
-
-                # Vectorized mapping: for each (batch, anchor), find if it appears in topk_idx
-                # Create a mask: for each batch, which topk positions correspond to best anchors
-                for b in range(bs):
-                    best_in_b = valid_anchors[valid_batch == b]
-                    if best_in_b.numel() == 0:
-                        continue
-                    # topk_idx[b] is [K], best_in_b is the set of best anchor indices
-                    is_best = (topk_idx[b].unsqueeze(0) == best_in_b.unsqueeze(1)).any(dim=0)  # [K]
-                    refine_target[b, is_best, 0] = 1.0
-
-            refine_loss = F.binary_cross_entropy_with_logits(refine_raw, refine_target, reduction='none')
-            topk_fg_mask = torch.zeros(bs, K, 1, device=refine_raw.device, dtype=torch.bool)
-            for b in range(bs):
-                fg_anchors_b = fg_mask[b].nonzero(as_tuple=False).squeeze(-1)
-                if fg_anchors_b.numel() == 0:
-                    continue
-                # topk_idx[b] is [K], check which topk positions are fg anchors
-                is_fg = (topk_idx[b].unsqueeze(0) == fg_anchors_b.unsqueeze(1)).any(dim=0)
-                topk_fg_mask[b, is_fg, 0] = True
-
-            n_topk_fg = max(topk_fg_mask.sum(), 1)
-            refine_loss = (refine_loss * topk_fg_mask.float()).sum() / n_topk_fg * self._prediction_refinement_weight
-            total_loss = torch.cat([total_loss, refine_loss.unsqueeze(0)])
-            loss_detach = torch.cat([loss_detach, refine_loss.detach().unsqueeze(0)])
-        elif self._prediction_refinement_weight > 0:
             loss_detach = torch.cat([loss_detach, torch.zeros(1, device=loss_detach.device)])
 
         return total_loss, loss_detach

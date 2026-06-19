@@ -111,15 +111,6 @@ training:
   aux_xy_weight: 10.0           # Huber loss weight for aux xy predictions
   aux_xy_ramp_epochs: 100       # epoch at which aux xy weight begins linear decay to zero
 
-  # Prediction-level self-attention on top-K scored predictions (o2o branch only).
-  # After FCN scores all 5376 anchors, top-K=100 by confidence are selected.
-  # These K predictions (mostly fg) undergo TransformerEncoder self-attention,
-  # producing per-prediction suppression weights. Fundamentally different from
-  # feature-level attention (train31/32/34 dead ends) which operated on 5376
-  # bg-dominated anchor features.
-  prediction_refinement_weight: 0.0  # disabled for topk2 ablation (train38)
-  prediction_refinement_topk: 100    # number of top predictions to refine
-
   # Knowledge distillation: o2m cls heads → o2o cls heads.
   # BCE loss between detached o2m sigmoid probs and o2o logits on ALL anchors.
   o2o_distill_weight: 0.5           # 0=disabled, 0.5=recommended start
@@ -128,13 +119,6 @@ training:
   # boundary via Cramer's rule instead of using precomputed static GT rays.
   # Couples centroid and ray gradients: ∂L/∂centroid ≠ 0 through chain rule.
   analytical_rays: true
-
-  # Range-based L1 loss (LSP-DETR-inspired): per-ray tolerance band for overlaps.
-  # loss = max(r_gt*(1-eps) - r_pred, 0) + max(r_pred - r_gt*(1+eps), 0)
-  # Zero if prediction falls within [r_gt*(1-eps), r_gt*(1+eps)].
-  # Supplements pIoU (kept for assignment metric). 0 = disabled.
-  range_l1_weight: 0.0              # weight for range-based L1 loss (0 = disabled)
-  range_l1_eps: 0.1                 # tolerance fraction (0.1 = ±10% of r_gt)
 
   # Inter-scale competition: softmax across scales to suppress cross-scale duplicates.
   # At inference: upsample P3/P4 cls to P2 resolution, stack, softmax across scale dim,
@@ -230,12 +214,6 @@ training:
 
   # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
   clip_grad: 10.0
-
-  # Asymmetric max() bound loss (LSP-DETR criterion.py:16-27):
-  # loss = max(relu(r_gt*(1-eps) - r_pred), relu(r_pred - r_gt*(1+eps)))
-  # Takes worst violation per ray. Zero inside tolerance band.
-  bound_l1_weight: 0.0     # weight for asymmetric bound loss (0 = disabled)
-  bound_l1_eps: 0.1         # tolerance fraction (0.1 = ±10% of r_gt)
 
 datasets:
   PanNuke:
