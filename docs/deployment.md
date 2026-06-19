@@ -12,6 +12,10 @@ with TensorRT for accelerated inference.
 ## Step 1: Export to ONNX
 
 ```bash
+# Using the shell script (recommended)
+bash raycasted/export/export_onnx.sh --weights docs/runs/v1.1/best.pt --validate
+
+# Or directly with uv
 uv run python -m raycasted.export.onnx_export \
     --weights docs/runs/v1.1/best.pt \
     --output export/raycast_model.onnx \
