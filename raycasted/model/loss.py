@@ -990,7 +990,6 @@ class RayCastE2ELoss(E2ELoss):
             self.one2one.focal_alpha = focal_alpha_o2o
         if bg_fg_ratio_o2o is not None:
             self.one2one.bg_fg_ratio = bg_fg_ratio_o2o
-        self._bg_fg_ratio_o2o_target = bg_fg_ratio_o2o if bg_fg_ratio_o2o is not None else 0
         if ohem_bg_ratio_o2o is not None:
             self.one2one.ohem_bg_ratio = ohem_bg_ratio_o2o
         if bg_cls_decay_o2o is not None:
@@ -1053,9 +1052,6 @@ class RayCastE2ELoss(E2ELoss):
         )
         assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
             f'E2E violation: one2many topk={self.one2many.assigner.topk} != topk2={self.one2many.assigner.topk2}'
-        )
-        assert self.one2many.assigner.topk2 == self.one2many.assigner.topk, (
-            f'E2E violation: one2many.topk2 ({self.one2many.assigner.topk2}) != topk ({self.one2many.assigner.topk})'
         )
 
         # Steps per epoch (for epoch estimation in update() and o2m/o2o decay)

@@ -171,13 +171,15 @@ training:
   lambda_l1: 14.0               # L1 ray distance weight
   lambda_piou: 3.0              # Polar IoU weight — minimal: let analytical L1 dominate shape
 
-  # Sigma annealing: DISABLED — train13 didn't use this, re-evaluate later
-  sigma_anneal_start: 0         # 0 = disabled (use assigner_radius_scale)
+  # Sigma annealing: DISABLED. sigma_anneal_start=0 falls back to assigner_radius_scale.
+  # To enable: set sigma_anneal_start > 0 (different from end).
+  sigma_anneal_start: 0
   sigma_anneal_end: 0.5
   sigma_anneal_epoch: 200
 
-  # STAL: DISABLED — NWD handles small nuclei assignment smoothly without forcing poor anchors
-  stal_min_positives: 3         # STAL + bias init — force min positives + unidirectional ray gradient (train79)
+  # STAL (force minimum positives per GT). Disabled by setting stal_min_positives=0.
+  # Current value of 3 ENABLES STAL — used to combat early-training fg starvation.
+  stal_min_positives: 3
 
   # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
   gradnorm: false

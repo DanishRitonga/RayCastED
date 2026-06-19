@@ -170,14 +170,12 @@ class RayCastAssigner(TaskAlignedAssigner):
         self.radius_scale = radius_scale
         self.align_threshold = align_threshold
         self.stal_min_positives = 0  # set by RayCastE2ELoss if enabled
-        self.stal_backfill_mode = 'distance'  # "distance" or "distance_cls"
         # Number of nearest anchors to prefilter for PolarIoU / NWD.
         # Must be > topk for proper ranking. Default: max(topk*5, 100).
         self.prefilter_k = prefilter_k if prefilter_k > 0 else max(topk * 5, 100)
         self.use_nwd = use_nwd
         self.nwd_c = nwd_c
         self.use_cls_only = False  # set externally if cls-only TAL is enabled
-        self.cls_only_blend = 1.0  # 0=pIoU-only, 1=cls-only. Annealed by loss
 
     # -----------------------------------------------------------------
     # Shared helper: per-GT radius computation
@@ -266,32 +264,17 @@ class RayCastAssigner(TaskAlignedAssigner):
             k_prefilt = topk_idx.shape[-1]
 
             if self.use_cls_only:
-                if self.cls_only_blend >= 1.0:
-                    overlaps.scatter_(
-                        2,
-                        topk_idx,
-                        torch.ones(
-                            self.bs,
-                            self.n_max_boxes,
-                            k_prefilt,
-                            dtype=overlaps.dtype,
-                            device=overlaps.device,
-                        ),
-                    )
-                else:
-                    n_rays = pd_bboxes.shape[-1] - 2
-                    bs_idx = torch.arange(self.bs, device=topk_idx.device)
-                    bs_idx = bs_idx.view(-1, 1, 1).expand(-1, self.n_max_boxes, k_prefilt)
-                    pd_block = pd_bboxes[bs_idx, topk_idx, 2:]
-                    gt_rays = gt_bboxes[:, :, 2:].unsqueeze(2).expand(-1, -1, k_prefilt, -1)
-                    from raycasted.data.etl.ops.iou import polar_iou_torch
-
-                    iou_block = polar_iou_torch(pd_block.reshape(-1, n_rays), gt_rays.reshape(-1, n_rays)).reshape(
-                        self.bs, self.n_max_boxes, k_prefilt
-                    )
-                    blend = self.cls_only_blend
-                    blended = (1.0 - blend) * iou_block + blend
-                    overlaps.scatter_(2, topk_idx, blended.to(overlaps.dtype))
+                overlaps.scatter_(
+                    2,
+                    topk_idx,
+                    torch.ones(
+                        self.bs,
+                        self.n_max_boxes,
+                        k_prefilt,
+                        dtype=overlaps.dtype,
+                        device=overlaps.device,
+                    ),
+                )
             else:
                 n_rays = pd_bboxes.shape[-1] - 2
                 bs_idx = torch.arange(self.bs, device=topk_idx.device)
@@ -375,16 +358,8 @@ class RayCastAssigner(TaskAlignedAssigner):
             valid_gt = mask_gt.any(dim=-1)  # [bs, n_max_boxes]
             missing = (pos_per_gt < self.stal_min_positives) & valid_gt
             if missing.any():
-                if self.stal_backfill_mode == 'distance_cls':
-                    distances = torch.cdist(gt_bboxes[:, :, :2].float(), anc_points.float())
-                    dist_normalized = distances / (distances.max(dim=-1, keepdim=True).values.clamp(min=1e-6))
-                    cls_per_anchor = pd_scores.max(dim=-1).values  # [B, N]
-                    cls_cost = 1.0 - cls_per_anchor.unsqueeze(1)  # [B, 1, N]
-                    combined_cost = dist_normalized * cls_cost  # [B, n_max_boxes, N]
-                    nearest_idx = combined_cost.min(dim=-1).indices  # [B, n_max_boxes]
-                else:
-                    distances = torch.cdist(gt_bboxes[:, :, :2].float(), anc_points.float())
-                    _, nearest_idx = distances.min(dim=-1)  # [bs, n_max_boxes]
+                distances = torch.cdist(gt_bboxes[:, :, :2].float(), anc_points.float())
+                _, nearest_idx = distances.min(dim=-1)  # [bs, n_max_boxes]
                 for b in range(self.bs):
                     missing_gts = missing[b].nonzero(as_tuple=True)[0]
                     for g in missing_gts:

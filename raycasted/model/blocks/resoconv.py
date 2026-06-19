@@ -109,32 +109,6 @@ def _create_wavelet_filters(
     return filters, pad
 
 
-class SE(nn.Module):
-    """Squeeze-and-Excitation block using AdaptiveAvgPool2d.
-
-    Image-size agnostic: global avg pool reduces any (H,W) to (1,1) before FC layers.
-
-    Args:
-        channels: Number of input/output channels.
-        reduction: Channel reduction ratio for the bottleneck.
-    """
-
-    def __init__(self, channels: int, reduction: int = 4):
-        super().__init__()
-        mid = max(channels // reduction, 1)
-        self.pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Conv2d(channels, mid, 1, bias=False),
-            nn.SiLU(inplace=True),
-            nn.Conv2d(mid, channels, 1, bias=False),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply channel attention: x * sigmoid(fc(avg_pool(x)))."""  # noqa: D401
-        return x * self.fc(self.pool(x))
-
-
 class DWT2D(nn.Module):
     """2D Discrete Wavelet Transform using configurable wavelet filters.
 
