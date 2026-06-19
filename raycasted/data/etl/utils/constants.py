@@ -21,12 +21,9 @@ import numpy as np
 N_RAYS = 32
 """Number of radial rays for polygon parameterization."""
 
-ANGULAR_SPACING = 2.0 * np.pi / N_RAYS  # 11.25° in radians
-"""Angular spacing between consecutive rays (radians)."""
-
 # Precomputed angles for each ray (in radians)
 # θ_i = i * ANGULAR_SPACING for i in [0, N_RAYS)
-RAY_ANGLES = np.array([i * ANGULAR_SPACING for i in range(N_RAYS)], dtype=np.float64)
+RAY_ANGLES = np.array([i * (2.0 * np.pi / N_RAYS) for i in range(N_RAYS)], dtype=np.float64)
 """Array of angles for each ray [θ_0, θ_1, ..., θ_31] in radians."""
 
 # Precomputed cosine and sine for each ray direction
@@ -48,16 +45,6 @@ CX_IDX = 1
 CY_IDX = 2
 RAY_START_IDX = 3
 RAY_END_IDX = 3 + N_RAYS  # exclusive
-
-
-# Collated Batch Format: [batch_idx, class_id, cx, cy, d_1, ..., d_N]
-# Shape: (sum_M, 4 + N_RAYS)
-BATCH_IDX = 0
-BATCH_CLASS_IDX = 1
-BATCH_CX_IDX = 2
-BATCH_CY_IDX = 3
-BATCH_RAY_START_IDX = 4
-BATCH_RAY_END_IDX = 4 + N_RAYS  # exclusive
 
 
 # =============================================================================
@@ -142,12 +129,11 @@ def configure_rays(n_rays: int) -> None:
         raise ValueError(f'n_rays must be a multiple of 4 and >= 4, got {n_rays}')
 
     _self.N_RAYS = n_rays
-    _self.ANGULAR_SPACING = 2.0 * np.pi / n_rays
-    _self.RAY_ANGLES = np.array([i * _self.ANGULAR_SPACING for i in range(n_rays)], dtype=np.float64)
+    angular_spacing = 2.0 * np.pi / n_rays
+    _self.RAY_ANGLES = np.array([i * angular_spacing for i in range(n_rays)], dtype=np.float64)
     _self.RAY_COS = np.cos(_self.RAY_ANGLES)
     _self.RAY_SIN = np.sin(_self.RAY_ANGLES)
     _self.RAY_END_IDX = 3 + n_rays
-    _self.BATCH_RAY_END_IDX = 4 + n_rays
 
     # Recompute permutation indices
     _self.FLIP_H_IDX = _self._compute_flip_h_indices()
@@ -189,13 +175,10 @@ if __name__ == '__main__':
 
     _c.verify_permutation_indices()
     print(f'\nN_RAYS = {_c.N_RAYS}')
-    print(f'ANGULAR_SPACING = {np.degrees(_c.ANGULAR_SPACING):.2f}°')
 
     # Test with 64 rays
     print('\n--- Testing configure_rays(64) ---')
     configure_rays(64)
     _c.verify_permutation_indices()
     print(f'N_RAYS = {_c.N_RAYS}')
-    print(f'ANGULAR_SPACING = {np.degrees(_c.ANGULAR_SPACING):.2f}°')
     print(f'RAY_END_IDX = {_c.RAY_END_IDX}')
-    print(f'BATCH_RAY_END_IDX = {_c.BATCH_RAY_END_IDX}')

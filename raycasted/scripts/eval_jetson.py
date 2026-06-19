@@ -11,7 +11,7 @@ DEPENDENCIES (pip install):
   - opencv-python (mask rasterization)
 
 USAGE:
-  python main/eval_jetson.py \
+  python -m raycasted.scripts.eval_jetson \
       --engine raycasted.256.engine \
       --meta raycasted.256.meta.json \
       --data-dir output/pannuke_64/transformed/test \
@@ -29,6 +29,7 @@ import numpy as np
 # ============================================================
 # Ray geometry (inlined from constants.py — avoids torch import)
 # ============================================================
+
 
 def _configure_rays(n_rays: int):
     """Inline version of configure_rays(n_rays)."""
@@ -73,6 +74,7 @@ def _polygon_area(poly):
 # Post-processing (from postprocess.py — numpy only)
 # ============================================================
 
+
 def _build_anchor_grid(strides, imgsz):
     all_ax, all_ay, all_s = [], [], []
     for stride in strides:
@@ -84,8 +86,9 @@ def _build_anchor_grid(strides, imgsz):
     return np.concatenate(all_ax), np.concatenate(all_ay), np.concatenate(all_s)
 
 
-def postprocess(boxes_raw, binary_raw, class_raw, strides, imgsz,
-                conf_threshold=0.20, binary_threshold=0.01, n_rays=64):
+def postprocess(
+    boxes_raw, binary_raw, class_raw, strides, imgsz, conf_threshold=0.20, binary_threshold=0.01, n_rays=64
+):
     """Post-process raw ONNX output to polygon detections."""
     boxes_raw = boxes_raw.squeeze(0) if boxes_raw.ndim == 4 else boxes_raw
     class_raw = class_raw.squeeze(0) if class_raw.ndim >= 3 else class_raw
@@ -126,7 +129,7 @@ def postprocess(boxes_raw, binary_raw, class_raw, strides, imgsz,
     det = np.zeros((n_det, raycast_dim + 2), dtype=np.float32)
     det[:, 0] = cx[indices]
     det[:, 1] = cy[indices]
-    det[:, 2:2 + n_rays] = rays_px[indices]
+    det[:, 2 : 2 + n_rays] = rays_px[indices]
     det[:, raycast_dim] = max_scores[indices]
     det[:, raycast_dim + 1] = cls_idx[indices]
     return det
@@ -135,6 +138,7 @@ def postprocess(boxes_raw, binary_raw, class_raw, strides, imgsz,
 # ============================================================
 # TensorRT inference
 # ============================================================
+
 
 def load_trt_engine(engine_path: str):
     import pycuda.autoinit  # noqa
@@ -185,6 +189,7 @@ def run_trt(ctx, blob: np.ndarray):
 # Reference metric functions (exact copies from eval_pannuke.py + metrics.py)
 # ============================================================
 
+
 def _mask_iou_matrix(pred_masks, gt_masks):
     n_pred = len(pred_masks)
     n_gt = len(gt_masks)
@@ -217,6 +222,7 @@ def resolve_mask_overlaps(masks):
 
 def compute_aji(pred_masks, gt_masks, iou_threshold=0.5):
     from scipy.optimize import linear_sum_assignment
+
     if len(gt_masks) == 0:
         return 0.0
     if len(pred_masks) == 0:
@@ -246,6 +252,7 @@ def compute_aji(pred_masks, gt_masks, iou_threshold=0.5):
 
 def _compute_pq_masked(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
     from scipy.optimize import linear_sum_assignment
+
     n_pred = len(pred_masks)
     n_gt = len(gt_masks)
     if n_gt == 0 or n_pred == 0:
@@ -276,6 +283,7 @@ def _compute_ap(recall, precision):
 # ============================================================
 # Streaming metrics (exact copy from eval_pannuke.py)
 # ============================================================
+
 
 def compute_metrics_streaming(results, num_classes):
     from scipy.optimize import linear_sum_assignment
@@ -308,8 +316,14 @@ def compute_metrics_streaming(results, num_classes):
 
         aji_scores.append(compute_aji(pred_masks, gt_masks))
 
-        pred_binary = np.stack(pred_masks).max(axis=0).astype(np.uint8) if pred_masks else np.zeros((imgsz, imgsz), dtype=np.uint8)
-        gt_binary = np.stack(gt_masks).max(axis=0).astype(np.uint8) if gt_masks else np.zeros((imgsz, imgsz), dtype=np.uint8)
+        pred_binary = (
+            np.stack(pred_masks).max(axis=0).astype(np.uint8)
+            if pred_masks
+            else np.zeros((imgsz, imgsz), dtype=np.uint8)
+        )
+        gt_binary = (
+            np.stack(gt_masks).max(axis=0).astype(np.uint8) if gt_masks else np.zeros((imgsz, imgsz), dtype=np.uint8)
+        )
         bpq, _, _ = _compute_pq_masked([pred_binary], [gt_binary])
         bpq_scores.append(bpq)
         if gt_binary.sum() > 0:
@@ -329,13 +343,17 @@ def compute_metrics_streaming(results, num_classes):
             class_pq[cls_id].append(pq)
             if len(gt_masks) > 0:
                 gt_any = np.stack(gt_masks).max(axis=0).astype(np.uint8)
-                mpq, _, _ = _compute_pq_masked([pred_masks[j] for j in pred_idx], [gt_masks[j] for j in gt_idx], mask=gt_any > 0)
+                mpq, _, _ = _compute_pq_masked(
+                    [pred_masks[j] for j in pred_idx], [gt_masks[j] for j in gt_idx], mask=gt_any > 0
+                )
             else:
                 mpq = 0.0
             class_mpq[cls_id].append(mpq)
 
         for cls_id in sorted(class_set):
-            cls_pred_masks = [pred_masks[j] for j in range(len(pred_masks)) if j < len(pred_cls) and pred_cls[j] == cls_id]
+            cls_pred_masks = [
+                pred_masks[j] for j in range(len(pred_masks)) if j < len(pred_cls) and pred_cls[j] == cls_id
+            ]
             cls_gt_masks = [gt_masks[j] for j in range(len(gt_masks)) if j < len(gt_cls) and gt_cls[j] == cls_id]
             cls_confs = pred_confs[pred_cls == cls_id]
             n_pc, n_gc = len(cls_pred_masks), len(cls_gt_masks)
@@ -371,14 +389,18 @@ def compute_metrics_streaming(results, num_classes):
         centroid_fn += n_gt - tp
 
         if (i + 1) % 500 == 0:
-            print(f'  {i+1}/{len(results)} images', flush=True)
+            print(f'  {i + 1}/{len(results)} images', flush=True)
 
     mean_aji = np.mean(aji_scores)
     mean_bpq = np.mean(bpq_scores)
     mean_bmpq = np.mean(bmpq_scores)
-    mpq_values = [np.mean([v for v in class_pq[c] if v > 0]) for c in range(num_classes) if any(v > 0 for v in class_pq[c])]
+    mpq_values = [
+        np.mean([v for v in class_pq[c] if v > 0]) for c in range(num_classes) if any(v > 0 for v in class_pq[c])
+    ]
     mean_mpq = np.mean(mpq_values) if mpq_values else 0.0
-    mmpq_values = [np.mean([v for v in class_mpq[c] if v > 0]) for c in range(num_classes) if any(v > 0 for v in class_mpq[c])]
+    mmpq_values = [
+        np.mean([v for v in class_mpq[c] if v > 0]) for c in range(num_classes) if any(v > 0 for v in class_mpq[c])
+    ]
     mean_mmpq = np.mean(mmpq_values) if mmpq_values else 0.0
 
     ap_results = {}
@@ -405,8 +427,12 @@ def compute_metrics_streaming(results, num_classes):
     f1 = 2 * prec * rec / (prec + rec) if (prec + rec) > 0 else 0.0
 
     return {
-        'aji': mean_aji, 'bpq': mean_bpq, 'bmpq': mean_bmpq,
-        'mpq': mean_mpq, 'mmpq': mean_mmpq, 'ap': ap_results,
+        'aji': mean_aji,
+        'bpq': mean_bpq,
+        'bmpq': mean_bmpq,
+        'mpq': mean_mpq,
+        'mmpq': mean_mmpq,
+        'ap': ap_results,
         'centroid': {'precision': prec, 'recall': rec, 'f1': f1},
     }
 
@@ -414,6 +440,7 @@ def compute_metrics_streaming(results, num_classes):
 # ============================================================
 # Main eval loop
 # ============================================================
+
 
 def main():
     parser = argparse.ArgumentParser(description='Standalone Jetson Evaluation')
@@ -440,7 +467,7 @@ def main():
     data_dir = Path(args.data_dir)
     files = sorted(data_dir.glob('*.npz'))
     if args.max_images:
-        files = files[:args.max_images]
+        files = files[: args.max_images]
 
     print(f'Loading engine: {args.engine}')
     trt_ctx = load_trt_engine(args.engine)
@@ -468,12 +495,19 @@ def main():
                 outputs[k] = outputs[k][0].T
 
         if hierarchical and 'binary' in outputs:
-            det = postprocess(outputs['boxes'], outputs['binary'], outputs['class'],
-                              strides, imgsz, args.conf, binary_threshold, n_rays)
+            det = postprocess(
+                outputs['boxes'],
+                outputs['binary'],
+                outputs['class'],
+                strides,
+                imgsz,
+                args.conf,
+                binary_threshold,
+                n_rays,
+            )
         else:
             scores = outputs.get('scores', outputs.get('class'))
-            det = postprocess(outputs['boxes'], None, scores,
-                              strides, imgsz, args.conf, n_rays=n_rays)
+            det = postprocess(outputs['boxes'], None, scores, strides, imgsz, args.conf, n_rays=n_rays)
 
         gt_poly = labels[:, 1:].copy()
         n_gt = labels.shape[0]
@@ -481,18 +515,22 @@ def main():
         n_pred_total += det.shape[0]
         n_gt_total += n_gt
 
-        all_results.append({
-            'pred_polys': det[:, :raycast_dim] if det.shape[0] > 0 else np.zeros((0, raycast_dim)),
-            'pred_confs': det[:, raycast_dim] if det.shape[0] > 0 else np.array([]),
-            'pred_cls': det[:, raycast_dim + 1].astype(int) if det.shape[0] > 0 else np.array([], dtype=int),
-            'gt_polys': gt_poly,
-            'gt_cls': labels[:, 0].astype(int) if labels.ndim >= 2 and labels.shape[0] > 0 else np.array([], dtype=int),
-            'imgsz': imgsz,
-        })
+        all_results.append(
+            {
+                'pred_polys': det[:, :raycast_dim] if det.shape[0] > 0 else np.zeros((0, raycast_dim)),
+                'pred_confs': det[:, raycast_dim] if det.shape[0] > 0 else np.array([]),
+                'pred_cls': det[:, raycast_dim + 1].astype(int) if det.shape[0] > 0 else np.array([], dtype=int),
+                'gt_polys': gt_poly,
+                'gt_cls': labels[:, 0].astype(int)
+                if labels.ndim >= 2 and labels.shape[0] > 0
+                else np.array([], dtype=int),
+                'imgsz': imgsz,
+            }
+        )
 
         if (i + 1) % 500 == 0:
             e = time.perf_counter() - t_start
-            print(f'  {i+1}/{len(files)} images ({e:.1f}s)', flush=True)
+            print(f'  {i + 1}/{len(files)} images ({e:.1f}s)', flush=True)
 
     elapsed = time.perf_counter() - t_start
     ms_per_img = elapsed / len(files) * 1000

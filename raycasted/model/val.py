@@ -19,7 +19,6 @@ from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 from raycasted.data.etl.utils import constants as _val_const
 from raycasted.data.etl.utils.constants import configure_rays
 from raycasted.model.blocks.head import RayCastDetect
-from raycasted.model.blocks.rtdetr_head import RayCastRTDETRDecoder
 from raycasted.model.metrics import compute_bpq_from_iou
 
 RAYCAST_DIM = 2 + _val_const.N_RAYS
@@ -201,7 +200,7 @@ class RayCastValidator(DetectionValidator):
         # During training: model is DetectionModel, model.model is nn.Sequential
         # During final_eval: model.model may be DetectionModel again (unwrapped)
         head = model
-        while hasattr(head, 'model') and not isinstance(head, (RayCastDetect, RayCastRTDETRDecoder)):
+        while hasattr(head, 'model') and not isinstance(head, RayCastDetect):
             child = head.model
             if isinstance(child, (list, torch.nn.Sequential)):
                 head = child[-1]

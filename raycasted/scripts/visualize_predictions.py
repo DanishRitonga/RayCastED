@@ -5,11 +5,11 @@ Works with both PyTorch (desktop) and TensorRT (Jetson).
 
 USAGE:
   # Desktop (PyTorch)
-  uv run python main/visualize_predictions.py \
+  uv run python -m raycasted.scripts.visualize_predictions \
       --weights docs/runs/v1.1/best.pt --data-dir output/visualTest --conf 0.5
 
   # Jetson (TensorRT)
-  uv run python main/visualize_predictions.py \
+  uv run python -m raycasted.scripts.visualize_predictions \
       --engine ./onnx/v1.engine --meta ./onnx/v1.meta.json \
       --data-dir output/visualTest --conf 0.5
 """
@@ -23,11 +23,11 @@ import cv2
 import numpy as np
 
 CLS_COLORS = [
-    (0, 255, 0),      # Neoplastic — green
-    (255, 0, 0),      # Inflammatory — blue (BGR)
-    (0, 0, 255),      # Connective — red
-    (0, 255, 255),    # Dead — yellow
-    (255, 0, 255),    # Epithelial — magenta
+    (0, 255, 0),  # Neoplastic — green
+    (255, 0, 0),  # Inflammatory — blue (BGR)
+    (0, 0, 255),  # Connective — red
+    (0, 255, 255),  # Dead — yellow
+    (255, 0, 255),  # Epithelial — magenta
 ]
 
 CLS_NAMES = ['Neoplastic', 'Inflammatory', 'Connective', 'Dead', 'Epithelial']
@@ -52,7 +52,7 @@ def draw_gt(img_bgr, labels):
     for lbl in labels:
         cls_id = int(lbl[0])
         cx, cy = lbl[1], lbl[2]
-        rays = lbl[3:3 + len(RAY_COS)]
+        rays = lbl[3 : 3 + len(RAY_COS)]
         draw_polygon(img_bgr, cx, cy, rays, CLS_COLORS[cls_id % 5], thickness=2)
 
 
@@ -75,8 +75,7 @@ def create_legend(img_h):
     return legend
 
 
-def postprocess(boxes_raw, binary_raw, class_raw, strides, imgsz,
-                conf_threshold=0.20, n_rays=64):
+def postprocess(boxes_raw, binary_raw, class_raw, strides, imgsz, conf_threshold=0.20, n_rays=64):
     boxes_raw = boxes_raw.squeeze(0) if boxes_raw.ndim == 4 else boxes_raw
     class_raw = class_raw.squeeze(0) if class_raw.ndim >= 3 else class_raw
     if binary_raw is not None:
@@ -125,7 +124,7 @@ def postprocess(boxes_raw, binary_raw, class_raw, strides, imgsz,
     det = np.zeros((n_det, raycast_dim + 2), dtype=np.float32)
     det[:, 0] = cx[indices]
     det[:, 1] = cy[indices]
-    det[:, 2:2 + n_rays] = rays_px[indices]
+    det[:, 2 : 2 + n_rays] = rays_px[indices]
     det[:, raycast_dim] = max_scores[indices]
     det[:, raycast_dim + 1] = cls_idx[indices]
     return det
@@ -248,15 +247,20 @@ def main():
                 if outputs[k].ndim == 3:
                     outputs[k] = outputs[k][0].T
 
-            det = postprocess(outputs['boxes'], None,
-                              outputs.get('scores', outputs.get('class')),
-                              strides, imgsz, args.conf, n_rays=n_rays)
+            det = postprocess(
+                outputs['boxes'],
+                None,
+                outputs.get('scores', outputs.get('class')),
+                strides,
+                imgsz,
+                args.conf,
+                n_rays=n_rays,
+            )
         elif use_onnx:
             blob = image.astype(np.float32) / 255.0
             blob = blob.transpose(2, 0, 1)[np.newaxis]
             ort_outs = ort_session.run(None, {'images': blob})
-            det = postprocess(ort_outs[0][0].T, None, ort_outs[1][0].T,
-                              strides, imgsz, args.conf, n_rays=n_rays)
+            det = postprocess(ort_outs[0][0].T, None, ort_outs[1][0].T, strides, imgsz, args.conf, n_rays=n_rays)
         else:
             import torch
 
@@ -287,12 +291,9 @@ def main():
             pad = np.zeros((img_h - legend.shape[0], legend.shape[1], 3), dtype=np.uint8)
             legend = np.vstack([legend, pad])
         legend[10:30, :] = (255, 255, 255)
-        cv2.putText(legend, f'Pred: {det.shape[0]}', (10, 45),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(legend, f'GT: {labels.shape[0]}', (10, 65),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        cv2.putText(legend, f'{elapsed:.0f}ms', (10, 85),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(legend, f'Pred: {det.shape[0]}', (10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(legend, f'GT: {labels.shape[0]}', (10, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv2.putText(legend, f'{elapsed:.0f}ms', (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
         combined = np.hstack([gt_img, pred_img, legend])
 

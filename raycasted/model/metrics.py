@@ -129,54 +129,6 @@ def compute_aji(
     return total_intersection / total_union
 
 
-def compute_pq(
-    pred_masks: list[np.ndarray],
-    gt_masks: list[np.ndarray],
-    iou_threshold: float = 0.5,
-) -> tuple[float, float, float]:
-    """Compute Panoptic Quality (PQ), Segmentation Quality (SQ), Detection Quality (DQ).
-
-    PQ = SQ × DQ
-    DQ = TP / (TP + 0.5*FP + 0.5*FN)  [equivalent to F1]
-    SQ = mean IoU of matched pairs
-
-    Args:
-        pred_masks: List of [H, W] uint8 binary masks (predictions).
-        gt_masks: List of [H, W] uint8 binary masks (ground truth).
-        iou_threshold: Minimum IoU for valid match.
-
-    Returns:
-        (PQ, SQ, DQ) tuple. Returns (0.0, 0.0, 0.0) if no GT masks.
-    """
-    n_pred = len(pred_masks)
-    n_gt = len(gt_masks)
-
-    if n_gt == 0:
-        return 0.0, 0.0, 0.0
-
-    if n_pred == 0:
-        return 0.0, 0.0, 0.0
-
-    iou_matrix = _compute_mask_iou_matrix(pred_masks, gt_masks)
-
-    # Hungarian matching
-    row_ind, col_ind = linear_sum_assignment(-iou_matrix)
-    valid = iou_matrix[row_ind, col_ind] >= iou_threshold
-
-    tp = valid.sum()
-    fp = n_pred - tp
-    fn = n_gt - tp
-
-    # DQ (F1)
-    dq = tp / (tp + 0.5 * fp + 0.5 * fn) if (tp + fp + fn) > 0 else 0.0
-
-    # SQ (mean IoU of matched pairs)
-    sq = float(iou_matrix[row_ind[valid], col_ind[valid]].mean()) if tp > 0 else 0.0
-
-    pq = sq * dq
-    return float(pq), float(sq), float(dq)
-
-
 def resolve_mask_overlaps(masks: list[np.ndarray]) -> list[np.ndarray]:
     """Resolve overlapping masks using largest-first priority.
 
@@ -207,30 +159,6 @@ def resolve_mask_overlaps(masks: list[np.ndarray]) -> list[np.ndarray]:
         occupied |= resolved[idx].astype(bool)
 
     return resolved
-
-
-def polygons_to_masks(
-    detections: np.ndarray,
-    img_h: int,
-    img_w: int,
-) -> list[np.ndarray]:
-    """Convert raycast polygon detections to binary masks.
-
-    Args:
-        detections: [N, 2+n_rays] array where each row is [cx, cy, d_1..d_n].
-            Or [N, 4+n_rays] with trailing score/cls columns (ignored).
-        img_h: Image height.
-        img_w: Image width.
-
-    Returns:
-        List of [img_h, img_w] uint8 binary masks.
-    """
-    masks = []
-    for det in detections:
-        cx, cy = det[0], det[1]
-        rays = det[2:]  # all remaining columns are ray distances
-        masks.append(polygon_to_mask(cx, cy, rays, img_h, img_w))
-    return masks
 
 
 def compute_bpq_from_iou(

@@ -4,7 +4,7 @@ Single source of truth for all polygon/raycast geometry logic.
 This module is imported by:
     - raycasted/data/etl/ingestors/*.py (NumPy, offline ETL)
     - raycasted/data/etl/transform/*.py (NumPy, offline ETL)
-    - raycasted/data/etl/loader/polygon_dataset.py (NumPy, online DataLoader)
+    - raycasted/data/etl/loader/raycast_dataset.py (NumPy, online DataLoader)
     - ultralytics/utils/loss.py (PyTorch, training)
     - ultralytics/utils/tal.py (PyTorch, assignment)
     - ultralytics/models/yolo/detect/predict.py (PyTorch, inference)
@@ -16,7 +16,7 @@ Module Structure:
     - convert:    Polygon ↔ raycast conversion
     - filter:     Annotation filtering and clipping
     - iou:        Polar-IoU computation (NumPy + PyTorch)
-    - loss:       Angular smoothness regularization (NumPy + PyTorch)
+    - loss:       Angular smoothness regularization (PyTorch)
     - augment:    Geometric augmentations
     - utils:      Validation and quality monitoring
 """
@@ -40,7 +40,6 @@ from .iou import (
     polar_iou_torch,
 )
 from .loss import (
-    angular_smoothness_loss,
     angular_smoothness_loss_torch,
     curvature_smoothness_loss_torch,
 )
@@ -63,7 +62,6 @@ __all__ = [
     'polar_iou_torch',
     'polar_iou_pairwise_flat_torch',
     # Loss
-    'angular_smoothness_loss',
     'angular_smoothness_loss_torch',
     'curvature_smoothness_loss_torch',
     # Augment

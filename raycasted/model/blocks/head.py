@@ -164,13 +164,11 @@ class PredictionRefinementAttention(nn.Module):
     def forward(
         self,
         tokens: torch.Tensor,
-        positions: torch.Tensor,
     ) -> torch.Tensor:
         """Apply self-attention on top-K prediction tokens.
 
         Args:
             tokens: [B, K, feat_dim] — per-prediction features (c3 cls features).
-            positions: [B, K, 2] — normalised (x, y) centroid positions in [0, 1].
 
         Returns:
             [B, K, 1] — suppression logits. Sigmoid gives multiplicative weight.
@@ -509,29 +507,7 @@ class RayCastDetect(Detect):
 
         topk_feats = torch.gather(cls_feats, 1, topk_idx.unsqueeze(-1).expand(-1, -1, cls_feats.shape[-1]))
 
-        # Compute normalised centroid positions for sincos PE
-        feats = one2one_preds['feats']
-        shape = feats[0].shape
-        if self.dynamic or self.shape != shape:
-            self.anchors, self.strides = (a.transpose(0, 1) for a in make_anchors(feats, self.stride, 0.5))
-            self.shape = shape
-        anchors = self.anchors  # [2, N]
-        strides = self.strides  # [1, N] or [2, N]
-        if strides.dim() == 2 and strides.shape[0] == 2:
-            strides = strides[:1, :]
-        if strides.dim() == 3:
-            strides = strides.squeeze(0)
-        if anchors.dim() == 3:
-            anchors = anchors.squeeze(0)
-
-        xy_raw = one2one_preds['boxes'][:, :2, :].sigmoid()  # [B, 2, N]
-        xy_px = (xy_raw * 2.0 - 0.5 + anchors.unsqueeze(0)) * strides.unsqueeze(0)
-        imgsz = strides.max().item() * feats[0].shape[2]
-        xy_norm = (xy_px / max(imgsz, 1)).clamp(0, 1)
-        topk_xy = torch.gather(xy_norm, 2, topk_idx.unsqueeze(1).expand(-1, 2, -1))
-        topk_pos = topk_xy.permute(0, 2, 1)
-
-        suppress_logits = attn(topk_feats, topk_pos)  # [B, K, 1]
+        suppress_logits = attn(topk_feats)  # [B, K, 1]
         suppress_weights = suppress_logits.sigmoid()  # [B, K, 1]
 
         full_suppress = torch.ones(bs, 1, N, device=scores.device, dtype=scores.dtype)

@@ -16,8 +16,14 @@ results
 results.csv
 *.pt
 
-# Rust stardist build artifacts
-raycasted/data/stardist/target/
+# Local export binaries (regenerable via raycasted/export/export_onnx.sh)
+/export/
+
+# Runtime data dirs (regenerable)
+/transformed/
+
+# macOS
+.DS_Store
 
 .claude
 .opencode

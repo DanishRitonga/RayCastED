@@ -13,7 +13,7 @@ def _shoelace_area(poly, n_rays):
     cos = np.cos(np.linspace(0, 2 * np.pi, n_rays, endpoint=False))
     sin = np.sin(np.linspace(0, 2 * np.pi, n_rays, endpoint=False))
     cx, cy = poly[0], poly[1]
-    rays = poly[2:2 + n_rays]
+    rays = poly[2 : 2 + n_rays]
     vx = cx + rays * cos
     vy = cy + rays * sin
     return 0.5 * abs(np.dot(vx, np.roll(vy, 1)) - np.dot(vy, np.roll(vx, 1)))
@@ -45,8 +45,8 @@ def polygon_metrics(pred_polys, gt_polys, n_rays):
         if not v:
             continue
         cdist = float(np.linalg.norm(pred_polys[r, :2] - gt_polys[c, :2]))
-        rdiff = float(np.abs(pred_polys[r, 2:2+n_rays] - gt_polys[c, 2:2+n_rays]).mean())
-        pairs.append((cdist, rdiff, float(ious[r, c]), int(gt_polys[c, -1]) if gt_polys.shape[1] > 2+n_rays else 0))
+        rdiff = float(np.abs(pred_polys[r, 2 : 2 + n_rays] - gt_polys[c, 2 : 2 + n_rays]).mean())
+        pairs.append((cdist, rdiff, float(ious[r, c]), int(gt_polys[c, -1]) if gt_polys.shape[1] > 2 + n_rays else 0))
     return pairs, ious
 
 
@@ -100,7 +100,9 @@ def compute_polygon_metrics_streaming(results, n_rays):
     mean_iou = float(np.mean(all_iou)) if all_iou else 0
 
     return {
-        'bPQ': pq, 'bSQ': sq, 'bDQ': dq,
+        'bPQ': pq,
+        'bSQ': sq,
+        'bDQ': dq,
         'centroid_l2': centroid_l2,
         'ray_l1': ray_l1,
         'poly_iou': mean_iou,

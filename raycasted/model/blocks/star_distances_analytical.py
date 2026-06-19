@@ -178,13 +178,13 @@ def _analytical_ray_distances_paired(
     ray_cos = ray_cos.to(device=device, dtype=dtype).view(1, 1, n_rays)
     ray_sin = ray_sin.to(device=device, dtype=dtype).view(1, 1, n_rays)
 
-    v1 = vertices                               # [N, n_verts, 2]
-    v2_shift = vertices.roll(-1, dims=1)        # wrap-around edges
+    v1 = vertices  # [N, n_verts, 2]
+    v2_shift = vertices.roll(-1, dims=1)  # wrap-around edges
 
-    cx = centroids_px[:, 0:1, None]             # [N, 1, 1]
-    cy = centroids_px[:, 1:2, None]             # [N, 1, 1]
+    cx = centroids_px[:, 0:1, None]  # [N, 1, 1]
+    cy = centroids_px[:, 1:2, None]  # [N, 1, 1]
 
-    v1x = v1[:, :, 0:1]                         # [N, n_verts, 1]
+    v1x = v1[:, :, 0:1]  # [N, n_verts, 1]
     v1y = v1[:, :, 1:2]
     v2x = v2_shift[:, :, 0:1]
     v2y = v2_shift[:, :, 1:2]

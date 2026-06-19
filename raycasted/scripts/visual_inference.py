@@ -24,11 +24,11 @@ from raycasted.data.etl.utils.constants import configure_rays
 from raycasted.model.register import register_raycast_head
 
 CLASS_COLORS = [
-    (0, 255, 0),      # Green  — Neoplastic
-    (0, 255, 255),    # Cyan   — Inflammatory
-    (255, 255, 0),    # Yellow — Connective
-    (255, 0, 255),    # Magenta — Necrosis
-    (0, 165, 255),    # Orange — Epithelial
+    (0, 255, 0),  # Green  — Neoplastic
+    (0, 255, 255),  # Cyan   — Inflammatory
+    (255, 255, 0),  # Yellow — Connective
+    (255, 0, 255),  # Magenta — Necrosis
+    (0, 165, 255),  # Orange — Epithelial
 ]
 
 
@@ -71,19 +71,21 @@ def draw_polygons(img, polys, cls_labels, thickness=1):
 
 def _simple_collate(batch):
     import torch as _torch
+
     images = _torch.stack([item[0] for item in batch])
     labels_list = [item[1] for item in batch]
     target_list = []
     for bi, labels in enumerate(labels_list):
-        if labels.shape[0] == 0: continue
+        if labels.shape[0] == 0:
+            continue
         bc = np.full((labels.shape[0], 1), bi, dtype=np.float32)
         target_list.append(np.concatenate([bc, labels], axis=1))
     if target_list:
         targets = _torch.from_numpy(np.concatenate(target_list, 0))
     else:
-        w = next((lbl.shape[1] for lbl in labels_list if lbl.ndim==2 and lbl.shape[1]>0), 35)
-        targets = _torch.zeros((0, 1+w), dtype=_torch.float32)
-    return dict(img=images, batch_idx=targets[:,0], cls=targets[:,1], bboxes=targets[:,2:])
+        w = next((lbl.shape[1] for lbl in labels_list if lbl.ndim == 2 and lbl.shape[1] > 0), 35)
+        targets = _torch.zeros((0, 1 + w), dtype=_torch.float32)
+    return dict(img=images, batch_idx=targets[:, 0], cls=targets[:, 1], bboxes=targets[:, 2:])
 
 
 def main():
@@ -119,9 +121,25 @@ def main():
     # Tissue-based sampling: pick n-images from each tissue
     if args.tissue:
         TISSUE_NAMES = [
-            "Adrenal", "BileDuct", "Bladder", "Breast", "Cervix", "Colorectal",
-            "Esophagus", "Head&Neck", "Kidney", "Liver", "Lung", "Ovarian",
-            "Pancreatic", "Prostate", "Skin", "Stomach", "Testis", "Thyroid", "Uterus",
+            'Adrenal',
+            'BileDuct',
+            'Bladder',
+            'Breast',
+            'Cervix',
+            'Colorectal',
+            'Esophagus',
+            'Head&Neck',
+            'Kidney',
+            'Liver',
+            'Lung',
+            'Ovarian',
+            'Pancreatic',
+            'Prostate',
+            'Skin',
+            'Stomach',
+            'Testis',
+            'Thyroid',
+            'Uterus',
         ]
         tissue_pools = {}
         for i, path in enumerate(dataset.tile_paths):
@@ -134,7 +152,7 @@ def main():
             n = min(args.n_images, len(pool))
             chosen = np.random.default_rng(42).choice(pool, n, replace=False)
             indices.extend(chosen)
-            name = TISSUE_NAMES[t] if t < len(TISSUE_NAMES) else f"t{t}"
+            name = TISSUE_NAMES[t] if t < len(TISSUE_NAMES) else f't{t}'
             print(f'  {name}: {n}/{len(pool)}')
         indices = sorted(indices)
         print(f'Tissue: {len(indices)} from {len(tissue_pools)} tissues ({len(dataset)} total)')
@@ -145,31 +163,36 @@ def main():
     n_total = len(indices)
 
     from torch.utils.data import Subset
-    subset = Subset(dataset, indices)
-    dl = DataLoader(subset, batch_size=args.batch, shuffle=False,
-                    num_workers=args.workers, collate_fn=_simple_collate)
 
-    saved = 0; idx = 0
+    subset = Subset(dataset, indices)
+    dl = DataLoader(subset, batch_size=args.batch, shuffle=False, num_workers=args.workers, collate_fn=_simple_collate)
+
+    saved = 0
+    idx = 0
     for batch in dl:
-        if saved >= n_total: break
+        if saved >= n_total:
+            break
         images = batch['img'].to(device)
         batch_results = run_inference(model, images, device, args.conf, raycast_dim)
 
         for si in range(images.shape[0]):
-            if saved >= n_total: break
+            if saved >= n_total:
+                break
 
             orig_idx = indices[idx]
             tile_data = np.load(dataset.tile_paths[orig_idx])
             raw_img = tile_data['image']
             if raw_img.ndim == 2:
-                raw_img = np.stack([raw_img]*3, axis=-1)
+                raw_img = np.stack([raw_img] * 3, axis=-1)
 
             mask = batch['batch_idx'] == si
             gt_cls = batch['cls'][mask].numpy().flatten().astype(int)
             gt_poly = batch['bboxes'][mask].numpy()
             if gt_poly.shape[0]:
                 gt_poly = gt_poly.copy()
-                gt_poly[:, 0] *= crop_size; gt_poly[:, 1] *= crop_size; gt_poly[:, 2:] *= crop_size
+                gt_poly[:, 0] *= crop_size
+                gt_poly[:, 1] *= crop_size
+                gt_poly[:, 2:] *= crop_size
             else:
                 gt_poly = np.zeros((0, raycast_dim), dtype=np.float32)
 
@@ -187,7 +210,8 @@ def main():
             pred_img = draw_polygons(raw_img.copy(), pred['pred_polys'], pred['pred_cls'], thickness=1)
             cv2.imwrite(str(tissue_dir / f'{idx:04d}_pred.png'), cv2.cvtColor(pred_img, cv2.COLOR_RGB2BGR))
 
-            saved += 1; idx += 1
+            saved += 1
+            idx += 1
 
     print(f'Done. {saved} images → {out_dir}')
 

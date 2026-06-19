@@ -21,7 +21,7 @@ def _reconstruct_polygon_vertices(bboxes_norm, crop_size, n_rays=None):
     return _normed_rays_to_vertices(centroids_px, rays_norm, crop_size, ray_cos, ray_sin)
 
 
-def _make_circular_nuclei(n_cells, n_rays, crop_size=256.0, seed=42):
+def _make_circular_nuclei(n_cells, n_rays, seed=42):
     """Create synthetic circular nucleus annotations in normalized space."""
     gen = torch.Generator().manual_seed(seed)
 
@@ -40,7 +40,7 @@ def _make_batch(bs=1, n_cells=8, crop_size=256, n_rays=64):
     """Build a full batch dict with images, annotations, and pixel-space vertices."""
     cls_list, bboxes_list, vertices_list = [], [], []
     for _ in range(bs):
-        cl, bb = _make_circular_nuclei(n_cells, n_rays, crop_size)
+        cl, bb = _make_circular_nuclei(n_cells, n_rays)
         verts = _reconstruct_polygon_vertices(bb, crop_size, n_rays)
         cls_list.append(cl)
         bboxes_list.append(bb)
@@ -65,36 +65,6 @@ def _make_batch(bs=1, n_cells=8, crop_size=256, n_rays=64):
         'ratio_pad': ratio_pad,
         'im_file': [f'tile_{i:04d}.npz' for i in range(bs)],
     }
-
-
-def test_analytical_star_distances_smoke():
-    """End-to-end smoke test: forward + loss + backward with RT-DETR."""
-    _const.configure_rays(64)
-
-    from raycasted.model.rtdetr_model import RayCastRTDETRDetectionModel
-
-    cfg = 'raycasted/cfg/yolo26s-rtdetr-p234.yaml'
-    model = RayCastRTDETRDetectionModel(cfg, ch=3, nc=5, verbose=False)
-    model.train()
-
-    batch = _make_batch(bs=1, n_cells=5, crop_size=256, n_rays=64)
-
-    loss_val, loss_items = model.loss(batch)
-    assert torch.isfinite(loss_val), f'loss is not finite: {loss_val}'
-    assert loss_val.item() > 0, f'loss should be positive, got {loss_val.item()}'
-
-    loss_val.backward()
-
-    total_params = 0
-    grad_params = 0
-    for name, p in model.named_parameters():
-        if p.requires_grad:
-            total_params += p.numel()
-            if p.grad is not None:
-                grad_params += p.numel()
-
-    assert grad_params > 0, 'no parameters received gradients'
-    assert grad_params / total_params > 0.5, f'only {grad_params}/{total_params} params have gradients'
 
 
 def test_analytical_ray_cost_shape():
@@ -126,7 +96,7 @@ def test_analytical_gt_rays_diagonal():
     )
 
     n = 3
-    _, bboxes = _make_circular_nuclei(n, n_rays=64, crop_size=256.0)
+    _, bboxes = _make_circular_nuclei(n, n_rays=64)
     pred_xy = bboxes[:, :2] * 256.0 + torch.randn(n, 2) * 10.0
     vertices = _reconstruct_polygon_vertices(bboxes, crop_size=256.0)
     ray_cos, ray_sin = build_ray_directions(64)

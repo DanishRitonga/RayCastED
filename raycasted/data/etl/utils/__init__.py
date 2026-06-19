@@ -1,12 +1,5 @@
 from .config import ETLConfig
 from .constants import (
-    ANGULAR_SPACING,
-    BATCH_CLASS_IDX,
-    BATCH_CX_IDX,
-    BATCH_CY_IDX,
-    BATCH_IDX,
-    BATCH_RAY_END_IDX,
-    BATCH_RAY_START_IDX,
     CLASS_IDX,
     CX_IDX,
     CY_IDX,
@@ -28,7 +21,6 @@ from .constants import (
 __all__ = [
     'ETLConfig',
     'N_RAYS',
-    'ANGULAR_SPACING',
     'RAY_ANGLES',
     'RAY_COS',
     'RAY_SIN',
@@ -37,12 +29,6 @@ __all__ = [
     'RAY_START_IDX',
     'RAY_END_IDX',
     'CLASS_IDX',
-    'BATCH_IDX',
-    'BATCH_CLASS_IDX',
-    'BATCH_CX_IDX',
-    'BATCH_CY_IDX',
-    'BATCH_RAY_START_IDX',
-    'BATCH_RAY_END_IDX',
     'FLIP_H_IDX',
     'FLIP_V_IDX',
     'ROT_90_IDX',

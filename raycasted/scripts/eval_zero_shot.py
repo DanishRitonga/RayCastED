@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.data.etl.utils import constants as _const
-from eval_pannuke import load_model, run_inference, _simple_collate
+from raycasted.scripts.eval_pannuke import load_model, run_inference, _simple_collate
 
 
 def main():
@@ -41,15 +41,16 @@ def main():
     print(f'Test tiles: {len(npz_files)} ({args.dataset})')
 
     dataset = RayCastTileDataset(data_dir=str(data_dir), crop_size=crop_size, augment=False)
-    dl = DataLoader(dataset, batch_size=args.batch, shuffle=False, num_workers=args.workers,
-                    collate_fn=_simple_collate)
+    dl = DataLoader(dataset, batch_size=args.batch, shuffle=False, num_workers=args.workers, collate_fn=_simple_collate)
 
     t0 = time.perf_counter()
     results = run_inference(model, dl, device, conf_threshold=args.conf)
     elapsed = time.perf_counter() - t0
     n_pred = sum(len(r['pred_polys']) for r in results)
     n_gt = sum(len(r['gt_polys']) for r in results)
-    print(f'Inference: {len(results)} imgs in {elapsed:.1f}s ({elapsed*1000/len(results):.1f}ms/img), {n_pred} preds, {n_gt} GT')
+    print(
+        f'Inference: {len(results)} imgs in {elapsed:.1f}s ({elapsed * 1000 / len(results):.1f}ms/img), {n_pred} preds, {n_gt} GT'
+    )
 
     # Binary metrics via eval_pannuke streaming for nc=1
     # Patch: set all classes to 0
@@ -57,19 +58,20 @@ def main():
         r['pred_cls'] = np.zeros(len(r['pred_cls']), dtype=int)
         r['gt_cls'] = np.zeros(len(r['gt_cls']), dtype=int)
 
-    from eval_pannuke import compute_metrics_streaming
+    from raycasted.scripts.eval_pannuke import compute_metrics_streaming
+
     metrics = compute_metrics_streaming(results, num_classes=1)
     f12 = metrics['centroid']
 
-    print(f'\n{"="*50}')
+    print(f'\n{"=" * 50}')
     print(f'  {args.dataset} Zero-Shot (binary)')
-    print(f'{"="*50}')
+    print(f'{"=" * 50}')
     print(f'  AJI:      {metrics["aji"]:.4f}')
     print(f'  bPQ:      {metrics["bpq"]:.4f}')
     print(f'  F1:       {f12["f1"]:.4f}')
     print(f'  Precision:{f12["precision"]:.4f}')
     print(f'  Recall:   {f12["recall"]:.4f}')
-    print(f'{"="*50}')
+    print(f'{"=" * 50}')
 
 
 if __name__ == '__main__':

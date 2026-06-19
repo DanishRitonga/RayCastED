@@ -86,8 +86,8 @@ def postprocess_raw_output(
     det = np.zeros((n_det, raycast_dim + 2), dtype=np.float32)
     det[:, 0] = cx[indices]
     det[:, 1] = cy[indices]
-    det[:, 2:2 + n_rays] = rays_px[indices]
-    det[:, 2:2 + n_rays] = rays_px[indices]
+    det[:, 2 : 2 + n_rays] = rays_px[indices]
+    det[:, 2 : 2 + n_rays] = rays_px[indices]
     det[:, raycast_dim] = max_scores[indices]
     det[:, raycast_dim + 1] = cls_idx[indices]
     return det

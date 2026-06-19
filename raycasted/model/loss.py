@@ -181,19 +181,6 @@ class GradNormManager:
 
         self._step_count += 1
 
-    # ── initial loss setter (optional, for resume) ─────────────────
-
-    def set_initial_losses(self, losses: torch.Tensor) -> None:
-        """Override initial losses (e.g. on resume from checkpoint)."""
-        self.initial_losses = losses.detach().clone()
-
-    # ── logging ────────────────────────────────────────────────────
-
-    def log_state(self) -> dict[str, float]:
-        """Return a dict of current state for logging."""
-        w = self.get_weights().detach().cpu()
-        return {f'gradnorm/{name}': w[i].item() for i, name in enumerate(self.task_names)}
-
 
 def _log_space_ray_loss(pred_rays: torch.Tensor, target_rays: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
     """L1 loss in log-space for ray distances.
@@ -346,8 +333,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         fg_cls_boost: float = 0.0,
         fg_cls_quality_scale: float = 0.0,
         soft_targets: bool = False,
-        gaussian_soft_targets: bool = False,
-        gaussian_sigma: float = 0.5,
         class_weights: torch.Tensor | None = None,
         lambda_cls: float = 2.0,
         lambda_xy: float = 500.0,
@@ -398,14 +383,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # instead of hard binarising to 0/1. Gives the classifier a graded signal
         # that distinguishes strong matches from weak ones.
         self.soft_targets = soft_targets
-
-        # Gaussian spatial soft targets — replace piou-based soft targets with
-        # spatial Gaussian decay from GT centroid. Best anchor → 1.0; other fg
-        # anchors → exp(-d²/2σ²). Uses QFL for continuous targets. Fixes
-        # train25/26/27 failure: piou targets spread fg scores across 0.3-1.0
-        # instead of creating a sharp peak at the best anchor.
-        self.gaussian_soft_targets = gaussian_soft_targets
-        self.gaussian_sigma = gaussian_sigma
 
         # Per-class inverse-frequency weights [C]. When provided, scales positive
         # classification loss per class to rebalance rare categories.
@@ -567,38 +544,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
         # --- L_cls: BCE or Focal loss with bg subsampling ---
         # Save raw quality before binarization for fg_cls_boost.
         fg_quality = target_scores.float().clone()
-        if self.gaussian_soft_targets:
-            # Spatial Gaussian soft targets: best anchor per GT → 1.0,
-            # other fg anchors → exp(-d²/2σ²) where d = distance to
-            # assigned GT centroid in normalized [0,1] space.
-            # Unlike piou-based soft targets (train25/26/27), spatial
-            # Gaussian creates a sharp peak at the best anchor and
-            # natural "winner-take-most" gradient for nearby duplicates.
-            cls_targets = fg_quality.clone()
-            cls_targets[cls_targets > 0] = 1.0  # start from hard targets
-            # Compute Gaussian decay for fg anchors
-            if fg_mask.any():
-                # anchor_points_norm: [N, 2] in [0,1] (shared across batch)
-                # gt_bboxes: [B, N_gt, raycast_dim] — centroids at [:,:,:2]
-                # target_gt_idx: [B, N] — index of assigned GT per anchor
-                fg_idx = fg_mask.nonzero(as_tuple=False)  # [K, 2] (batch, anchor)
-                assigned_gt = target_gt_idx[fg_idx[:, 0], fg_idx[:, 1]].clamp(min=0)  # [K]
-                batch_idx = fg_idx[:, 0]
-                anchor_pos = anchor_points_norm[fg_idx[:, 1]]  # [K, 2]
-                # Gather GT centroids using advanced indexing
-                gt_centroids_expanded = gt_bboxes[:, :, :2]  # [B, N_gt, 2]
-                gt_for_fg = gt_centroids_expanded[batch_idx, assigned_gt]  # [K, 2]
-                dist_sq = ((anchor_pos - gt_for_fg) ** 2).sum(dim=-1)  # [K]
-                sigma_sq = self.gaussian_sigma**2
-                gaussian_vals = torch.exp(-dist_sq / (2 * sigma_sq))  # [K]
-                # cls_targets[fg_mask] is [K, nc] — each fg anchor has one
-                # non-zero entry (assigned class). Replace 1.0 with Gaussian.
-                fg_rows = cls_targets[fg_mask]  # [K, nc]
-                nonzero_mask = fg_rows > 0  # [K, nc]
-                fg_rows = nonzero_mask.float() * gaussian_vals.unsqueeze(-1)  # [K, nc]
-                cls_targets[fg_mask] = fg_rows
-                # Best anchor per GT already gets ~1.0 (d≈0), others decay
-        elif self.soft_targets:
+        if self.soft_targets:
             # Keep assigner's quality-weighted alignment scores (e.g., 0.87 for a
             # strong match, 0.31 for a weak one). This gives the classifier a graded
             # signal — the model learns "this is a confident class-2 prediction" vs
@@ -637,16 +583,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
             self.class_weights = cw.to(pred_scores.device)
             cw = self.class_weights
 
-        if self.gaussian_soft_targets:
-            # QFL is required for Gaussian spatial targets — standard FL gives
-            # maximum loss when σ=y (counterproductive for continuous targets).
-            loss_cls = _quality_focal_loss(
-                pred_scores.float(),
-                cls_targets,
-                beta=self.focal_gamma if self.focal_gamma > 0 else 2.0,
-                class_weights=cw,
-            )
-        elif self.soft_targets and self.focal_gamma > 0:
+        if self.soft_targets and self.focal_gamma > 0:
             loss_cls = _quality_focal_loss(
                 pred_scores.float(),
                 cls_targets,
@@ -728,9 +665,9 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 fg_class_idxs = cls_targets[fg_mask].argmax(dim=-1)  # [K]
                 fg_class_onehot = torch.zeros_like(fg_pred_class)
                 fg_class_onehot.scatter_(1, fg_class_idxs.unsqueeze(1), 1.0)
-                loss_class = F.binary_cross_entropy_with_logits(
-                    fg_pred_class, fg_class_onehot, reduction='none'
-                ).mean(-1)
+                loss_class = F.binary_cross_entropy_with_logits(fg_pred_class, fg_class_onehot, reduction='none').mean(
+                    -1
+                )
                 if plb_weights is not None:
                     fg_plb_cls = plb_weights[fg_mask]  # [K]
                     loss_class = loss_class * (1.0 + self.plb_cls_weight * fg_plb_cls)
@@ -739,11 +676,7 @@ class RayCastDetectionLoss(v8DetectionLoss):
             _cls_fg_sum = 0.0
             _cls_bg_sum = 0.0
         else:
-            target_scores_sum = (
-                max(fg_mask.sum(), 1)
-                if (self.soft_targets or self.gaussian_soft_targets)
-                else max(cls_targets.sum(), 1)
-            )
+            target_scores_sum = max(fg_mask.sum(), 1) if self.soft_targets else max(cls_targets.sum(), 1)
             loss[1] = loss_cls.sum() / target_scores_sum
 
             _cls_fg_sum = (loss_cls * cls_targets).sum().item() / max(target_scores_sum, 1)
@@ -982,8 +915,6 @@ class RayCastE2ELoss(E2ELoss):
         fg_cls_quality_scale: float = 0.0,
         fg_cls_quality_scale_o2o: float | None = None,
         steps_per_epoch: int = 0,
-        gaussian_soft_targets: bool = False,
-        gaussian_sigma: float = 0.5,
         prediction_refinement_weight: float = 0.0,
         range_l1_weight: float = 0.0,
         range_l1_eps: float = 0.1,
@@ -1027,8 +958,6 @@ class RayCastE2ELoss(E2ELoss):
             bg_cls_decay=bg_cls_decay,
             fg_cls_boost=fg_cls_boost,
             soft_targets=soft_targets,
-            gaussian_soft_targets=False,  # o2o-only; overridden below
-            gaussian_sigma=gaussian_sigma,
             class_weights=class_weights,
             lambda_cls=lambda_cls,
             lambda_xy=lambda_xy,
@@ -1078,11 +1007,6 @@ class RayCastE2ELoss(E2ELoss):
         if nc_override is not None:
             self.one2many.nc_override = nc_override
             self.one2one.nc_override = nc_override
-
-        # Per-branch Gaussian soft targets: o2o can use Gaussian independently
-        if gaussian_soft_targets:
-            self.one2one.gaussian_soft_targets = gaussian_soft_targets
-            self.one2one.gaussian_sigma = gaussian_sigma
 
         # Fix: parent E2ELoss.decay() uses self.updates (epoch counter) as
         # numerator and one2one.hyp.epochs as denominator.  To make the

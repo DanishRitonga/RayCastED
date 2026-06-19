@@ -28,7 +28,6 @@ from shapely.geometry import Polygon
 
 from raycasted.data.etl.ops import polygon_to_raycast, raycast_to_polygon
 from raycasted.data.etl.utils.constants import (
-    CLASS_IDX,
     CX_IDX,
     CY_IDX,
     RAY_END_IDX,
@@ -380,34 +379,6 @@ def _assert_thresholds(results, label):
 
     print(f'  [{label}] All assertions passed (mean IoU={mean_iou:.4f}, min IoU={min(ious):.4f})')
     print()
-
-
-def _visualize_worst(results, vertices_list, class_ids):
-    """Save visual comparison of worst-IoU polygons."""
-    try:
-        import matplotlib
-
-        matplotlib.use('Agg')
-        import matplotlib.pyplot as plt
-    except ImportError:
-        return
-
-    valid = [r for r in results if 'error' not in r]
-    if not valid:
-        return
-
-    valid.sort(key=lambda r: r['iou'])
-    worst = valid[: min(6, len(valid))]
-
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    axes = axes.flatten()
-
-    for ax, r in zip(axes, worst):
-        name = r['name']
-        old_ann = polygon_to_raycast(Polygon(vertices_list[0]), class_id=1, n_rays=N_RAYS)
-
-    plt.savefig(os.path.join(OUT_DIR, 'parity_worst.png'), dpi=150, bbox_inches='tight')
-    plt.close()
 
 
 if __name__ == '__main__':

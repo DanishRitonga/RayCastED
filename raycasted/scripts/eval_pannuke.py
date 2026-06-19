@@ -12,13 +12,13 @@ to match LSP-DETR exactly.
 
 Usage:
     # With pre-transformed test tiles
-    uv run python main/eval_pannuke.py \
+    uv run python -m raycasted.scripts.eval_pannuke \
         --weights train4/weights/best.pt \
         --data-dir output/pannuke/transformed/test \
         --batch 16 --device 0
 
     # Auto-transform from config
-    uv run python main/eval_pannuke.py \
+    uv run python -m raycasted.scripts.eval_pannuke \
         --config main/pannuke.yaml \
         --output output/pannuke \
         --weights train4/weights/best.pt \
@@ -43,7 +43,7 @@ from raycasted.model.metrics import (
     resolve_mask_overlaps,
 )
 from raycasted.model.register import register_raycast_head
-from eval_polygon import compute_polygon_metrics_streaming
+from raycasted.scripts.eval_polygon import compute_polygon_metrics_streaming
 
 
 def _polygons_to_masks_fast(detections: np.ndarray, img_h: int, img_w: int) -> list[np.ndarray]:
@@ -83,11 +83,27 @@ def _polygon_area(poly: np.ndarray) -> float:
 def _diagnose_tissue(results, metrics):
     """Per-tissue centroid F1 + AJI/bPQ/mPQ."""
     panuke_tissues = [
-        "Adrenal", "BileDuct", "Bladder", "Breast", "Cervix", "Colorectal",
-        "Esophagus", "Head&Neck", "Kidney", "Liver", "Lung", "Ovarian",
-        "Pancreatic", "Prostate", "Skin", "Stomach", "Testis", "Thyroid", "Uterus",
+        'Adrenal',
+        'BileDuct',
+        'Bladder',
+        'Breast',
+        'Cervix',
+        'Colorectal',
+        'Esophagus',
+        'Head&Neck',
+        'Kidney',
+        'Liver',
+        'Lung',
+        'Ovarian',
+        'Pancreatic',
+        'Prostate',
+        'Skin',
+        'Stomach',
+        'Testis',
+        'Thyroid',
+        'Uterus',
     ]
-    _per_group_metrics(results, panuke_tissues, 'tissue', "Tissue Type Breakdown", metrics)
+    _per_group_metrics(results, panuke_tissues, 'tissue', 'Tissue Type Breakdown', metrics)
 
 
 def _diagnose_nuclei(results, num_classes):
@@ -99,27 +115,40 @@ def _diagnose_nuclei(results, num_classes):
 def _per_group_metrics(results, names, key, title, metrics=None):
     """Compute per-group centroid F1 + optional AJI/bPQ/mPQ."""
     n_groups = len(names)
-    tp = [0] * n_groups; fp = [0] * n_groups; fn = [0] * n_groups
-    n_gt = [0] * n_groups; n_pred = [0] * n_groups
-    n_imgs = [0] * n_groups; seen = [set() for _ in range(n_groups)]
+    tp = [0] * n_groups
+    fp = [0] * n_groups
+    fn = [0] * n_groups
+    n_gt = [0] * n_groups
+    n_pred = [0] * n_groups
+    n_imgs = [0] * n_groups
+    seen = [set() for _ in range(n_groups)]
 
     for ri, r in enumerate(results):
         g = int(r.get(key, 0))
-        if g >= n_groups: continue
+        if g >= n_groups:
+            continue
         seen[g].add(ri)
         gt_p, pred_p = r['gt_polys'], r['pred_polys']
-        n_gt_g = len(gt_p); n_pred_g = len(pred_p)
-        n_gt[g] += n_gt_g; n_pred[g] += n_pred_g
-        if n_gt_g == 0: fp[g] += n_pred_g; continue
-        if n_pred_g == 0: fn[g] += n_gt_g; continue
-        dist = np.linalg.norm(gt_p[:,:2][:,None] - pred_p[:,:2][None,:], axis=2)
+        n_gt_g = len(gt_p)
+        n_pred_g = len(pred_p)
+        n_gt[g] += n_gt_g
+        n_pred[g] += n_pred_g
+        if n_gt_g == 0:
+            fp[g] += n_pred_g
+            continue
+        if n_pred_g == 0:
+            fn[g] += n_gt_g
+            continue
+        dist = np.linalg.norm(gt_p[:, :2][:, None] - pred_p[:, :2][None, :], axis=2)
         ri_, ci_ = linear_sum_assignment(dist)
-        t = int((dist[ri_,ci_] <= 12).sum())
-        tp[g] += t; fp[g] += n_pred_g - t; fn[g] += n_gt_g - t
+        t = int((dist[ri_, ci_] <= 12).sum())
+        tp[g] += t
+        fp[g] += n_pred_g - t
+        fn[g] += n_gt_g - t
 
-    t_aji = metrics.get('tissue_aji',{}) if metrics else {}
-    t_bpq = metrics.get('tissue_bpq',{}) if metrics else {}
-    t_mpq = metrics.get('tissue_mpq',{}) if metrics else {}
+    t_aji = metrics.get('tissue_aji', {}) if metrics else {}
+    t_bpq = metrics.get('tissue_bpq', {}) if metrics else {}
+    t_mpq = metrics.get('tissue_mpq', {}) if metrics else {}
     has_mask = bool(metrics)
 
     hdr = f'  {{"Group":<14}} {{"Imgs":>5}} {{"Prec":>7}} {{"Recall":>7}} {{"F1":>7}}'
@@ -144,14 +173,17 @@ def _per_group_metrics(results, names, key, title, metrics=None):
     print(f'  {title}')
     print(sep)
     col = ['Group', 'Imgs', 'Prec', 'Recall', 'F1']
-    if has_mask: col += ['AJI', 'bPQ', 'mPQ']
+    if has_mask:
+        col += ['AJI', 'bPQ', 'mPQ']
     print(hdr_fmt.format(*col))
     sep2 = '  ' + '-' * 14 + ' ' + '-' * 5 + ' ' + '-' * 7 + ' ' + '-' * 7 + ' ' + '-' * 7
-    if has_mask: sep2 += ' ' + '-' * 7 + ' ' + '-' * 7 + ' ' + '-' * 7
+    if has_mask:
+        sep2 += ' ' + '-' * 7 + ' ' + '-' * 7 + ' ' + '-' * 7
     print(sep2)
 
     for g in range(n_groups):
-        if n_gt[g] == 0: continue
+        if n_gt[g] == 0:
+            continue
         prec = tp[g] / (tp[g] + fp[g]) if (tp[g] + fp[g]) else 0
         rec = tp[g] / (tp[g] + fn[g]) if (tp[g] + fn[g]) else 0
         f1 = 2 * prec * rec / (prec + rec) if (prec + rec) else 0
@@ -163,12 +195,16 @@ def _per_group_metrics(results, names, key, title, metrics=None):
             aji_s = float(np.std(aji_arr)) if len(aji_arr) > 1 else 0.0
             bpq_m = float(np.mean(bpq_arr)) if len(bpq_arr) else 0.0
             bpq_s = float(np.std(bpq_arr)) if len(bpq_arr) > 1 else 0.0
-            mpq_vals = [np.mean([x for x in v if x > 0]) for v in t_mpq.get(g, {}).values() if v and any(x > 0 for x in v)]
+            mpq_vals = [
+                np.mean([x for x in v if x > 0]) for v in t_mpq.get(g, {}).values() if v and any(x > 0 for x in v)
+            ]
             mpq_m = float(np.mean(mpq_vals)) if mpq_vals else 0.0
             vals += [aji_m, bpq_m, mpq_m]
         print(row_fmt.format(*vals))
 
-    tot_tp = sum(tp); tot_fp = sum(fp); tot_fn = sum(fn)
+    tot_tp = sum(tp)
+    tot_fp = sum(fp)
+    tot_fn = sum(fn)
     p_t = tot_tp / (tot_tp + tot_fp) if (tot_tp + tot_fp) else 0
     r_t = tot_tp / (tot_tp + tot_fn) if (tot_tp + tot_fn) else 0
     f_t = 2 * p_t * r_t / (p_t + r_t) if (p_t + r_t) else 0
@@ -188,9 +224,12 @@ def _per_group_metrics(results, names, key, title, metrics=None):
                 vp = [np.mean([x for x in lst if x > 0]) for lst in v.values() if lst and any(x > 0 for x in lst)]
                 if vp:
                     per_t_mpq.append(float(np.mean(vp)))
-        am = np.mean(per_t_aji) if per_t_aji else 0; as_ = np.std(per_t_aji) if len(per_t_aji)>1 else 0
-        bm = np.mean(per_t_bpq) if per_t_bpq else 0; bs_ = np.std(per_t_bpq) if len(per_t_bpq)>1 else 0
-        mm = np.mean(per_t_mpq) if per_t_mpq else 0; ms_ = np.std(per_t_mpq) if len(per_t_mpq)>1 else 0
+        am = np.mean(per_t_aji) if per_t_aji else 0
+        as_ = np.std(per_t_aji) if len(per_t_aji) > 1 else 0
+        bm = np.mean(per_t_bpq) if per_t_bpq else 0
+        bs_ = np.std(per_t_bpq) if len(per_t_bpq) > 1 else 0
+        mm = np.mean(per_t_mpq) if per_t_mpq else 0
+        ms_ = np.std(per_t_mpq) if len(per_t_mpq) > 1 else 0
         print(f'  {"Avg":<14} {"":>5} {"":>7} {"":>7} {"":>7} {am:>7.4f} {bm:>7.4f} {mm:>7.4f}')
         print(f'  {"Std":<14} {"":>5} {"":>7} {"":>7} {"":>7} {as_:>7.4f} {bs_:>7.4f} {ms_:>7.4f}')
     print(sep)
@@ -922,7 +961,7 @@ def _main(args):
     # GFLOPs: scale quadratically with width_multiple from s-scale baseline (5.52G).
     # model_info tracing fails on ultralytics Concat with custom architecture.
     width_m = training_args.get('width_multiple', 1.0)
-    gflops = 5.52 * (width_m ** 2)
+    gflops = 5.52 * (width_m**2)
 
     # --- Inference time ---
     print('Benchmarking inference time...', flush=True)

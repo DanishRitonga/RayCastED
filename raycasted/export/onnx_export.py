@@ -70,7 +70,9 @@ class _ExportWrapper(nn.Module):
             return preds['boxes'], preds['binary_scores'], preds['class_scores']
         else:
             preds = head.forward_head(
-                head_in, box_head=head.one2one_cv2, cls_head=head.one2one_cv3,
+                head_in,
+                box_head=head.one2one_cv2,
+                cls_head=head.one2one_cv3,
             )
             if apply_isc:
                 sp = preds['scores'].sigmoid()
@@ -153,6 +155,7 @@ def export_raycast_onnx(
     if simplify:
         try:
             import onnxsim
+
             onnx_model_simplified, check = onnxsim.simplify(onnx_model)
             if check:
                 onnx.save(onnx_model_simplified, output_path)
@@ -236,9 +239,7 @@ def validate_onnx(
 
     return {
         'passed': all_passed,
-        'shape_match': all(
-            pt_output[i].shape == onnx_output[i].shape for i in range(len(names))
-        ),
+        'shape_match': all(pt_output[i].shape == onnx_output[i].shape for i in range(len(names))),
         'details': max_diffs,
     }
 

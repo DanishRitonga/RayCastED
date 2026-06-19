@@ -45,14 +45,6 @@ def decode_roi_bytes(df: pd.DataFrame, row_index: int) -> np.ndarray:
     return _decode_image_bytes(byte_data)
 
 
-def decode_ins_bytes(df: pd.DataFrame, row_index: int, ins_index: int = 0) -> np.ndarray:
-    """Decodes the instance image bytes for a given row index and instance index in the DataFrame."""
-    row = df.iloc[row_index]
-    byte_data = row['instances'][ins_index]['bytes']
-
-    return _decode_image_bytes(byte_data)
-
-
 # %%
 def _get_bbox(mask: np.ndarray, format: str = 'xyxy') -> tuple[int, int, int, int] | None:
     y, x = np.where(mask > 0)

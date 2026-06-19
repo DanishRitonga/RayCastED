@@ -41,7 +41,7 @@ bash clean_cache.sh
 - `raycasted/model/loss.py` — RayCastDetectionLoss + RayCastE2ELoss (dual assignment)
 - `raycasted/model/tal.py` — RayCastAssigner (greedy TAL) + HungarianRayCastAssigner (unused)
 - `raycasted/data/etl/utils/constants.py` — N_RAYS, ANGLE, RAY_COS/SIN state (module-level, late-binding)
-- `main/eval_pannuke.py` — streaming eval (AJI, bPQ, mPQ, AP, F1)
+- `raycasted/scripts/eval_pannuke.py` — streaming eval (AJI, bPQ, mPQ, AP, F1)
 
 **Execution flow:**
 ```
@@ -152,7 +152,7 @@ When adding a new config parameter:
 
 35. **Larger o2o cls head is a wash (train33)**: `cls_channel_scale=2.0` doubles c3 from 128→256. mAP50=0.512 vs train23's 0.517. fg/bg gap narrowed in the wrong direction (2.0x vs 2.5x) — fg confidence dropped more than bg. More capacity without more gradient signal = more uncertainty, not more discrimination. Config: `cls_channel_scale` (default 1.0), `cls_channel_min` (default 0).
 
-36. **AIFI-Lite on P4 is dead end for FCN (train34)**: Single TransformerEncoderLayer on P4 backbone features (16x16=256 tokens, ~790K params). mAP50=0.459 vs train23's 0.517. Same pattern as train31/32 self-attention — feature-level enrichment broadcasts globally-smoothed features to ALL 5376 anchors (98.7% bg), washing out local cls discrimination (fg/bg gap 2.5x→1.6x). In RT-DETR, decoder cross-attention selectively queries enriched features; FCN lacks this mechanism. Implementation: `raycasted/model/blocks/aifi.py` (AIFIBlock), `raycasted/cfg/yolo26s-aifi-p234.yaml`. Code exists but model reverted to `yolo26s-run28-p234.yaml`.
+36. **AIFI-Lite on P4 is dead end for FCN (train34)**: Single TransformerEncoderLayer on P4 backbone features (16x16=256 tokens, ~790K params). mAP50=0.459 vs train23's 0.517. Same pattern as train31/32 self-attention — feature-level enrichment broadcasts globally-smoothed features to ALL 5376 anchors (98.7% bg), washing out local cls discrimination (fg/bg gap 2.5x→1.6x). In RT-DETR, decoder cross-attention selectively queries enriched features; FCN lacks this mechanism. Implementation was `raycasted/model/blocks/aifi.py` (AIFIBlock) + `raycasted/cfg/yolo26s-aifi-p234.yaml`, both removed in cleanup; model reverted to `yolo26s-run28-p234.yaml`.
 
 37. **Gaussian spatial soft targets collapse fg/bg gap (train35)**: `gaussian_soft_targets=true` with `gaussian_sigma=0.1` gives fg anchors targets exp(-d²/2σ²) instead of 1.0. Same fundamental problem as train25/26/27 piou-based soft targets — spreading fg confidence across 0.3-0.8 instead of sharp 1.0 peak collapses fg/bg gap (2.5x→1.5x). Config: `gaussian_soft_targets` (default false), `gaussian_sigma` (default 0.5). Code exists but should stay disabled.
 
@@ -166,7 +166,7 @@ When adding a new config parameter:
 
 ### Eval Script
 
-26. **`main/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
+26. **`raycasted/scripts/eval_pannuke.py` uses streaming metrics**: Rasterizes one image at a time, computes all metrics, frees masks. Peak memory ~2.5GB for 2722 images. Prediction parsing: `pred_confs = det[:, raycast_dim]`, `pred_cls = det[:, raycast_dim + 1]`.
 
 27. **Eval must call `configure_rays(n_rays)` before rasterization**: `_polygons_to_masks_fast` uses `_const.RAY_COS`/`_const.RAY_SIN` (late-binding module attributes).
 

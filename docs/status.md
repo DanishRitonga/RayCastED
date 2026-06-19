@@ -4,7 +4,7 @@
 
 ## Evaluation Metrics
 
-PanNuke fold3 evaluation uses `main/eval_pannuke.py`, which computes comprehensive pixel-level and detection metrics using **mask IoU** (not polar IoU):
+PanNuke fold3 evaluation uses `raycasted/scripts/eval_pannuke.py`, which computes comprehensive pixel-level and detection metrics using **mask IoU** (not polar IoU):
 
 | Metric | Description | Method |
 |--------|-------------|--------|
@@ -29,7 +29,7 @@ Key differences from training-time metrics:
 
 ```bash
 # Run evaluation
-uv run python main/eval_pannuke.py \
+uv run python -m raycasted.scripts.eval_pannuke \
     --weights train4/weights/best.pt \
     --data-dir output/pannuke/transformed/test \
     --batch 16 --device 0 --conf 0.25

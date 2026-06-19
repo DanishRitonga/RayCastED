@@ -5,11 +5,11 @@ Works on both x86 (ONNX Runtime) and Jetson (TensorRT).
 
 Usage:
     # On x86 — validate ONNX export
-    python main/eval_onnx.py --onnx export/model.onnx --meta export/model.meta.json
+    python -m raycasted.scripts.eval_onnx --onnx export/model.onnx --meta export/model.meta.json
         --data-dir output/pannuke_64/transformed/test --conf 0.5
 
     # On Jetson — TensorRT engine
-    python main/eval_onnx.py --engine export/model.engine --meta export/model.meta.json
+    python -m raycasted.scripts.eval_onnx --engine export/model.engine --meta export/model.meta.json
         --data-dir output/pannuke_64/transformed/test --conf 0.5
 """
 
@@ -27,6 +27,7 @@ from raycasted.export.postprocess import postprocess_raw_output
 
 def load_ort_session(onnx_path: str):
     import onnxruntime as ort
+
     return ort.InferenceSession(onnx_path)
 
 
@@ -73,16 +74,24 @@ def run_ort(session, image: np.ndarray, meta: dict) -> np.ndarray:
     if len(names) >= 3 and 'binary' in [n.name for n in names]:
         idx = {n.name: i for i, n in enumerate(names)}
         return postprocess_raw_output(
-            outputs[idx['boxes']], outputs[idx['binary']],
-            outputs[idx['class']], meta['strides'], meta['imgsz'],
+            outputs[idx['boxes']],
+            outputs[idx['binary']],
+            outputs[idx['class']],
+            meta['strides'],
+            meta['imgsz'],
             meta.get('conf_threshold', 0.20),
             meta.get('binary_threshold', 0.01),
             meta['n_rays'],
         )
     else:
         return postprocess_raw_output(
-            outputs[0], None, outputs[1], meta['strides'], meta['imgsz'],
-            meta.get('conf_threshold', 0.20), n_rays=meta['n_rays'],
+            outputs[0],
+            None,
+            outputs[1],
+            meta['strides'],
+            meta['imgsz'],
+            meta.get('conf_threshold', 0.20),
+            n_rays=meta['n_rays'],
         )
 
 
@@ -118,6 +127,7 @@ def main():
     args = parser.parse_args()
 
     import json
+
     with open(args.meta) as f:
         meta = json.load(f)
 
@@ -187,13 +197,25 @@ def main():
         # Postprocess
         if hierarchical and 'binary' in outputs:
             det = postprocess_raw_output(
-                outputs['boxes'], outputs['binary'], outputs['class'],
-                strides, imgsz, conf_threshold, binary_threshold, n_rays,
+                outputs['boxes'],
+                outputs['binary'],
+                outputs['class'],
+                strides,
+                imgsz,
+                conf_threshold,
+                binary_threshold,
+                n_rays,
             )
         else:
             scores = outputs.get('scores', outputs.get('class'))
             det = postprocess_raw_output(
-                outputs['boxes'], None, scores, strides, imgsz, conf_threshold, n_rays=n_rays,
+                outputs['boxes'],
+                None,
+                scores,
+                strides,
+                imgsz,
+                conf_threshold,
+                n_rays=n_rays,
             )
 
         # GT
@@ -209,18 +231,22 @@ def main():
         n_pred_total += det.shape[0]
         n_gt_total += n_gt
 
-        results.append({
-            'pred_polys': det[:, :raycast_dim] if det.shape[0] > 0 else np.zeros((0, raycast_dim)),
-            'pred_confs': det[:, raycast_dim] if det.shape[0] > 0 else np.array([]),
-            'pred_cls': det[:, raycast_dim + 1].astype(int) if det.shape[0] > 0 else np.array([]),
-            'gt_polys': gt_poly,
-            'gt_cls': labels[:, 0].astype(int) if labels.ndim >= 2 and labels.shape[0] > 0 else np.array([], dtype=int),
-            'imgsz': imgsz,
-        })
+        results.append(
+            {
+                'pred_polys': det[:, :raycast_dim] if det.shape[0] > 0 else np.zeros((0, raycast_dim)),
+                'pred_confs': det[:, raycast_dim] if det.shape[0] > 0 else np.array([]),
+                'pred_cls': det[:, raycast_dim + 1].astype(int) if det.shape[0] > 0 else np.array([]),
+                'gt_polys': gt_poly,
+                'gt_cls': labels[:, 0].astype(int)
+                if labels.ndim >= 2 and labels.shape[0] > 0
+                else np.array([], dtype=int),
+                'imgsz': imgsz,
+            }
+        )
 
         if (i + 1) % 500 == 0:
             elapsed = time.perf_counter() - t_start
-            print(f'  {i+1}/{len(dataset)} images ({elapsed:.1f}s)', flush=True)
+            print(f'  {i + 1}/{len(dataset)} images ({elapsed:.1f}s)', flush=True)
 
     elapsed = time.perf_counter() - t_start
     ms_per_img = elapsed / max(len(results), 1) * 1000
@@ -228,7 +254,7 @@ def main():
     print(f'  Predictions: {n_pred_total}, GT: {n_gt_total}')
 
     # Metrics (reuse eval_pannuke.py streaming)
-    from eval_pannuke import compute_metrics_streaming, _diagnose_recall
+    from raycasted.scripts.eval_pannuke import compute_metrics_streaming, _diagnose_recall
 
     print('Computing metrics...')
     metrics = compute_metrics_streaming(results, num_classes=nc)

@@ -53,10 +53,10 @@ class RayCastGPU:
 
         v_padded, mask = RayCastGPU._pad_vertices(vertices, k_max, device, torch)
         directions = RayCastGPU._build_ray_directions(n_rays, device, torch)
-        centroids = RayCastGPU._compute_centroids(v_padded, mask, k_max, torch)
-        inside = RayCastGPU._point_in_polygon(centroids, v_padded, mask, k_max, torch)
+        centroids = RayCastGPU._compute_centroids(v_padded, mask, torch)
+        inside = RayCastGPU._point_in_polygon(centroids, v_padded, mask, torch)
         centroids = RayCastGPU._fallback_centroid(centroids, inside, v_padded, mask, torch)
-        distances = RayCastGPU._solve_ray_intersections(centroids, v_padded, mask, directions, k_max, torch)
+        distances = RayCastGPU._solve_ray_intersections(centroids, v_padded, mask, directions, torch)
 
         return RayCastGPU._assemble_output(distances, centroids, class_ids, n_rays, n_polys, torch)
 
@@ -105,7 +105,7 @@ class RayCastGPU:
         return (torch.cos(angles), torch.sin(angles))
 
     @staticmethod
-    def _compute_centroids(v_padded, mask, k_max, torch):
+    def _compute_centroids(v_padded, mask, torch):
         """Area-weighted centroid via shoelace formula, vectorized over all polygons."""
         n_polys, n_verts, _ = v_padded.shape
         n_real = mask.sum(dim=1).long()
@@ -138,7 +138,7 @@ class RayCastGPU:
         return torch.stack([cx, cy], dim=-1)
 
     @staticmethod
-    def _point_in_polygon(centroids, v_padded, mask, k_max, torch):
+    def _point_in_polygon(centroids, v_padded, mask, torch):
         """Crossing-number test to detect centroids outside their polygon."""
         n_polys, n_verts, _ = v_padded.shape
         n_real = mask.sum(dim=1).long()
@@ -189,7 +189,7 @@ class RayCastGPU:
         candidates = centroids.clone()
         for frac in [0.5, 0.75, 0.875, 0.9375, 0.96875]:
             mid = centroids + frac * (target - centroids)
-            mid_inside = RayCastGPU._point_in_polygon(mid, v_padded, mask, k_max, torch)
+            mid_inside = RayCastGPU._point_in_polygon(mid, v_padded, mask, torch)
             candidates = torch.where(mid_inside.unsqueeze(1), mid, candidates)
 
         centroids = torch.where(outside.unsqueeze(1), candidates, centroids)
@@ -197,7 +197,7 @@ class RayCastGPU:
         return centroids
 
     @staticmethod
-    def _solve_ray_intersections(centroids, v_padded, mask, directions, k_max, torch):
+    def _solve_ray_intersections(centroids, v_padded, mask, directions, torch):
         """Cramer's rule batch solve for all (polygon, ray, edge) triples."""
         cos_d, sin_d = directions
         n_polys, n_verts, _ = v_padded.shape
