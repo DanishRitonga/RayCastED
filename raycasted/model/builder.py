@@ -45,15 +45,7 @@ from ultralytics.utils.ops import make_divisible
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.blocks.dcn_blocks import C3k2_DCN
 from raycasted.model.blocks.lk_block import C3k2_LK
-from raycasted.model.blocks.resoconv import (
-    DWT_HF,
-    DWT_LL,
-    HFResidual,
-    ResoConv,
-    ResoConvDS,
-    ResoConvDS_Hybrid,
-    ResoConvHybrid,
-)
+from raycasted.model.blocks.resoconv import ResoConv, ResoConvHybrid
 
 BASE_MODULES = frozenset(
     {
@@ -66,9 +58,7 @@ BASE_MODULES = frozenset(
         DWConvTranspose2d,
         RepC3,
         ResoConv,
-        ResoConvDS,
-        ResoConvDS_Hybrid,
-        ResoConvHybrid,
+        ResoConvHybrid,  # backward-compat alias for old yamls/checkpoints
         C3k2_LK,
         C3k2_DCN,
     }
@@ -92,29 +82,6 @@ def _resolve_ch(ch_list, f):
     return ch_list[f] if isinstance(f, int) else ch_list[f[0]]
 
 
-def _handle_dwt_ll(ch_list, f, args, layers):
-    c1 = _resolve_ch(ch_list, f)
-    wavelet_type = args[0] if len(args) > 0 else 'bior2.2'
-    return DWT_LL(c1, wavelet_type=wavelet_type), c1
-
-
-def _handle_dwt_hf(ch_list, f, args, layers):
-    c1 = _resolve_ch(ch_list, f)
-    drop_hh = args[0] if len(args) > 0 else False
-    wavelet_type = args[1] if len(args) > 1 else 'bior2.2'
-    n_hf = 2 if drop_hh else 3
-    return DWT_HF(c1, drop_hh=drop_hh, wavelet_type=wavelet_type), c1 * n_hf
-
-
-def _handle_hf_residual(ch_list, f, args, layers):
-    source_idx = int(args[0])
-    source_c2 = ch_list[source_idx]
-    c2 = _resolve_ch(ch_list, f)
-    m_ = HFResidual(c2, source_c2)
-    m_._source = layers[source_idx]
-    return m_, c2
-
-
 def _handle_hgstem(ch_list, f, args, layers):
     c1 = _resolve_ch(ch_list, f)
     cm = args[0]
@@ -135,9 +102,6 @@ def _handle_hgblock(ch_list, f, args, layers):
 _SPECIAL_HANDLERS = {
     HGStem: _handle_hgstem,
     HGBlock: _handle_hgblock,
-    DWT_LL: _handle_dwt_ll,
-    DWT_HF: _handle_dwt_hf,
-    HFResidual: _handle_hf_residual,
 }
 
 
