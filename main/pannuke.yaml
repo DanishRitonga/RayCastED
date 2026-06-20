@@ -225,9 +225,9 @@ datasets:
     split_args:
       regex: "(fold[1-3])"
       split_map:
-        "fold1": "test"
-        "fold2": "train"
-        "fold3": "val"
+        "fold1": "val"
+        "fold2": "test"
+        "fold3": "train"
     modality_separation: "bundled_archive"
 
     namespace_map:
