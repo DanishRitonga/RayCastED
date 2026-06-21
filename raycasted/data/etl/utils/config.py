@@ -69,18 +69,9 @@ class TrainingSettings(BaseModel):
     focal_alpha: float = 0.25  # positive weight (standard: 0.25)
     log_ray_loss: bool = False  # log-space L1 on rays for scale-invariant errors
     bg_fg_ratio: int = 3  # max bg anchors per fg anchor in cls loss
-    ohem_bg_ratio: float = 0.0  # OHEM: keep hardest K bg per fg (0.0=random, >0=hard example mining)
 
-    # Pixel-Level Balancing
-    plb_enabled: bool = False  # area-based fg weighting to boost small nuclei
-    plb_cls_weight: float = 1.0  # multiplier for PLB on cls (binary+CE). 1.0 = default
-    bg_cls_decay: float = 1.0  # background classification loss decay (1.0=full, 0.0=off)
-    fg_cls_boost: float = 0.0  # fg cls boost by alignment quality (0.0=disabled)
-    fg_cls_quality_scale: float = 0.0  # multiplicative quality re-weight (0.0=disabled, 1.0=full quality scaling)
-
-    # Soft targets — keep assigner quality scores instead of hard 0/1 binarisation
-    soft_targets: bool = False
-    soft_targets_o2o: bool | None = None  # per-branch override for o2o
+    # Pixel-Level Balancing — area-based fg weighting to boost small nuclei
+    plb_enabled: bool = False
 
     # Per-o2o classification loss overrides — the o2o branch must be a
     # "background specialist" because NMS-free inference has no safety net.
@@ -88,19 +79,12 @@ class TrainingSettings(BaseModel):
     focal_gamma_o2o: float | None = None
     focal_alpha_o2o: float | None = None
     bg_fg_ratio_o2o: int | None = None
-    ohem_bg_ratio_o2o: float | None = None  # OHEM for o2o branch (None=inherit base)
-    bg_cls_decay_o2o: float | None = None  # per-branch bg suppression for o2o
-    fg_cls_boost_o2o: float | None = None  # per-branch quality re-weighting for o2o
-    fg_cls_quality_scale_o2o: float | None = None  # per-branch multiplicative quality for o2o
 
     # Loss weights (literature: regression should be 3-7x higher than cls)
     lambda_l1: float = 14.0  # L1 ray distance weight
     lambda_piou: float = 13.0  # Polar IoU weight
     lambda_cls: float = 2.0  # classification weight
     lambda_xy: float = 500.0  # centroid xy weight
-
-    # Per-class inverse-frequency weights (sqrt-smoothed). None = no weighting.
-    class_weights: list[float] | None = None
 
     # Alignment threshold
     align_threshold: float = 0.0
@@ -141,17 +125,10 @@ class TrainingSettings(BaseModel):
     # Early stopping
     patience: int = 100  # epochs with no improvement before stopping (default: 100)
 
-    # GradNorm — dynamic per-task loss weighting
-    gradnorm: bool = False  # enable GradNorm
-    gradnorm_alpha: float = 0.5  # restoring force: 0=uniform, 1=aggressive
-    gradnorm_warmup_epochs: int = 5  # use static weights for first N epochs  # kernel size for polygon refinement block
-
     # E2E dual-TAL assignment (NMS-free)
     tal_topk: int = 13  # one2many positives per GT
     assigner_alpha: float = 0.5  # cls^alpha in alignment metric
     assigner_beta: float = 6.0  # iou^beta in alignment metric
-    nwd_enabled: bool = False  # replace pIoU with NWD (Wasserstein) similarity
-    nwd_c: float = 0.001  # NWD normalisation constant (smaller = sharper)
 
     # Auxiliary xy head — bypass backbone→head bottleneck
     aux_xy_weight: float = 0.0  # Huber loss weight (0 = disabled, 10.0 = recommended)

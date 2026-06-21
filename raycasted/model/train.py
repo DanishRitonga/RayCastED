@@ -161,30 +161,6 @@ class _RayCastCriterionWrapper:
         self._training_config = training_config
         self._steps_per_epoch = steps_per_epoch
 
-    def _build_class_weights(self, tcfg: dict):
-        """Build per-class inverse-frequency weights from config or training data.
-
-        Uses ``class_weights`` from config. Supports:
-          - None: no weighting (default)
-          - 'auto': compute from training data class distribution (requires
-            trainer to call set_class_weights later)
-          - list[float]: explicit per-class weights
-
-        Returns:
-            torch.Tensor [nc] or None.
-        """
-        import torch as _torch
-
-        cw = tcfg.get('class_weights')
-        if cw is None:
-            return None
-        if isinstance(cw, str) and cw == 'auto':
-            # Placeholder — will be replaced by set_class_weights after data setup
-            return None
-        if isinstance(cw, (list, tuple)):
-            return _torch.tensor(cw, dtype=_torch.float32)
-        return None
-
     def __call__(self):
         tcfg = self._training_config or {}
         return RayCastE2ELoss(
@@ -194,32 +170,17 @@ class _RayCastCriterionWrapper:
             assigner_radius_scale=tcfg.get('assigner_radius_scale', 1.5),
             assigner_alpha=tcfg.get('assigner_alpha', 0.5),
             assigner_beta=tcfg.get('assigner_beta', 6.0),
-            nwd_enabled=tcfg.get('nwd_enabled', False),
-            nwd_c=tcfg.get('nwd_c', 0.001),
             log_ray_loss=tcfg.get('log_ray_loss', False),
             focal_gamma=tcfg.get('focal_gamma', 0.0),
             focal_alpha=tcfg.get('focal_alpha', 0.25),
             align_threshold=tcfg.get('align_threshold', 0.0),
-            gradnorm=tcfg.get('gradnorm', False),
-            gradnorm_alpha=tcfg.get('gradnorm_alpha', 0.5),
-            gradnorm_warmup_epochs=tcfg.get('gradnorm_warmup_epochs', 5),
             lambda_aux_xy=tcfg.get('aux_xy_weight', 0.0),
             aux_xy_ramp_epochs=tcfg.get('aux_xy_ramp_epochs', 100),
             bg_fg_ratio=tcfg.get('bg_fg_ratio', 3),
-            ohem_bg_ratio=tcfg.get('ohem_bg_ratio', 0.0),
             plb_enabled=tcfg.get('plb_enabled', False),
-            plb_cls_weight=tcfg.get('plb_cls_weight', 1.0),
-            bg_cls_decay=tcfg.get('bg_cls_decay', 1.0),
-            fg_cls_boost=tcfg.get('fg_cls_boost', 0.0),
-            soft_targets=tcfg.get('soft_targets', False),
-            soft_targets_o2o=tcfg.get('soft_targets_o2o', None),
             focal_gamma_o2o=tcfg.get('focal_gamma_o2o', None),
             focal_alpha_o2o=tcfg.get('focal_alpha_o2o', None),
             bg_fg_ratio_o2o=tcfg.get('bg_fg_ratio_o2o', None),
-            ohem_bg_ratio_o2o=tcfg.get('ohem_bg_ratio_o2o', None),
-            bg_cls_decay_o2o=tcfg.get('bg_cls_decay_o2o', None),
-            fg_cls_boost_o2o=tcfg.get('fg_cls_boost_o2o', None),
-            class_weights=self._build_class_weights(tcfg),
             o2o_topk2_start=tcfg.get('o2o_topk2_start', 1),
             o2o_topk2_anneal_epoch=tcfg.get('o2o_topk2_anneal_epoch', 0),
             o2o_topk2_anneal_end=tcfg.get('o2o_topk2_anneal_end', 0.5),
@@ -231,8 +192,6 @@ class _RayCastCriterionWrapper:
             lambda_piou=tcfg.get('lambda_piou', 13.0),
             lambda_cls=tcfg.get('lambda_cls', 2.0),
             lambda_xy=tcfg.get('lambda_xy', 500.0),
-            fg_cls_quality_scale=tcfg.get('fg_cls_quality_scale', 0.0),
-            fg_cls_quality_scale_o2o=tcfg.get('fg_cls_quality_scale_o2o', None),
             steps_per_epoch=self._steps_per_epoch,
             hierarchical_cls=tcfg.get('hierarchical_cls', False),
             nc_override=tcfg.get('nc_override', None),
@@ -308,20 +267,6 @@ class RayCastDetectionModel(DetectionModel):
         if verbose:
             self.info()
             LOGGER.info('')
-
-
-def _gradnorm_update_callback(trainer):
-    """Update GradNorm weights after each training step.
-
-    Called via on_train_batch_end.  Accesses the GradNormManager through
-    the criterion (RayCastE2ELoss) attached to the model.
-    """
-    criterion = getattr(trainer, 'criterion', None)
-    if criterion is None:
-        return
-    gn = getattr(criterion, 'gradnorm_manager', None)
-    if gn is not None:
-        gn.update()
 
 
 def _best_epoch_callback(trainer):
@@ -409,8 +354,6 @@ class RayCastTrainer(DetectionTrainer):
         self.args.mixup = 0.0
         self.training_config = training_config  # dict or None
 
-        # Register GradNorm callback — updates dynamic loss weights after each step
-        self.add_callback('on_train_batch_end', _gradnorm_update_callback)
         # Register best-epoch logger — prints after each validation epoch
         self.add_callback('on_fit_epoch_end', _best_epoch_callback)
         # Register per-epoch LR logging — critical for MuSGD multi-group debugging

@@ -1,11 +1,7 @@
-"""RayCastED — RayCast Detection Loss (Phase 6).
+"""RayCastED — RayCast Detection Loss.
 
-4-term polygon loss:
-  L = λ_xy × L_xy + λ_cls × L_cls + λ_L1 × L_L1 + λ_smooth × L_smooth
-
-With GradNorm enabled, the static λ values are replaced by dynamic weights
-that equalise gradient norms across all 4 tasks, preventing cls_loss from
-dominating the shared backbone gradients.
+5-term polygon loss:
+  L = λ_xy × L_xy + λ_cls × L_cls + λ_L1 × L_L1 + λ_piou × L_PolarIoU + λ_smooth × L_smooth
 
 RayCastDetectionLoss subclasses v8DetectionLoss, replacing bbox/DFL logic
 with polygon regression terms.
@@ -23,7 +19,6 @@ import logging
 from functools import partial
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from ultralytics.utils import LOGGER
 from ultralytics.utils.loss import E2ELoss, v8DetectionLoss
@@ -39,147 +34,6 @@ from raycasted.model.blocks.star_distances_analytical import (
 from raycasted.model.tal import RayCastAssigner
 
 logger = logging.getLogger(__name__)
-
-
-# ──────────────────────────────────────────────────────────────────────
-#  GradNorm — Gradient Normalisation for Multi-Task Loss Balancing
-# ──────────────────────────────────────────────────────────────────────
-
-_TASK_NAMES = ('xy', 'cls', 'l1', 'piou', 'smooth')
-
-
-class GradNormManager:
-    """Per-task gradient-norm equalisation (Chen et al., 2018).
-
-    Uses the loss-ratio approximation (r_i = L_i(t) / L_i(0)) to estimate
-    per-task gradient norms without requiring per-task backward passes.
-    After every training step call :meth:`update` to re-balance the loss
-    weights so that all tasks contribute equal gradient magnitude to the
-    shared backbone.
-
-    The algorithm targets:
-
-        G_i(t) = Ḡ(t) × [ r_i(t) ]^α
-
-    where r_i = L_i(t) / L_i(0) is the inverse training rate and α
-    controls how aggressively slow learners are boosted (0 = uniform,
-    1 = full inverse-rate scaling).
-
-    Parameters
-    ----------
-    model : nn.Module
-        The full detection model (``model.model`` is the nn.Sequential).
-    num_tasks : int
-        Number of scalar loss terms (default 5).
-    alpha : float
-        GradNorm restoring force.  Higher → more aggressive rebalancing.
-        Recommended: 0.5 for well-behaved losses, up to 1.0 for extreme
-        imbalance.
-    initial_weights : list[float] | None
-        Starting λ values.  ``None`` uses ``[1.0] * num_tasks``.
-    warmup_epochs : int
-        Number of epochs before GradNorm activates.  During warmup,
-        static weights from ``initial_weights`` are used.
-    """
-
-    def __init__(
-        self,
-        model: nn.Module,
-        num_tasks: int = 5,
-        alpha: float = 0.5,
-        initial_weights: list[float] | None = None,
-        warmup_epochs: int = 5,
-    ):
-        self.num_tasks = num_tasks
-        self.alpha = alpha
-        self.task_names = _TASK_NAMES[:num_tasks]
-
-        # ── learnable log-weights ──
-        init = initial_weights or [1.0] * num_tasks
-        self.log_weights = nn.Parameter(
-            torch.tensor(init, dtype=torch.float32).log(),
-            requires_grad=True,
-        )
-
-        # ── tracking state ──
-        self.initial_losses: torch.Tensor | None = None
-        self._current_losses: torch.Tensor | None = None
-        self._step_count = 0
-        self._warmup_epochs = warmup_epochs
-
-    # ── dynamic enabled (warmup gate) ──────────────────────────────
-
-    @property
-    def enabled(self) -> bool:
-        """GradNorm is active only after warmup completes."""
-        return self._step_count >= self._warmup_epochs
-
-    # ── forward-pass loss storage ──────────────────────────────────
-
-    def store_losses(self, losses: torch.Tensor) -> None:
-        """Store per-task losses from the current forward pass.
-
-        Called from RayCastDetectionLoss.__call__ BEFORE weight
-        application so that update() can compute loss ratios.
-
-        On the first call after warmup, these become the baseline
-        L_i(0) for the inverse training rate r_i = L_i(t) / L_i(0).
-
-        Args:
-            losses: [5] tensor of unweighted per-task losses.
-        """
-        self._current_losses = losses.detach().clone()
-        if self.initial_losses is None and self.enabled:
-            self.initial_losses = self._current_losses.clone()
-            logger.info('GradNorm: initial losses set — %s', self._current_losses.tolist())
-
-    # ── weight computation ─────────────────────────────────────────
-
-    def get_weights(self) -> torch.Tensor:
-        """Return unnormalised dynamic weights (clamped to [0.1, 10.0]).
-
-        Unlike softmax-normalised GradNorm, these weights are NOT
-        constrained to sum to num_tasks.  This allows slow learners
-        (e.g. cls) to receive unconstrained weight growth without
-        starving fast learners of gradient signal.
-        """
-        return self.log_weights.exp().clamp(0.1, 10.0)
-
-    # ── GradNorm update (called from on_train_batch_end callback) ─
-
-    def update(self) -> None:
-        """Update log-weights using the loss-ratio method.
-
-        Uses r_i = L_i(t) / L_i(0) as a proxy for per-task gradient
-        norms (Chen et al., 2018 §4.2).  Computes target gradient
-        norms G_i* = Ḡ × r_i^α and nudges weights so that each
-        task contributes equal gradient magnitude.
-        """
-        if not self.enabled:
-            self._step_count += 1
-            return
-        if self._current_losses is None or self.initial_losses is None:
-            return
-
-        with torch.no_grad():
-            w = self.log_weights.exp()
-            r = self._current_losses / (self.initial_losses + 1e-8)
-            r = r.clamp(min=0.01, max=100.0)
-            r_avg = r.mean()
-            r_rel = r / (r_avg + 1e-8)
-
-            # Target: tasks that learned slowly (high r_rel) get boosted
-            grad_w = 1.0 - (r_rel**self.alpha)
-            # Decay toward 1.0 to prevent unbounded growth (no normalization)
-            grad_w = grad_w + 0.02 * (1.0 - w)
-            grad_w = grad_w - grad_w.mean()  # zero-centre
-
-            lr = 0.025
-            new_log_w = self.log_weights - lr * grad_w.to(self.log_weights.device)
-            self.log_weights.data = 0.9 * self.log_weights.data + 0.1 * new_log_w
-            self.log_weights.data.clamp_(-2.3, 2.3)  # e^-2.3≈0.1 to e^2.3≈10.
-
-        self._step_count += 1
 
 
 def _log_space_ray_loss(pred_rays: torch.Tensor, target_rays: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
@@ -211,7 +65,6 @@ def _focal_loss(
     target_scores: torch.Tensor,
     gamma: float = 2.0,
     alpha: float = 0.25,
-    class_weights: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Standard focal loss (Lin et al., 2017) for multi-label classification.
 
@@ -221,18 +74,11 @@ def _focal_loss(
     Down-weights easy negatives (high p_t) and amplifies hard positives (low p_t),
     critical for dense cell scenes where background anchors vastly outnumber positives.
 
-    NOTE: Previous default alpha=1.0 killed ALL background gradients (bg weight = 0).
-    The standard value from Lin et al. 2017 is alpha=0.25 (fg=0.25, bg=0.75).
-
     Args:
         pred_scores: [B, N, C] raw logits from the detection head.
-        target_scores: [B, N, C] classification targets. When ``soft_targets=True``,
-            these are quality-weighted alignment scores in [0, 1]. Otherwise binary 0/1.
+        target_scores: [B, N, C] binary classification targets.
         gamma: Focusing parameter. Higher values down-weight easy examples more.
         alpha: Positive sample weight factor. Standard: 0.25 (fg=0.25, bg=0.75).
-        class_weights: [C] per-class weight applied to positive samples. When provided,
-            each class's positive loss is scaled by its weight — use inverse-frequency
-            weights to rebalance rare classes.
 
     Returns:
         [B, N, C] element-wise focal loss (no reduction).
@@ -243,59 +89,7 @@ def _focal_loss(
     p_t = target_scores * pred_prob + (1 - target_scores) * (1 - pred_prob)
     modulating_factor = (1.0 - p_t) ** gamma
     alpha_factor = target_scores * alpha + (1 - target_scores) * (1 - alpha)
-
-    loss = modulating_factor * alpha_factor * ce
-
-    # Per-class weighting for positive samples — rebalances rare classes
-    if class_weights is not None:
-        # class_weights shape [C] → broadcast over [B, N, C]
-        # Scale only where target > 0 (positive class); bg stays as-is
-        pos_mask = (target_scores > 0).float()
-        loss = loss * (1.0 + pos_mask * (class_weights.unsqueeze(0).unsqueeze(0) - 1.0))
-
-    return loss
-
-
-def _quality_focal_loss(
-    pred_scores: torch.Tensor,
-    target_scores: torch.Tensor,
-    beta: float = 2.0,
-    class_weights: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Quality Focal Loss (QFL) from Generalized Focal Loss (Li et al., NeurIPS 2020).
-
-    QFL(σ) = -|y - σ|^β * [(1-y)*log(1-σ) + y*log(σ)]
-
-    Key differences from standard focal loss with naive soft target interpolation:
-    - CE part is full BCE with continuous target (NOT log(p_t) where p_t interpolates)
-    - Focusing factor is |y - σ|^β (NOT (1-p_t)^γ)
-    - No alpha weighting (paper drops it — quality label itself modulates the loss)
-    - Global minimum at σ = y (correctly predicts the quality score)
-
-    When y=0.5 and σ=0.5: standard FL gives MAXIMUM loss, QFL gives ZERO loss.
-
-    Args:
-        pred_scores: [B, N, C] raw logits from the detection head.
-        target_scores: [B, N, C] quality labels ∈ [0, 1].
-            y=0 → negative (bg), 0<y≤1 → positive with quality y.
-        beta: Focusing parameter (β=2 works best per GFL paper).
-        class_weights: [C] per-class weight applied to positive samples.
-
-    Returns:
-        [B, N, C] element-wise quality focal loss (no reduction).
-    """
-    pred_prob = pred_scores.float().sigmoid()
-    y = target_scores.float()
-
-    bce = F.binary_cross_entropy_with_logits(pred_scores.float(), y, reduction='none')
-    modulating_factor = (y - pred_prob).abs().pow(beta)
-    loss = modulating_factor * bce
-
-    if class_weights is not None:
-        pos_mask = (y > 0).float()
-        loss = loss * (1.0 + pos_mask * (class_weights.unsqueeze(0).unsqueeze(0) - 1.0))
-
-    return loss
+    return modulating_factor * alpha_factor * ce
 
 
 class RayCastDetectionLoss(v8DetectionLoss):
@@ -322,24 +116,14 @@ class RayCastDetectionLoss(v8DetectionLoss):
         assigner_beta: float = 6.0,
         align_threshold: float = 0.0,
         log_ray_loss: bool = False,
-        gradnorm_manager: GradNormManager | None = None,
         focal_gamma: float = 0.0,
         focal_alpha: float = 0.25,
         bg_fg_ratio: int = 3,
-        ohem_bg_ratio: float = 0.0,
         plb_enabled: bool = False,
-        plb_cls_weight: float = 1.0,
-        bg_cls_decay: float = 1.0,
-        fg_cls_boost: float = 0.0,
-        fg_cls_quality_scale: float = 0.0,
-        soft_targets: bool = False,
-        class_weights: torch.Tensor | None = None,
         lambda_cls: float = 2.0,
         lambda_xy: float = 500.0,
         hierarchical_cls: bool = False,
         nc_override: int | None = None,
-        nwd_enabled: bool = False,
-        nwd_c: float = 0.001,
         analytical_rays: bool = False,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
@@ -349,15 +133,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.use_dfl = False  # DFL not applicable to polygon regression
         self.hierarchical_cls = hierarchical_cls
         self.nc_override = nc_override
-        self.nwd_enabled = nwd_enabled
         self.analytical_rays = analytical_rays
         self.n_rays = self.raycast_dim - 2
 
         # Log-space ray loss configuration
         self.log_ray_loss = log_ray_loss
-
-        # GradNorm integration — dynamic loss weight balancing
-        self.gradnorm_manager = gradnorm_manager
 
         # Focal loss configuration (gamma=0 disables focal, uses pure BCE)
         self.focal_gamma = focal_gamma
@@ -365,25 +145,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
         # Pixel-Level Balancing — area-based fg weighting to boost small nuclei
         self.plb_enabled = plb_enabled
-        self.plb_cls_weight = plb_cls_weight
-
-        # Classification loss weighting:
-        #   bg_cls_decay: downweight bg anchor cls gradient (e.g., 0.5)
-        #   fg_cls_boost: amplify fg by alignment quality (0.0 = disabled)
-        #     weight = bg_cls_decay for bg, (1.0 + fg_cls_boost * quality) for fg
-        self.bg_cls_decay = bg_cls_decay
-        self.fg_cls_boost = fg_cls_boost
-        self.fg_cls_quality_scale = fg_cls_quality_scale
-
-        # Soft targets — use assigner's quality-weighted alignment scores directly
-        # instead of hard binarising to 0/1. Gives the classifier a graded signal
-        # that distinguishes strong matches from weak ones.
-        self.soft_targets = soft_targets
-
-        # Per-class inverse-frequency weights [C]. When provided, scales positive
-        # classification loss per class to rebalance rare categories.
-        # Stored as plain attribute (not register_buffer — parent is not nn.Module).
-        self.class_weights: torch.Tensor | None = class_weights
 
         # Assigner swap — use tal_topk directly for E2E compatibility
         self.assigner = RayCastAssigner(
@@ -395,8 +156,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
             topk2=tal_topk2,
             radius_scale=assigner_radius_scale,
             align_threshold=align_threshold,
-            use_nwd=nwd_enabled,
-            nwd_c=nwd_c,
         )
 
         # Loss weights — decoded normalised xy space [0,1].
@@ -411,7 +170,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.lambda_piou = 13.0
         self.lambda_smooth = 0.0  # reverse-annealed by RayCastE2ELoss
         self.bg_fg_ratio = bg_fg_ratio
-        self.ohem_bg_ratio = ohem_bg_ratio
 
     def preprocess(self, targets, batch_size, scale_tensor=None):
         """Preprocess polygon targets.
@@ -526,27 +284,17 @@ class RayCastDetectionLoss(v8DetectionLoss):
             plb_weights = plb_weights * fg_mask.float()  # zero for bg
 
         # --- L_cls: BCE or Focal loss with bg subsampling ---
-        # Save raw quality before binarization for fg_cls_boost.
         fg_quality = target_scores.float().clone()
-        if self.soft_targets:
-            # Keep assigner's quality-weighted alignment scores (e.g., 0.87 for a
-            # strong match, 0.31 for a weak one). This gives the classifier a graded
-            # signal — the model learns "this is a confident class-2 prediction" vs
-            # "this is a marginal class-1 prediction." Prevents class collapse by
-            # preserving the quality discriminability that hard 0/1 targets destroy.
-            cls_targets = fg_quality.clone()
-        else:
-            # Hard binarize — legacy behaviour. Alignment quality belongs in the
-            # centerness branch, not the classification branch.
-            cls_targets = fg_quality.clone()
-            cls_targets[cls_targets > 0] = 1.0
+        # Hard binarize — alignment quality belongs in the centerness branch,
+        # not the classification branch.
+        cls_targets = fg_quality.clone()
+        cls_targets[cls_targets > 0] = 1.0
 
         # Subsample background anchors to cap bg:fg ratio per batch element.
         # Without this, P2's 4096 anchors overwhelm the ~1200 fg anchors,
         # producing cls_loss ~15 that drowns the regression gradient signal.
         ignore_mask = torch.zeros_like(cls_targets, dtype=torch.bool)
-        use_ohem = self.ohem_bg_ratio > 0 and self.bg_fg_ratio > 0
-        if self.bg_fg_ratio > 0 and not use_ohem:
+        if self.bg_fg_ratio > 0:
             fg_per_batch = fg_mask.sum(dim=1)  # [B]
             bg_mask = ~fg_mask  # [B, N]
             for b in range(batch_size):
@@ -561,72 +309,16 @@ class RayCastDetectionLoss(v8DetectionLoss):
                     ignore_mask[b, bg_indices[drop_idx]] = True
                     cls_targets[b, bg_indices[drop_idx]] = 0
 
-        # Class weights — scale positive cls loss per class to rebalance rare categories
-        cw = self.class_weights  # [C] or None
-        if cw is not None and cw.device != pred_scores.device:
-            self.class_weights = cw.to(pred_scores.device)
-            cw = self.class_weights
-
-        if self.soft_targets and self.focal_gamma > 0:
-            loss_cls = _quality_focal_loss(
-                pred_scores.float(),
-                cls_targets,
-                beta=self.focal_gamma,
-                class_weights=cw,
-            )
-        elif self.focal_gamma > 0:
+        if self.focal_gamma > 0:
             loss_cls = _focal_loss(
                 pred_scores.float(),
                 cls_targets,
                 gamma=self.focal_gamma,
                 alpha=self.focal_alpha,
-                class_weights=cw,
             )
         else:
             loss_cls = self.bce(pred_scores.float(), cls_targets)
-            if cw is not None:
-                pos_mask = (cls_targets > 0).float()
-                loss_cls = loss_cls * (1.0 + pos_mask * (cw.unsqueeze(0).unsqueeze(0) - 1.0))
-
-        if use_ohem:
-            # OHEM: keep only the hardest K bg anchors per batch element.
-            # Select bg with highest cls loss — these are the confusing ones
-            # near the fg/bg boundary that need gradient the most.
-            fg_per_batch = fg_mask.sum(dim=1)  # [B]
-            bg_mask = ~fg_mask  # [B, N]
-            bg_loss = loss_cls * bg_mask.float().unsqueeze(-1)  # zero fg losses, [B,N,nc]
-            bg_loss_per_anchor = bg_loss.sum(dim=-1)  # [B, N] — per-anchor loss for ranking
-            ohem_mask = torch.ones_like(fg_mask)  # [B, N]
-            for b in range(batch_size):
-                n_fg_b = fg_per_batch[b].item()
-                if n_fg_b == 0:
-                    continue
-                n_bg_keep = min(int(bg_mask[b].sum().item()), int(n_fg_b * self.bg_fg_ratio))
-                if n_bg_keep <= 0:
-                    continue
-                bg_losses_b = bg_loss_per_anchor[b]  # [N]
-                _, topk_idx = bg_losses_b.topk(min(n_bg_keep, bg_losses_b.shape[0]))
-                bg_drop = bg_mask[b].clone()
-                bg_drop[topk_idx] = False  # keep hardest K bg
-                ohem_mask[b] &= ~bg_drop  # drop the rest
-            loss_cls = loss_cls * ohem_mask.unsqueeze(-1).float()
-        elif self.bg_fg_ratio > 0:
-            loss_cls = loss_cls.masked_fill(ignore_mask, 0.0)
-
-        if self.bg_cls_decay < 1.0 or self.fg_cls_boost > 0 or self.fg_cls_quality_scale > 0:
-            if self.fg_cls_quality_scale > 0:
-                # Multiplicative quality re-weighting: weight = quality × scale
-                # Penalizes weak matches (q=0.3 → 30% loss). Literature-recommended.
-                fg_weight = fg_quality * self.fg_cls_quality_scale
-                bg_weight = torch.where(cls_targets > 0, fg_weight, self.bg_cls_decay)
-            elif self.fg_cls_boost > 0:
-                # Additive quality boosting: weight = 1 + boost × quality
-                # Amplifies good matches but never reduces any fg below 1.0.
-                fg_weight = 1.0 + self.fg_cls_boost * fg_quality
-                bg_weight = torch.where(cls_targets > 0, fg_weight, self.bg_cls_decay)
-            else:
-                bg_weight = torch.where(cls_targets > 0, 1.0, self.bg_cls_decay)
-            loss_cls = loss_cls * bg_weight
+        loss_cls = loss_cls.masked_fill(ignore_mask, 0.0)
 
         if use_hier:
             # --- Hierarchical cls: binary (fg/bg) + class (cell type) ---
@@ -638,8 +330,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 )
             else:
                 loss_binary = self.bce(pred_binary.float(), binary_target)
-            if plb_weights is not None:
-                loss_binary = loss_binary * (1.0 + self.plb_cls_weight * plb_weights.unsqueeze(-1))
             loss[1] = loss_binary.sum() / max(fg_mask.sum(), 1)
 
             # Class loss: BCE (1-vs-rest) on fg anchors only — decoupled class decisions
@@ -652,15 +342,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 loss_class = F.binary_cross_entropy_with_logits(fg_pred_class, fg_class_onehot, reduction='none').mean(
                     -1
                 )
-                if plb_weights is not None:
-                    fg_plb_cls = plb_weights[fg_mask]  # [K]
-                    loss_class = loss_class * (1.0 + self.plb_cls_weight * fg_plb_cls)
                 loss[1] += loss_class.sum() / n_fg
 
             _cls_fg_sum = 0.0
             _cls_bg_sum = 0.0
         else:
-            target_scores_sum = max(fg_mask.sum(), 1) if self.soft_targets else max(cls_targets.sum(), 1)
+            target_scores_sum = max(cls_targets.sum(), 1)
             loss[1] = loss_cls.sum() / target_scores_sum
 
             _cls_fg_sum = (loss_cls * cls_targets).sum().item() / max(target_scores_sum, 1)
@@ -773,22 +460,12 @@ class RayCastDetectionLoss(v8DetectionLoss):
                 _raw[4].item(),
             )
 
-        # --- Store unweighted per-task losses for GradNorm ---
-        if self.gradnorm_manager is not None:
-            self.gradnorm_manager.store_losses(loss.detach())
-
         # --- Apply loss weights ---
-        # If GradNorm is active, use its dynamic weights; otherwise use static lambdas.
-        if self.gradnorm_manager is not None and self.gradnorm_manager.enabled:
-            w = self.gradnorm_manager.get_weights()  # [5]
-            for i in range(min(len(w), 5)):
-                loss[i] *= w[i]
-        else:
-            loss[0] *= self.lambda_xy
-            loss[1] *= self.lambda_cls
-            loss[2] *= self.lambda_l1
-            loss[3] *= self.lambda_piou
-            loss[4] *= self.lambda_smooth
+        loss[0] *= self.lambda_xy
+        loss[1] *= self.lambda_cls
+        loss[2] *= self.lambda_l1
+        loss[3] *= self.lambda_piou
+        loss[4] *= self.lambda_smooth
 
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
@@ -804,16 +481,11 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
 
 class RayCastE2ELoss(E2ELoss):
-    """E2E dual-assignment loss with smoothness annealing and GradNorm.
+    """E2E dual-assignment loss with smoothness annealing.
 
     Wires RayCastDetectionLoss into both one2many and one2one branches.
     Smoothness lambda anneals from smooth_start to smooth_end over
     smooth_anneal_epochs. Inherits o2m/o2o weight decay from parent.
-
-    When ``gradnorm=True``, replaces static λ weights with GradNorm
-    (Chen et al., 2018) dynamic weights that equalise gradient norms
-    across all 5 tasks, preventing cls_loss from dominating the shared
-    backbone.
     """
 
     def __init__(
@@ -828,26 +500,13 @@ class RayCastE2ELoss(E2ELoss):
         focal_gamma: float = 0.0,
         focal_alpha: float = 0.25,
         align_threshold: float = 0.0,
-        gradnorm: bool = False,
-        gradnorm_alpha: float = 0.5,
-        gradnorm_warmup_epochs: int = 5,
         lambda_aux_xy: float = 0.0,
         aux_xy_ramp_epochs: int = 100,
         bg_fg_ratio: int = 3,
-        ohem_bg_ratio: float = 0.0,
         plb_enabled: bool = False,
-        plb_cls_weight: float = 1.0,
-        bg_cls_decay: float = 1.0,
-        fg_cls_boost: float = 0.0,
-        soft_targets: bool = False,
-        soft_targets_o2o: bool | None = None,
         focal_gamma_o2o: float | None = None,
         focal_alpha_o2o: float | None = None,
         bg_fg_ratio_o2o: int | None = None,
-        ohem_bg_ratio_o2o: float | None = None,
-        bg_cls_decay_o2o: float | None = None,
-        fg_cls_boost_o2o: float | None = None,
-        class_weights: torch.Tensor | None = None,
         o2o_topk2_start: int = 1,
         o2o_topk2_anneal_epoch: int = 0,
         o2o_topk2_anneal_end: float = 0.5,
@@ -859,28 +518,13 @@ class RayCastE2ELoss(E2ELoss):
         lambda_piou: float = 13.0,
         lambda_cls: float = 2.0,
         lambda_xy: float = 500.0,
-        fg_cls_quality_scale: float = 0.0,
-        fg_cls_quality_scale_o2o: float | None = None,
         steps_per_epoch: int = 0,
         hierarchical_cls: bool = False,
         nc_override: int | None = None,
-        nwd_enabled: bool = False,
-        nwd_c: float = 0.001,
         cls_only_tal: bool = False,
         o2o_distill_weight: float = 0.0,
         analytical_rays: bool = False,
     ):
-        # --- GradNorm manager (created before loss_fn so branches can reference it) ---
-        self.gradnorm_manager: GradNormManager | None = None
-        if gradnorm:
-            self.gradnorm_manager = GradNormManager(
-                model=model,
-                num_tasks=5,
-                alpha=gradnorm_alpha,
-                warmup_epochs=gradnorm_warmup_epochs,
-            )
-            logger.info('GradNorm enabled: α=%.2f, warmup=%d epochs', gradnorm_alpha, gradnorm_warmup_epochs)
-
         # Bind training config to RayCastDetectionLoss so E2ELoss passes it through
         loss_fn = partial(
             RayCastDetectionLoss,
@@ -889,25 +533,15 @@ class RayCastE2ELoss(E2ELoss):
             assigner_alpha=assigner_alpha,
             assigner_beta=assigner_beta,
             log_ray_loss=log_ray_loss,
-            gradnorm_manager=self.gradnorm_manager,
             focal_gamma=focal_gamma,
             focal_alpha=focal_alpha,
             align_threshold=align_threshold,
             bg_fg_ratio=bg_fg_ratio,
-            ohem_bg_ratio=ohem_bg_ratio,
             plb_enabled=plb_enabled,
-            plb_cls_weight=plb_cls_weight,
-            bg_cls_decay=bg_cls_decay,
-            fg_cls_boost=fg_cls_boost,
-            soft_targets=soft_targets,
-            class_weights=class_weights,
             lambda_cls=lambda_cls,
             lambda_xy=lambda_xy,
-            fg_cls_quality_scale=fg_cls_quality_scale,
             hierarchical_cls=hierarchical_cls,
             nc_override=nc_override,
-            nwd_enabled=nwd_enabled,
-            nwd_c=nwd_c,
             analytical_rays=analytical_rays,
         )
         super().__init__(model, loss_fn=loss_fn)
@@ -915,10 +549,6 @@ class RayCastE2ELoss(E2ELoss):
         # Tag branches so DIAG logging can label output
         self.one2many.branch_name = 'o2m'
         self.one2one.branch_name = 'o2o'
-
-        # Per-branch soft targets: o2o can use soft targets independently
-        if soft_targets_o2o is not None:
-            self.one2one.soft_targets = soft_targets_o2o
 
         # Per-branch cls loss overrides: o2o must be a "background specialist"
         # for NMS-free inference. None = inherit from base (same as o2m).
@@ -928,14 +558,6 @@ class RayCastE2ELoss(E2ELoss):
             self.one2one.focal_alpha = focal_alpha_o2o
         if bg_fg_ratio_o2o is not None:
             self.one2one.bg_fg_ratio = bg_fg_ratio_o2o
-        if ohem_bg_ratio_o2o is not None:
-            self.one2one.ohem_bg_ratio = ohem_bg_ratio_o2o
-        if bg_cls_decay_o2o is not None:
-            self.one2one.bg_cls_decay = bg_cls_decay_o2o
-        if fg_cls_boost_o2o is not None:
-            self.one2one.fg_cls_boost = fg_cls_boost_o2o
-        if fg_cls_quality_scale_o2o is not None:
-            self.one2one.fg_cls_quality_scale = fg_cls_quality_scale_o2o
 
         # Hierarchical cls: binary (fg/bg) + class (cell type) for o2o branch
         if hierarchical_cls:

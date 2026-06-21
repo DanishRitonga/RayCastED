@@ -51,65 +51,35 @@ training:
   min_nucleus_diameter_um: 3.5 # minimum nucleus diameter (PMC 4600468), radius = 1.75um → 7px
 
   # Early stopping
-  patience: 150              # increased for NWD — cls head needs time to translate smoother assignment
+  patience: 150
 
   # Learning rate
-  cos_lr: true               # cosine LR schedule. Was false
-  warm_restarts: true        # SGDR: CosineAnnealingWarmRestarts
+  cos_lr: true               # cosine LR schedule
+  warm_restarts: true        # SGDR: CosineAnnealingWarmRestarts 
   warm_restarts_T0: 133      # first cycle length (3 cycles in 400: 133→266→399)
   warm_restarts_T_mult: 1    # period multiplier (1=equal cycles, 2=doubling)
   warm_restarts_eta_min: 0.0001  # minimum LR at cycle bottom
 
   # E2E dual-TAL assignment (NMS-free, like YOLO26)
-  tal_topk: 15                 # one2many positives per GT — dynamic topk masks garbage candidates
-  assigner_radius_scale: 1.0  # containment radius multiplier (1.0 = 75th-pctile GT radius)
-  assigner_alpha: 0.5         # cls score exponent in align = cls^α × piou^β
-  assigner_beta: 2.0          # Polar-IoU exponent — lowered from 6.0 to make cls signal matter in anchor selection
+  tal_topk: 15                 # one2many positives per GT
+  assigner_radius_scale: 1.0   # containment radius multiplier (1.0 = 75th-pctile GT radius)
+  assigner_alpha: 0.5          # cls score exponent in align = cls^α × piou^β
+  assigner_beta: 2.0           # Polar-IoU exponent
+  align_threshold: 0.0         # minimum overlap proxy for positive assignment (0=disabled)
+  o2o_topk2_start: 3           # o2o branch initial positives per GT (annealed to 1)
+  o2o_topk2_anneal_epoch: 67   # epoch to start annealing topk2 from 3→1
+  o2o_topk2_anneal_end: 0.5    # topk2 reaches 1 at 50% of training
 
-  # NWD (Normalised Wasserstein Distance) — replaces pIoU for smooth small-object similarity
-  nwd_enabled: false          # NWD disabled — too smooth, can't pick winner (train77 dead end)
-  nwd_c: 0.001                # normalisation constant (smaller = sharper drop)
-  align_threshold: 0.0        # minimum overlap proxy for positive assignment (0=disabled)
-  o2o_topk2_start: 3           # o2o branch initial positives per GT (annealed to 1). One-to-Few start
-  o2o_topk2_anneal_epoch: 67   # epoch to start annealing topk2 from 3→1 (~11% of 600)
-  o2o_topk2_anneal_end: 0.5    # topk2 reaches 1 at 50% of training (epoch 300)
-
-  # Per-o2o cls loss overrides
-  # (o2o branch is overridden by the per-branch section below)
-  focal_gamma: 2.0            # Focal loss gamma (0=BCE, >0=focal). Both branches.
-  focal_alpha: 0.75           # fg weight (bg weight = 1-alpha = 0.25). Applies to o2m branch.
-                               # o2o uses focal_alpha_o2o=0.25 instead (standard RetinaNet setting).
-                               # 0.5 caused mode collapse. Previous best: mAP50=0.411 with alpha=0.75
+  focal_gamma: 2.0             # Focal loss gamma (0=BCE, >0=focal)
+  focal_alpha: 0.75            # fg weight (bg weight = 1-alpha = 0.25)
   log_ray_loss: true           # Log-space L1 on rays — equalizes relative errors across scales
   bg_fg_ratio: 3               # Max bg anchors per fg anchor in cls loss (o2m branch)
-                                # o2o uses bg_fg_ratio_o2o=0 (no subsampling, focal handles imbalance)
-  ohem_bg_ratio: 0.0           # OHEM: select hardest bg instead of random (0.0=random, >0=enable)
 
-  # Soft targets — use assigner's quality-weighted alignment scores instead of
-  # hard 0/1 binarisation. TESTED: harmful in E2E dual-assigner setup. Quality
-  # scores prevent convergence — cls_loss plateaus at ~0.17 vs ~0.02 with hard
-  # targets. mAP50(P) dropped 4 points. Keep disabled.
-  soft_targets: false
-
-  # Per-o2o soft targets: use alignment quality as cls target for the o2o branch only.
-  # Train25: broken normalization (cls_targets.sum() vs fg_mask.sum()). Train26: fixed norm
-  # but standard FL formula is wrong for continuous targets — gives MAXIMUM loss when σ=y.
-  # Train27: uses QFL (Quality Focal Loss, GFL NeurIPS 2020) — correct formula |y-σ|^β.
-  soft_targets_o2o: false
-
-  # Per-o2o cls loss overrides — the o2o branch must be a "background specialist"
-  # for NMS-free inference. These override the base values above for o2o only.
-  focal_gamma_o2o: 2.0        # Focal loss — suppresses easy bg, keeps hard negatives
-  focal_alpha_o2o: 0.75       # Fg weight — match o2m (train13 proved 0.75 works)
-  bg_fg_ratio_o2o: 0              # No bg subsampling for o2o (train49 setting)
-  ohem_bg_ratio_o2o: 0.0         # OHEM disabled for hierarchical_cls experiment
-  bg_cls_decay_o2o: 1.0       # Full bg weight — don't starve bg suppression (0.5 over-corrected)
-  fg_cls_boost_o2o: null       # Additive boost disabled for o2o
-  fg_cls_quality_scale_o2o: null  # Multiplicative disabled — was starving fg (TAL quality 0.2-0.5)
-
-  # Auxiliary XY head: bypasses 4-layer head stack to give backbone direct xy gradient
-  aux_xy_weight: 10.0           # Huber loss weight for aux xy predictions
-  aux_xy_ramp_epochs: 100       # epoch at which aux xy weight begins linear decay to zero
+  # Per-o2o cls loss overrides — o2o branch must be a "background specialist"
+  # for NMS-free inference.
+  focal_gamma_o2o: 2.0         # Focal loss — suppresses easy bg, keeps hard negatives
+  focal_alpha_o2o: 0.75        # Fg weight
+  bg_fg_ratio_o2o: 0           # No bg subsampling for o2o
 
   # Auxiliary XY head: bypasses 4-layer head stack to give backbone direct xy gradient
   aux_xy_weight: 10.0           # Huber loss weight for aux xy predictions
@@ -117,103 +87,74 @@ training:
 
   # Knowledge distillation: o2m cls heads → o2o cls heads.
   # BCE loss between detached o2m sigmoid probs and o2o logits on ALL anchors.
-  o2o_distill_weight: 0.5           # 0=disabled, 0.5=recommended start
+  o2o_distill_weight: 0.5
 
   # Analytical rays: compute GT ray targets from predicted centroid → polygon
   # boundary via Cramer's rule instead of using precomputed static GT rays.
-  # Couples centroid and ray gradients: ∂L/∂centroid ≠ 0 through chain rule.
   analytical_rays: true
 
   # Inter-scale competition: softmax across scales to suppress cross-scale duplicates.
-  # At inference: upsample P3/P4 cls to P2 resolution, stack, softmax across scale dim,
-  # multiply each scale's confidence by its competition weight.
-  # Lower temperature = sharper winner-take-more. No NMS needed.
-  inter_scale_competition: true      # cross-scale softmax competition (training + inference)
-  inter_scale_temperature: 0.5       # softmax temperature (1.0 = standard, 0.5 = sharper winner-take-more)
+  inter_scale_competition: true
+  inter_scale_temperature: 0.5       # softmax temperature (lower = sharper)
 
   # Local (intra-scale) competition: per-scale 3×3 neighborhood softmax.
-  # Each anchor competes with its 8 neighbors — local winner-take-more.
-  # Suppresses same-scale duplicates where one nucleus fires adjacent anchors.
-  local_competition: false            # disabled — softmax with 9 entries crushes all scores (temp too low for k=3)
-  local_competition_kernel: 3         # neighborhood size (3 = 3×3)
-  local_competition_temperature: 0.5  # softmax temperature (lower = sharper)
-
-  # class_weights disabled — caused mode collapse. fg-only amplification with
-  # weak bg gradient pushed model to always predict the least-penalized class.
-  # Re-add with conservative values (cap at 2.0) once bg suppression is stable.
-  # PanNuke distribution: Neo=40.8%, Conn=26.7%, Inflam=17.0%, Epi=14.0%, Dead=1.5%
-  class_weights: null
+  local_competition: false            # disabled — crushes all scores at k=3
+  local_competition_kernel: 3
+  local_competition_temperature: 0.5
 
   # Pixel-Level Balancing: area-based fg weighting to boost small nuclei
-  plb_enabled: true             # Enable PLB (area-based weighting)
-  plb_cls_weight: 0.0           # PLB multiplier for cls losses (0.0 = disabled)
-  bg_cls_decay: 1.0             # Bg cls gradient multiplier. 1.0=full bg gradient, 0.0=no bg gradient
-  fg_cls_boost: 0.0             # Fg cls boost by alignment quality: weight = 1 + boost * quality (0.0=disabled)
+  plb_enabled: true
 
   # Loss weights
-  # lambda_xy=500 compensates for sigmoid+stride/imgsz gradient attenuation (~0.008x effective)
-  # Effective weighted regression ≈ xy(24) + l1(37) + piou(54) = 115 vs cls(0.94) ≈ 122:1
-  # But effective GRADIENT ratio is much lower due to attenuation chain on xy
-  lambda_cls: 2.0               # Classification weight
-  lambda_xy: 500.0              # Centroid xy weight (high: compensates sigmoid→stride→imgsz attenuation)
-  lambda_l1: 14.0               # L1 ray distance weight
-  lambda_piou: 3.0              # Polar IoU weight — minimal: let analytical L1 dominate shape
+  lambda_cls: 2.0
+  lambda_xy: 500.0              # high: compensates sigmoid→stride→imgsz attenuation
+  lambda_l1: 14.0
+  lambda_piou: 3.0              # minimal: let analytical L1 dominate shape
 
-  # Sigma annealing: DISABLED. sigma_anneal_start=0 falls back to assigner_radius_scale.
-  # To enable: set sigma_anneal_start > 0 (different from end).
+  # Sigma annealing: sigma_anneal_start=0 falls back to assigner_radius_scale.
   sigma_anneal_start: 0
   sigma_anneal_end: 0.5
   sigma_anneal_epoch: 200
 
-  # STAL (force minimum positives per GT). Disabled by setting stal_min_positives=0.
-  # Current value of 3 ENABLES STAL — used to combat early-training fg starvation.
+  # STAL (force minimum positives per GT).
   stal_min_positives: 3
 
-  # GradNorm — disabled; loss-ratio method downweights stuck tasks (xy)
-  gradnorm: false
-
   # Weighted class/tissue sampling
-  weighted_sampling: false     # Enable class+ tissue balanced sampling (off by default)
-  sampler_gamma: 0.85          # Re-weighting strength (0=uniform, 1=full inverse-frequency)
+  weighted_sampling: false
+  sampler_gamma: 0.85
 
   # Augmentation (polygon-safe)
-  stain_jitter: true         # HSV color jitter for histopathology. Was false
-  stain_hsv_h: 0.05          # hue shift range
-  stain_hsv_s: 0.3           # saturation scale range (±)
-  stain_hsv_v: 0.2           # value/brightness scale range (±)
-  stain_blur_prob: 0.2       # probability of Gaussian blur
-  stain_blur_sigma: 1.0      # max blur sigma
+  stain_jitter: true
+  stain_hsv_h: 0.05
+  stain_hsv_s: 0.3
+  stain_hsv_v: 0.2
+  stain_blur_prob: 0.2
+  stain_blur_sigma: 1.0
 
-  scale_augment: true        # random scale augmentation. Was false
-  scale_range: [0.7, 1.3]    # min/max scale factors
+  scale_augment: true
+  scale_range: [0.7, 1.3]
 
-  translate_augment: true    # random translation augmentation. Was false
-  translate_range: 0.1       # fraction of crop_size
+  translate_augment: true
+  translate_range: 0.1
 
-  inference_conf: 0.20         # Confidence threshold for inference (was 0.25)
-
+  inference_conf: 0.20
 
   # Pretrained backbone (COCO weights, layers 0-10 only)
-  pretrained_backbone: null  # DISABLED for scratch training experiment
+  pretrained_backbone: null  # disabled for scratch training
 
   # DCNv2 (modulated deformable conv) in head
-  dcn_in_reg_head: false    # disabled for clip_grad+bound_l1 isolation experiment (train39 has DCN)
-  dcn_in_cls_head: false    # replace 2nd Conv in cv3 with DCNConv
+  dcn_in_reg_head: false
+  dcn_in_cls_head: false
 
   # Hierarchical cls: split o2o cls into binary (fg/bg, 1ch) + class (cell type, nc ch).
-  # Binary head gets ALL 5376 anchors of gradient → strong fg/bg discrimination.
-  # Class head only learns inter-class separation on fg anchors.
-  # At inference: binary sigmoid gates fg/bg (>threshold), class softmax ranks.
   hierarchical_cls: true
   hierarchical_cls_detach: true
-  hierarchical_binary_threshold: 0.01  # Hard gate: keep anchors with sigmoid(binary) > 0.01
+  hierarchical_binary_threshold: 0.01
 
   # CLS-only TAL: o2o assigner uses cls^alpha * gaussian_decay (no pIoU)
-  # Picks anchors based on what cls head already believes, gated by spatial proximity.
-  # Self-reinforcing: higher cls → better assignment → even higher cls.
   cls_only_tal: true
 
-  # Gradient clipping (LSP-DETR uses 0.1 for aggressive clipping)
+  # Gradient clipping
   clip_grad: 10.0
 
 datasets:

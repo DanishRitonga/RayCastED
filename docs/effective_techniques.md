@@ -151,7 +151,7 @@ The assigner just needs to trust it.
 | Hierarchical CLS | t71 | -0.003 | **+0.306** | fg/bg discrimination |
 | `assigner_beta=2.0` | t74 | **+0.014** | **+0.032** | Spatial anchor misalignment |
 | STAL (stal_min_positives=3) | t76 | -0.002 | +0.013 | Small nuclei recall (+1.5pp) |
-| NWD | t78 | -0.015 | -0.056 | Too smooth, killed |
+| NWD [REMOVED] | t78 | -0.015 | -0.056 | Too smooth, killed |
 | CLS-only TAL | t80 | TBD | TBD | Zero-positive GT blockade |
 
 ## Cumulative Best Values
@@ -167,7 +167,7 @@ The assigner just needs to trust it.
 
 ## Dead Ends (Do Not Repeat)
 
-- **NWD** (t78): Smoother than pIoU — two anchors 4px apart on 4px nucleus both get NWD>0.8, assigner can't pick winner. pIoU's sharper cliff creates genuine competition.
+- **NWD** [REMOVED] (t78): Smoother than pIoU — two anchors 4px apart on 4px nucleus both get NWD>0.8, assigner can't pick winner. pIoU's sharper cliff creates genuine competition. Code removed in cleanup.
 - **Suppress loss** (t24): O(N²) pairwise repulsion too aggressive for dense nuclei. Inter-scale softmax (§2) handles this better.
 - **2-stage threshold** (t72): Binary gate is no-op with 28.6x fg/bg gap. Product inference is equivalent and simpler.
 - **PredictionRefinementAttention**: Removed in cleanup. Implemented but never trained successfully.

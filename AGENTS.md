@@ -73,11 +73,11 @@ When adding a new config parameter:
 
 ### Classification & Overprediction
 
-1. **bg_cls_decay applied once (verified)**: `loss.py:524-537` applies bg_cls_decay once (or zero times when `bg_cls_decay=1.0`, which is the current default — the guard skips entirely). No double-application exists.
+1. **[REMOVED] bg_cls_decay applied once (verified)**: Previously applied at `loss.py:524-537` — now removed in cleanup along with the bg_cls_decay/fg_cls_boost/fg_cls_quality_scale plumbing.
 
 2. **focal_alpha=0.5 causes mode collapse**: With alpha=0.5, focal loss gives equal weight to fg and bg. Combined with `bg_fg_ratio=3` (3x more bg anchors sampled), the effective bg:fg gradient ratio is 3:1. This overwhelms the 5 real classes. Use `focal_alpha=0.75`.
 
-3. **class_weights scales the loss, not the assignment**: `class_weights` in loss.py scales positive cls loss magnitudes from the first epoch — there is no warmup gate. It is disabled because it caused mode collapse (fg-only amplification with weak bg gradient pushed model to predict the least-penalized class).
+3. **[REMOVED] class_weights scales the loss, not the assignment**: Previously scaled positive cls loss in loss.py. Removed in cleanup — was disabled because it caused mode collapse (fg-only amplification with weak bg gradient pushed model to predict the least-penalized class).
 
 4. **Shared cv3 fix (verified)**: O2O branch has separate `one2one_cv3` cls head via `copy.deepcopy`. `fuse()` sets `cv2=cv3=None`, keeping only o2o heads. Shared head caused 11.5x overprediction.
 
@@ -129,11 +129,11 @@ When adding a new config parameter:
 
 24. **Empty-batch collate fixed**: `raycast_dataset.py` hardcoded `4+32` for fallback tensor shape, which crashes with n_rays=64. Now uses `N_RAYS` constant.
 
-25. **Soft targets normalization fixed**: `loss.py:544` — with `soft_targets=True`, `cls_targets.sum()` sums quality values (~14 for 28 fg) instead of count (28), inflating cls loss ~7x. Now uses `fg_mask.sum()` as denominator when soft_targets is enabled.
+25. **[REMOVED] Soft targets normalization fixed**: Previously fixed `cls_targets.sum()` vs `fg_mask.sum()` issue. Soft targets code removed in cleanup (train25/26/27 dead-end — see gotcha #29).
 
 28. **DINO denoising only affects assignment, not predictions**: `_inject_denoising_targets()` adds corrupted GT copies to `gt_labels`/`gt_bboxes` before the TAL assigner. The assigner produces more fg assignments (more anchors get cls gradient), but denoising targets are NOT passed to regression — only the real GTs' regression targets are used. The corrupted copies exist solely to provide additional cls training signal.
 
-29. **Standard FL + soft targets is wrong (train25/26)**: Use QFL (`_quality_focal_loss`) when `soft_targets=True`. Standard FL `(1-p_t)^γ` inflates loss for samples near the correct target (when y=0.5, σ=0.5: FL gives MAXIMUM loss, QFL gives zero). Config: `soft_targets_o2o: true` + `focal_gamma_o2o: 2.0` (reused as QFL beta).
+29. **[REMOVED] Standard FL + soft targets is wrong (train25/26)**: Previously used QFL (`_quality_focal_loss`) when `soft_targets=True`. Both QFL and soft_targets code removed in cleanup — train25/26/27 confirmed the soft targets approach collapses fg/bg gap and is a dead end.
 
 30. **max_det reduced to 100**: `RayCastDetect.max_det = 100` (was 300). PanNuke has ~28 cells/image, rare images 50+. 300 was excessive and could include low-confidence false positives.
 
@@ -154,7 +154,7 @@ When adding a new config parameter:
 
 36. **AIFI-Lite on P4 is dead end for FCN (train34)**: Single TransformerEncoderLayer on P4 backbone features (16x16=256 tokens, ~790K params). mAP50=0.459 vs train23's 0.517. Same pattern as train31/32 self-attention — feature-level enrichment broadcasts globally-smoothed features to ALL 5376 anchors (98.7% bg), washing out local cls discrimination (fg/bg gap 2.5x→1.6x). In RT-DETR, decoder cross-attention selectively queries enriched features; FCN lacks this mechanism. Implementation was `raycasted/model/blocks/aifi.py` (AIFIBlock) + `raycasted/cfg/yolo26s-aifi-p234.yaml`, both removed in cleanup; model reverted to `yolo26s-run28-p234.yaml`.
 
-37. **Gaussian spatial soft targets collapse fg/bg gap (train35)**: `gaussian_soft_targets=true` with `gaussian_sigma=0.1` gives fg anchors targets exp(-d²/2σ²) instead of 1.0. Same fundamental problem as train25/26/27 piou-based soft targets — spreading fg confidence across 0.3-0.8 instead of sharp 1.0 peak collapses fg/bg gap (2.5x→1.5x). Config: `gaussian_soft_targets` (default false), `gaussian_sigma` (default 0.5). Code exists but should stay disabled.
+37. **[REMOVED] Gaussian spatial soft targets collapse fg/bg gap (train35)**: Code (along with all soft_targets plumbing and `_quality_focal_loss`) removed in cleanup. Previously `gaussian_soft_targets=true` with `gaussian_sigma=0.1` gave fg anchors targets exp(-d²/2σ²) instead of 1.0, collapsing fg/bg gap. Dead end.
 
 38. **Higher o2o topk2 severely regresses (train38)**: `o2o_topk2_start=7` (was 3) gives mAP50=0.25 vs train23's 0.517. topk2=7 turns o2o into a weak o2m — diluting 1:1 exclusivity. More fg assignments = less discriminative cls head. topk2=3→1 is near optimal; FCN o2o assignment tuning is exhausted.
 
