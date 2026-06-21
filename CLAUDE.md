@@ -64,7 +64,7 @@ Collated batch adds leading `batch_idx`: `(sum_M, 2+R+2)`. Normalisation (divide
 - `raycasted/model/loss.py` — `RayCastE2ELoss` (5-term polygon loss: xy/cls/L1/piou/smooth + distill + aux_xy)
 - `raycasted/model/tal.py` — `RayCastAssigner` (Polar-IoU matching) + `HungarianRayCastAssigner` (one2one)
 - `raycasted/model/train.py` — `RayCastTrainer` (subclasses `DetectionTrainer`)
-- `raycasted/model/builder.py` — `raycasted_parse_model()` (custom YAML parser for ResoConv, C3k2_LK blocks)
+- `raycasted/model/builder.py` — `raycasted_parse_model()` (custom YAML parser for ResoConv blocks)
 - `raycasted/pipeline.py` — CLI orchestrator chaining ingest → transform → train
 
 ### E2E dual-assignment (NMS-free)

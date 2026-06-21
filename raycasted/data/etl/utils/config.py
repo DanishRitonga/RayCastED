@@ -138,8 +138,6 @@ class TrainingSettings(BaseModel):
 
     inference_conf: float = 0.20  # confidence threshold at inference
 
-    refinement_kernel_size: int = 3
-
     # Early stopping
     patience: int = 100  # epochs with no improvement before stopping (default: 100)
 

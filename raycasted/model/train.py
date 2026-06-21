@@ -246,7 +246,7 @@ class RayCastDetectionModel(DetectionModel):
     """Custom DetectionModel using raycasted_parse_model builder.
 
     Replaces ultralytics' parse_model() with our custom builder that
-    supports custom blocks (ResoConv, C3k2_LK) without monkey-patching.
+    supports custom blocks (ResoConv) without monkey-patching.
 
     All other DetectionModel behavior (stride computation, bias_init,
     init_criterion, etc.) is preserved via inheritance from BaseModel.
@@ -636,7 +636,6 @@ class RayCastTrainer(DetectionTrainer):
             tcfg = self.training_config
             head_channel_scale = tcfg.get('head_channel_scale', 0.5) if tcfg else 0.5
             head_channel_min = tcfg.get('head_channel_min', 64) if tcfg else 64
-            refinement_kernel_size = tcfg.get('refinement_kernel_size', 3) if tcfg else 3
             new_head = RayCastDetect(
                 nc=nc,
                 end2end=True,
@@ -646,7 +645,6 @@ class RayCastTrainer(DetectionTrainer):
                 head_channel_min=head_channel_min,
                 cls_channel_scale=cls_channel_scale,
                 cls_channel_min=cls_channel_min,
-                refinement_kernel_size=refinement_kernel_size,
                 aux_xy=aux_xy,
                 inter_scale_competition=inter_scale_competition,
                 inter_scale_temperature=inter_scale_temperature,

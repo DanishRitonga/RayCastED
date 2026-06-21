@@ -2,7 +2,7 @@
 
 Replaces ultralytics.nn.tasks.parse_model() with full control over
 BASE_MODULES and REPEAT_MODULES. This enables custom blocks (ResoConv,
-C3k2_LK, etc.) without fragile monkey-patching of local frozensets.
+etc.) without fragile monkey-patching of local frozensets.
 
 Usage:
     from raycasted.model.builder import raycasted_parse_model
@@ -44,7 +44,6 @@ from ultralytics.utils.ops import make_divisible
 
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.blocks.dcn_blocks import C3k2_DCN
-from raycasted.model.blocks.lk_block import C3k2_LK
 from raycasted.model.blocks.resoconv import ResoConv, ResoConvHybrid
 
 BASE_MODULES = frozenset(
@@ -59,7 +58,6 @@ BASE_MODULES = frozenset(
         RepC3,
         ResoConv,
         ResoConvHybrid,  # backward-compat alias for old yamls/checkpoints
-        C3k2_LK,
         C3k2_DCN,
     }
 )
@@ -68,7 +66,6 @@ REPEAT_MODULES = frozenset(
     {
         C3k2,
         C2PSA,
-        C3k2_LK,
         C3k2_DCN,
         RepC3,
     }
@@ -110,7 +107,7 @@ def raycasted_parse_model(d, ch, verbose=True):
 
     Drop-in replacement for ultralytics.nn.tasks.parse_model() with
     full control over BASE_MODULES and REPEAT_MODULES. This enables
-    custom blocks (ResoConv, C3k2_LK) without fragile monkey-patching.
+    custom blocks (ResoConv) without fragile monkey-patching.
 
     Args:
         d (dict): Model dictionary (from YAML).
