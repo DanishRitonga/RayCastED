@@ -1,5 +1,5 @@
 global_settings:
-  root_dir: "/home/danishrtg/projects/RayCastED/raycasted/data/dataset"
+  root_dir: "/mnt/data/projects/RayCastED/raycasted/data/dataset"
   variant: "m"        # YOLO26 variant: n, s, m, l, x
   model: "raycasted/cfg/yolo26m-run28-p234.yaml"
   n_rays: 64
