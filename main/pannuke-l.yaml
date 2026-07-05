@@ -89,18 +89,9 @@ training:
   # BCE loss between detached o2m sigmoid probs and o2o logits on ALL anchors.
   o2o_distill_weight: 0.5
 
-  # Analytical rays: compute GT ray targets from predicted centroid → polygon
-  # boundary via Cramer's rule instead of using precomputed static GT rays.
-  analytical_rays: true
-
   # Inter-scale competition: softmax across scales to suppress cross-scale duplicates.
   inter_scale_competition: true
   inter_scale_temperature: 0.5       # softmax temperature (lower = sharper)
-
-  # Local (intra-scale) competition: per-scale 3×3 neighborhood softmax.
-  local_competition: false            # disabled — crushes all scores at k=3
-  local_competition_kernel: 3
-  local_competition_temperature: 0.5
 
   # Pixel-Level Balancing: area-based fg weighting to boost small nuclei
   plb_enabled: true

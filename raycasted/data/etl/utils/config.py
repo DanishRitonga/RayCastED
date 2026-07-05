@@ -147,13 +147,6 @@ class TrainingSettings(BaseModel):
     inter_scale_competition: bool = False
     inter_scale_temperature: float = 1.0  # softmax temperature (lower = sharper competition)
 
-    # Local (intra-scale) competition: per-scale 3×3 neighborhood softmax.
-    # Each anchor competes with its 8 neighbors — local winner-take-more.
-    # Suppresses same-scale duplicates where one nucleus fires adjacent anchors.
-    local_competition: bool = False
-    local_competition_kernel: int = 3  # neighborhood size (3 = 3×3 = 8 neighbors)
-    local_competition_temperature: float = 1.0  # softmax temperature (lower = sharper)
-
     # Pretrained backbone
     pretrained_backbone: str | None = None  # path to pretrained .pt (e.g. 'yolo26s.pt')
 
@@ -174,8 +167,6 @@ class TrainingSettings(BaseModel):
     # Analytical rays: compute GT ray targets from predicted centroid → polygon
     # boundary via Cramer's rule instead of using precomputed static GT rays.
     # Couples centroid and ray gradients: ∂L/∂centroid ≠ 0 through chain rule.
-    analytical_rays: bool = False
-
     # Gradient clipping (LSP-DETR uses 0.1). Ultralytics defaults to 10.0.
     clip_grad: float = 10.0
 

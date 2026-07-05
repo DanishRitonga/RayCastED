@@ -124,7 +124,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         lambda_xy: float = 500.0,
         hierarchical_cls: bool = False,
         nc_override: int | None = None,
-        analytical_rays: bool = False,
     ):
         super().__init__(model, tal_topk=tal_topk, tal_topk2=tal_topk2)
         m = model.model[-1]
@@ -133,7 +132,6 @@ class RayCastDetectionLoss(v8DetectionLoss):
         self.use_dfl = False  # DFL not applicable to polygon regression
         self.hierarchical_cls = hierarchical_cls
         self.nc_override = nc_override
-        self.analytical_rays = analytical_rays
         self.n_rays = self.raycast_dim - 2
 
         # Log-space ray loss configuration
@@ -368,25 +366,24 @@ class RayCastDetectionLoss(v8DetectionLoss):
 
             fg_pred_xy = pred_xy[fg_mask]
 
-            if self.analytical_rays:
-                fg_pred_xy_px = fg_pred_xy * imgsz[[1, 0]]
-                crop_size_val = float(imgsz[0].item())
-                ray_cos, ray_sin = build_ray_directions(self.n_rays, device=self.device, dtype=torch.float32)
-                gt_flat = gt_bboxes.reshape(-1, self.raycast_dim)
-                gt_centroids_px = gt_flat[:, :2] * crop_size_val
-                gt_rays_norm = gt_flat[:, 2:]
-                gt_vertices = _normed_rays_to_vertices(gt_centroids_px, gt_rays_norm, crop_size_val, ray_cos, ray_sin)
-                gt_vertices = gt_vertices.reshape(*gt_bboxes.shape[:2], self.n_rays, 2)
+            fg_pred_xy_px = fg_pred_xy * imgsz[[1, 0]]
+            crop_size_val = float(imgsz[0].item())
+            ray_cos, ray_sin = build_ray_directions(self.n_rays, device=self.device, dtype=torch.float32)
+            gt_flat = gt_bboxes.reshape(-1, self.raycast_dim)
+            gt_centroids_px = gt_flat[:, :2] * crop_size_val
+            gt_rays_norm = gt_flat[:, 2:]
+            gt_vertices = _normed_rays_to_vertices(gt_centroids_px, gt_rays_norm, crop_size_val, ray_cos, ray_sin)
+            gt_vertices = gt_vertices.reshape(*gt_bboxes.shape[:2], self.n_rays, 2)
 
-                fg_indices = fg_mask.float().nonzero(as_tuple=False)
-                fg_batch_idx = fg_indices[:, 0]
-                fg_gt_idx = target_gt_idx[fg_indices[:, 0], fg_indices[:, 1]]
-                matched_gt_vertices = gt_vertices[fg_batch_idx, fg_gt_idx]
+            fg_indices = fg_mask.float().nonzero(as_tuple=False)
+            fg_batch_idx = fg_indices[:, 0]
+            fg_gt_idx = target_gt_idx[fg_indices[:, 0], fg_indices[:, 1]]
+            matched_gt_vertices = gt_vertices[fg_batch_idx, fg_gt_idx]
 
-                analytical_target_rays = analytical_gt_rays(
-                    fg_pred_xy_px.detach(), matched_gt_vertices, ray_cos, ray_sin, crop_size_val
-                )
-                fg_target_rays = analytical_target_rays.to(dtype=fg_target_rays.dtype)
+            analytical_target_rays = analytical_gt_rays(
+                fg_pred_xy_px.detach(), matched_gt_vertices, ray_cos, ray_sin, crop_size_val
+            )
+            fg_target_rays = analytical_target_rays.to(dtype=fg_target_rays.dtype)
 
             loss_xy = F.huber_loss(fg_pred_xy.float(), fg_target_xy, reduction='none', delta=0.05).mean(-1)
             if fg_plb is not None:
@@ -523,7 +520,6 @@ class RayCastE2ELoss(E2ELoss):
         nc_override: int | None = None,
         cls_only_tal: bool = False,
         o2o_distill_weight: float = 0.0,
-        analytical_rays: bool = False,
     ):
         # Bind training config to RayCastDetectionLoss so E2ELoss passes it through
         loss_fn = partial(
@@ -542,7 +538,6 @@ class RayCastE2ELoss(E2ELoss):
             lambda_xy=lambda_xy,
             hierarchical_cls=hierarchical_cls,
             nc_override=nc_override,
-            analytical_rays=analytical_rays,
         )
         super().__init__(model, loss_fn=loss_fn)
 

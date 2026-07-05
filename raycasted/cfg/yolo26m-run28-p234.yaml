@@ -9,11 +9,11 @@
 # P5/32 is removed — 8x8 coarse anchors are useless for 5-15px nuclei.
 # P2/4 adds a 64x64 fine grid that resolves touching-cell collisions.
 #
-# Backbone: identical to Run 25 (ResoConv Haar wavelet, C3k2, SPPF, C2PSA).
+# Backbone: identical to Run 25 (ResoConv Haar wavelet, C3k2, C2PSA).
 # Neck: standard FPN/PAN shifted one level down.
 #   - FPN upsample: P4→P3→P2 (concat backbone P3/P2)
 #   - PAN downsample: P2→P3→P4 (concat FPN P3, backbone P4)
-#   - Detection at P2/4 (layer 14), P3/8 (layer 17), P4/16 (layer 20)
+#   - Detection at P2/4 (layer 13), P3/8 (layer 16), P4/16 (layer 19)
 
 nc: 5
 end2end: True
@@ -27,7 +27,7 @@ scales:
   l: [1.00, 1.00, 512]
   x: [1.00, 1.50, 512]
 
-# YOLO26s backbone — identical to Run 25
+# YOLO26s backbone — identical to Run 25 (SPPF removed: max-pool smears nuclei features into bg)
 backbone:
   - [-1, 1, ResoConv, [64]]           # 0-P1/2
   - [-1, 1, ResoConv, [128]]          # 1-P2/4
@@ -36,28 +36,27 @@ backbone:
   - [-1, 2, C3k2, [512, False, 0.25]]      # 4   (P3 features, 32x32)
   - [-1, 1, ResoConv, [512]]          # 5-P4/16
   - [-1, 2, C3k2, [512, True]]             # 6
-  - [-1, 1, SPPF, [512, 5, 3, True]]       # 7
-  - [-1, 2, C2PSA, [512]]                  # 8   (P4 features, 16x16)
+  - [-1, 2, C2PSA, [512]]                  # 7   (P4 features, 16x16)
 
 # YOLO26s neck — P2-P3-P4 FPN/PAN
 head:
   # --- FPN upsample path (P4 → P3 → P2) ---
-  - [8, 1, nn.Upsample, [None, 2, "nearest"]]              # 9
-  - [[-1, 4], 1, Concat, [1]]                               # 10  concat with P3 backbone
-  - [-1, 2, C3k2, [256, True]]                              # 11  P3 FPN (32x32)
+  - [7, 1, nn.Upsample, [None, 2, "nearest"]]              # 8
+  - [[-1, 4], 1, Concat, [1]]                               # 9   concat with P3 backbone
+  - [-1, 2, C3k2, [256, True]]                              # 10  P3 FPN (32x32)
 
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]              # 12
-  - [[-1, 2], 1, Concat, [1]]                               # 13  concat with P2 backbone
-  - [-1, 2, C3k2, [128, True]]                              # 14  P2 FPN (64x64) ← detect
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]              # 11
+  - [[-1, 2], 1, Concat, [1]]                               # 12  concat with P2 backbone
+  - [-1, 2, C3k2, [128, True]]                              # 13  P2 FPN (64x64) ← detect
 
   # --- PAN downsample path (P2 → P3 → P4) ---
-  - [-1, 1, ResoConv, [128]]                          # 15  downsample P2→P3 scale
-  - [[-1, 11], 1, Concat, [1]]                              # 16  concat with P3 FPN
-  - [-1, 2, C3k2, [256, True]]                              # 17  P3 PAN (32x32) ← detect
+  - [-1, 1, ResoConv, [128]]                          # 14  downsample P2→P3 scale
+  - [[-1, 10], 1, Concat, [1]]                              # 15  concat with P3 FPN
+  - [-1, 2, C3k2, [256, True]]                              # 16  P3 PAN (32x32) ← detect
 
-  - [-1, 1, ResoConv, [256]]                          # 18  downsample P3→P4 scale
-  - [[-1, 8], 1, Concat, [1]]                               # 19  concat with P4 backbone
-  - [-1, 2, C3k2, [512, True]]                              # 20  P4 PAN (16x16) ← detect
+  - [-1, 1, ResoConv, [256]]                          # 17  downsample P3→P4 scale
+  - [[-1, 7], 1, Concat, [1]]                               # 18  concat with P4 backbone
+  - [-1, 2, C3k2, [512, True]]                              # 19  P4 PAN (16x16) ← detect
 
   # --- Detection head: P2-P3-P4 ---
-  - [[14, 17, 20], 1, RayCastDetect, [nc, reg_max, end2end]]
+  - [[13, 16, 19], 1, RayCastDetect, [nc, reg_max, end2end]]

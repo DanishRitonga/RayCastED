@@ -197,7 +197,6 @@ class _RayCastCriterionWrapper:
             nc_override=tcfg.get('nc_override', None),
             cls_only_tal=tcfg.get('cls_only_tal', False),
             o2o_distill_weight=tcfg.get('o2o_distill_weight', 0.0),
-            analytical_rays=tcfg.get('analytical_rays', False),
         )
 
 
@@ -462,9 +461,6 @@ class RayCastTrainer(DetectionTrainer):
         aux_xy = bool(tcfg.get('aux_xy_weight', 0) > 0) if tcfg else False
         inter_scale_competition = bool(tcfg.get('inter_scale_competition', False)) if tcfg else False
         inter_scale_temperature = tcfg.get('inter_scale_temperature', 1.0) if tcfg else 1.0
-        local_competition = bool(tcfg.get('local_competition', False)) if tcfg else False
-        local_competition_kernel = tcfg.get('local_competition_kernel', 3) if tcfg else 3
-        local_competition_temperature = tcfg.get('local_competition_temperature', 1.0) if tcfg else 1.0
         cls_channel_scale = tcfg.get('cls_channel_scale', 1.0) if tcfg else 1.0
         cls_channel_min = tcfg.get('cls_channel_min', 0) if tcfg else 0
         dcn_in_reg_head = bool(tcfg.get('dcn_in_reg_head', False)) if tcfg else False
@@ -506,12 +502,6 @@ class RayCastTrainer(DetectionTrainer):
             if inter_scale_competition:
                 old_head.inter_scale_competition = True
                 old_head.inter_scale_temperature = inter_scale_temperature
-
-            # Set local competition flags on existing RayCastDetect head
-            if local_competition:
-                old_head.local_competition = True
-                old_head.local_competition_kernel = local_competition_kernel
-                old_head.local_competition_temperature = local_competition_temperature
 
             # Attach auxiliary xy head if configured
             if aux_xy and (not hasattr(old_head, 'aux_xy') or getattr(old_head, 'aux_xy', None) is None):
@@ -591,9 +581,6 @@ class RayCastTrainer(DetectionTrainer):
                 aux_xy=aux_xy,
                 inter_scale_competition=inter_scale_competition,
                 inter_scale_temperature=inter_scale_temperature,
-                local_competition=local_competition,
-                local_competition_kernel=local_competition_kernel,
-                local_competition_temperature=local_competition_temperature,
                 dcn_in_reg_head=dcn_in_reg_head,
                 dcn_in_cls_head=dcn_in_cls_head,
                 hierarchical_cls=hierarchical_cls,

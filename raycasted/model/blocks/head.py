@@ -75,9 +75,6 @@ class RayCastDetect(Detect):
         aux_xy: bool = False,
         inter_scale_competition: bool = False,
         inter_scale_temperature: float = 1.0,
-        local_competition: bool = False,
-        local_competition_kernel: int = 3,
-        local_competition_temperature: float = 1.0,
         dcn_in_reg_head: bool = False,
         dcn_in_cls_head: bool = False,
         hierarchical_cls: bool = False,
@@ -107,11 +104,6 @@ class RayCastDetect(Detect):
                 cross-scale duplicates (same nucleus predicted at P2 AND P3).
             inter_scale_temperature: Softmax temperature for inter-scale competition.
                 Lower = sharper (winner-take-more). 1.0 = standard softmax.
-            local_competition: If True, per-scale 3×3 neighborhood softmax at inference.
-                Each anchor competes with its 8 neighbors — local winner-take-more.
-                Suppresses same-scale duplicates where one nucleus fires adjacent anchors.
-            local_competition_kernel: Neighborhood size for local competition (default 3 = 3×3).
-            local_competition_temperature: Softmax temperature for local competition (lower = sharper).
             dcn_in_reg_head: If True, replace 2nd Conv in cv2 with DCNConv (modulated
                 deformable conv). Zero-init offsets/mask so it starts as standard conv.
             dcn_in_cls_head: If True, replace 2nd Conv in cv3 with DCNConv.
@@ -127,9 +119,6 @@ class RayCastDetect(Detect):
         self._end2end_arg = end2end  # store before parent __init__ (end2end is a property)
         self.inter_scale_competition = inter_scale_competition
         self.inter_scale_temperature = inter_scale_temperature
-        self.local_competition = local_competition
-        self.local_competition_kernel = local_competition_kernel
-        self.local_competition_temperature = local_competition_temperature
         self.hierarchical_cls = hierarchical_cls
         self.hierarchical_cls_detach = hierarchical_cls_detach
         self.hierarchical_binary_threshold = hierarchical_binary_threshold
@@ -304,45 +293,6 @@ class RayCastDetect(Detect):
             y = self.postprocess(y.permute(0, 2, 1))
         return y if self.export else (y, preds)
 
-    def _apply_local_competition(
-        self,
-        scores: torch.Tensor,
-        feats: list[torch.Tensor],
-    ) -> torch.Tensor:
-        """Per-scale 3x3 neighborhood softmax to suppress same-scale duplicates.
-
-        For each scale's cls map, computes softmax over a k×k neighborhood.
-        Anchors that are the local maximum get weight ~1.0; neighbors get ~0.
-        This suppresses duplicate predictions where a single nucleus fires
-        multiple adjacent anchors on the same scale.
-
-        Args:
-            scores: [B, nc, N_total] — sigmoid-activated cls scores.
-            feats: List of feature maps per scale [B, C, H_i, W_i].
-
-        Returns:
-            [B, nc, N_total] — locally-competition-adjusted cls scores.
-        """
-        bs, nc, N_total = scores.shape
-        spatial_shapes = [(f.shape[2], f.shape[3]) for f in feats]
-        anchor_counts = [h * w for h, w in spatial_shapes]
-        scale_scores = scores.split(anchor_counts, dim=-1)
-
-        k = self.local_competition_kernel
-        pad = k // 2
-
-        result_parts = []
-        for ss, (h, w) in zip(scale_scores, spatial_shapes):
-            spatial = ss.view(bs, nc, h, w)
-            unfolded = F.unfold(spatial, kernel_size=k, padding=pad)  # [B, nc*k*k, h*w]
-            unfolded = unfolded.view(bs, nc, k * k, h, w)
-            weights = F.softmax(unfolded / self.local_competition_temperature, dim=2)
-            center_idx = k * k // 2
-            out = spatial * weights[:, :, center_idx, :, :]
-            result_parts.append(out.view(bs, nc, -1))
-
-        return torch.cat(result_parts, dim=-1)
-
     def _apply_inter_scale_competition(
         self,
         scores: torch.Tensor,
@@ -440,11 +390,6 @@ class RayCastDetect(Detect):
             scores = binary_prob * class_prob  # [B, nc, N] — P(fg) × P(type|fg)
         else:
             scores = x['scores'].sigmoid()
-
-        # Local competition: per-scale 3×3 neighborhood softmax suppresses
-        # same-scale duplicates (adjacent anchors firing for one nucleus).
-        if self.local_competition and self.nl > 0:
-            scores = self._apply_local_competition(scores, x['feats'])
 
         # Inter-scale competition: softmax across scales suppresses cross-scale duplicates.
         # Same nucleus often predicted at both P2 and P3 with high confidence.
