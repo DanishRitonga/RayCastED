@@ -21,8 +21,11 @@ Usage:
 
 import copy
 import math
+import re
 from copy import deepcopy
+from functools import partial
 
+import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -31,14 +34,16 @@ from ultralytics.data.build import InfiniteDataLoader
 from ultralytics.models.yolo.detect.train import DetectionTrainer
 from ultralytics.nn.modules.head import Detect
 from ultralytics.nn.tasks import DetectionModel
-from ultralytics.utils import DEFAULT_CFG
-from ultralytics.utils.torch_utils import initialize_weights
+from ultralytics.optim import MuSGD
+from ultralytics.utils import DEFAULT_CFG, LOGGER, colorstr
+from ultralytics.utils.torch_utils import initialize_weights, unwrap_model
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.data.etl.utils import constants as _const
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.builder import raycasted_parse_model
 from raycasted.model.loss import RayCastE2ELoss
+from raycasted.model.nulite_model import NuLiteRayCastModel
 from raycasted.model.register import register_raycast_head
 from raycasted.model.val import RayCastValidator
 
@@ -137,11 +142,41 @@ def _raycast_collate_fn(batch: list) -> dict:
         ratio_pads.append((torch.ones(1, 1), torch.zeros(1, 2)))  # identity transform
         im_files.append(f'tile_{item_idx:04d}.npz')
 
+    # NP mask + seed map: rasterize binary nuclei mask from normalized polygon labels.
+    # Labels are normalized [0,1]; multiply cx/cy/rays by crop_size to get pixel coords.
+    # seed_map = normalized distance-to-boundary (InstanSeg-style): ~1 at nucleus
+    # center, ~0 at the boundary — a center-weighted target for the conditioning head.
+    np_masks = []
+    seed_maps = []
+    for labels in labels_list:
+        h = w = images.shape[-1]
+        mask = np.zeros((h, w), dtype=np.float32)
+        if labels.shape[0] > 0:
+            n_rays = labels.shape[1] - 3
+            angles = np.linspace(0, 2 * np.pi, n_rays, endpoint=False)
+            cos_a = np.cos(angles)
+            sin_a = np.sin(angles)
+            for ann in labels:
+                cx = float(ann[1]) * w
+                cy = float(ann[2]) * h
+                rays = ann[3:] * w
+                xs = cx + rays * cos_a
+                ys = cy + rays * sin_a
+                polygon = np.stack([xs, ys], axis=1).astype(np.int32)
+                cv2.fillPoly(mask, [polygon], 1.0)
+        np_masks.append(torch.from_numpy(mask[None]))  # (1, H, W)
+        dist = cv2.distanceTransform((mask * 255).astype(np.uint8), cv2.DIST_L2, 3)
+        dmax = float(dist.max())
+        seed = dist / dmax if dmax > 0 else dist
+        seed_maps.append(torch.from_numpy(seed[None]))  # (1, H, W)
+
     return {
         'img': images,
         'batch_idx': targets[:, 0],
         'cls': targets[:, 1],
         'bboxes': targets[:, 2:],  # [N, 2+n_rays] = cx, cy, d_1..d_n
+        'np_mask': torch.stack(np_masks),  # (B, 1, H, W)
+        'seed_map': torch.stack(seed_maps),  # (B, 1, H, W) normalized distance-to-boundary
         'ori_shape': torch.stack(ori_shapes),
         'ratio_pad': ratio_pads,
         'im_file': im_files,
@@ -361,6 +396,86 @@ class RayCastTrainer(DetectionTrainer):
     def plot_training_labels(self):
         """Skip standard bbox label plotting — incompatible with raycast polygon data."""
 
+    def plot_training_samples(self, batch, ni):
+        """Skip training-batch mosaic plotting — raycast polygons (66-dim) break xywh2xyxy."""
+
+    def build_optimizer(self, model, name='auto', lr=0.001, momentum=0.9, decay=1e-5, iterations=1e5):
+        """Build optimizer with a MuSGD routing fix for 3D params.
+
+        Ultralytics routes every `param.ndim >= 2` tensor to the Muon group, but
+        `muon_update` only reshapes 4D conv filters to 2D before
+        `zeropower_via_newtonschulz5` (which asserts `len(G.shape) == 2`). FastViT's
+        `layer_scale.gamma` tensors are (C, 1, 1) 3D, so they crash MuSGD. Route
+        3D params to the no-decay group (semantically correct for per-channel
+        scale factors) and keep only 2D/4D tensors in the Muon group.
+        """
+        g = [{}, {}, {}, {}]  # optimizer parameter groups
+        bn = tuple(v for k, v in nn.__dict__.items() if 'Norm' in k)  # normalization layers
+        if name == 'auto':
+            LOGGER.info(
+                f"{colorstr('optimizer:')} 'optimizer=auto' found, "
+                f"ignoring 'lr0={self.args.lr0}' and 'momentum={self.args.momentum}' and "
+                f"determining best 'optimizer', 'lr0' and 'momentum' automatically... "
+            )
+            nc = self.data.get('nc', 10)
+            lr_fit = round(0.002 * 5 / (4 + nc), 6)
+            name, lr, momentum = ('MuSGD', 0.01, 0.9) if iterations > 10000 else ('AdamW', lr_fit, 0.9)
+            self.args.warmup_bias_lr = 0.0
+
+        use_muon = name == 'MuSGD'
+        for module_name, module in unwrap_model(model).named_modules():
+            for param_name, param in module.named_parameters(recurse=False):
+                fullname = f'{module_name}.{param_name}' if module_name else param_name
+                if use_muon and param.ndim in (2, 4):
+                    g[3][fullname] = param  # muon params (2D matrices / 4D conv filters)
+                elif 'bias' in fullname:  # bias (no decay)
+                    g[2][fullname] = param
+                elif isinstance(module, bn) or 'logit_scale' in fullname or param.ndim == 3:
+                    g[1][fullname] = param  # norm weight / layer_scale (no decay)
+                else:  # weight (with decay)
+                    g[0][fullname] = param
+        if not use_muon:
+            g = [x.values() for x in g[:3]]
+
+        optimizers = {'Adam', 'Adamax', 'AdamW', 'NAdam', 'RAdam', 'RMSProp', 'SGD', 'MuSGD', 'auto'}
+        name = {x.lower(): x for x in optimizers}.get(name.lower())
+        if name in {'Adam', 'Adamax', 'AdamW', 'NAdam', 'RAdam'}:
+            optim_args = dict(lr=lr, betas=(momentum, 0.999), weight_decay=0.0)
+        elif name == 'RMSProp':
+            optim_args = dict(lr=lr, momentum=momentum)
+        elif name == 'SGD' or name == 'MuSGD':
+            optim_args = dict(lr=lr, momentum=momentum, nesterov=True)
+        else:
+            raise NotImplementedError(
+                f"Optimizer '{name}' not found in list of available optimizers {optimizers}. "
+                'Request support for addition optimizers at https://github.com/ultralytics/ultralytics.'
+            )
+
+        num_params = [len(g[0]), len(g[1]), len(g[2])]
+        g[2] = {'params': g[2], **optim_args, 'param_group': 'bias'}
+        g[0] = {'params': g[0], **optim_args, 'weight_decay': decay, 'param_group': 'weight'}
+        g[1] = {'params': g[1], **optim_args, 'weight_decay': 0.0, 'param_group': 'bn'}
+        muon, sgd = (0.2, 1.0)
+        if use_muon:
+            num_params[0] = len(g[3])
+            g[3] = {'params': g[3], **optim_args, 'weight_decay': decay, 'use_muon': True, 'param_group': 'muon'}
+            # higher lr for certain parameters in MuSGD when finetuning
+            pattern = re.compile(r'(?=.*23)(?=.*cv3)|proto\.semseg')
+            g_ = []  # new param groups
+            for x in g:
+                p = x.pop('params')
+                p1 = [v for k, v in p.items() if pattern.search(k)]
+                p2 = [v for k, v in p.items() if not pattern.search(k)]
+                g_.extend([{'params': p1, **x, 'lr': lr * 3}, {'params': p2, **x}])
+            g = g_
+        optimizer = getattr(optim, name, partial(MuSGD, muon=muon, sgd=sgd))(params=g)
+
+        LOGGER.info(
+            f'{colorstr("optimizer:")} {type(optimizer).__name__}(lr={lr}, momentum={momentum}) with parameter groups '
+            f'{num_params[1]} weight(decay=0.0), {num_params[0]} weight(decay={decay}), {num_params[2]} bias(decay=0.0)'
+        )
+        return optimizer
+
     def optimizer_step(self):
         """Override gradient clipping to use configurable max_norm (LSP-DETR uses 0.1).
 
@@ -410,6 +525,58 @@ class RayCastTrainer(DetectionTrainer):
         else:
             super()._setup_scheduler()
 
+    def _get_nulite_model(self, nc=None, weights=None, verbose=True):
+        """Build the NuLite (FastViT + NuLite decoder + NP seg head) model.
+
+        FastViT returns multi-scale encoder features that the YAML builder
+        cannot route, so the model is built in pure Python and reuses the
+        v1 RayCastDetect head + RayCastE2ELoss + ETL pipeline unchanged.
+        """
+        tcfg = self.training_config or {}
+        nc = nc if nc is not None else 5
+        is_resume = weights is not None and isinstance(weights, torch.nn.Module)
+
+        model = NuLiteRayCastModel(
+            nc=nc,
+            n_rays=_const.N_RAYS,
+            variant=tcfg.get('nulite_variant', 'fastvit_s12'),
+            pretrained=bool(tcfg.get('pretrained', True)) and not is_resume,
+            lambda_seg=float(tcfg.get('lambda_seg', 1.0)),
+            seed_map_target=bool(tcfg.get('seed_map_target', False)),
+            gate_scale=float(tcfg.get('gate_scale', 1.0)),
+            head_channel_scale=tcfg.get('head_channel_scale', 0.5),
+            head_channel_min=tcfg.get('head_channel_min', 64),
+            cls_channel_scale=tcfg.get('cls_channel_scale', 1.0),
+            cls_channel_min=tcfg.get('cls_channel_min', 0),
+            aux_xy=bool(tcfg.get('aux_xy_weight', 0) > 0),
+            dcn_in_reg_head=bool(tcfg.get('dcn_in_reg_head', False)),
+            dcn_in_cls_head=bool(tcfg.get('dcn_in_cls_head', False)),
+            hierarchical_cls=bool(tcfg.get('hierarchical_cls', False)),
+            hierarchical_cls_detach=bool(tcfg.get('hierarchical_cls_detach', True)),
+            hierarchical_binary_threshold=float(tcfg.get('hierarchical_binary_threshold', 0.01)),
+            verbose=verbose,
+        )
+
+        # On resume, restore full checkpoint weights (backbone + decoder + head).
+        if is_resume:
+            model.load_state_dict(weights.state_dict())
+
+        model.init_criterion = _RayCastCriterionWrapper(
+            model,
+            max_epochs=getattr(self.args, 'epochs', 200),
+            training_config=self.training_config,
+        )
+
+        nulite_ckpt = tcfg.get('nulite_ckpt')
+        if nulite_ckpt:
+            model.load_nulite_ckpt(nulite_ckpt)
+
+        # Phase-2a freeze: freeze encoder+decoder+NP, train head+conditioners only.
+        if tcfg.get('freeze_encoder_decoder', False):
+            model.freeze_encoder_decoder_np()
+
+        return model
+
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Create YOLO model with RayCastDetect head and RayCastE2ELoss.
 
@@ -438,6 +605,9 @@ class RayCastTrainer(DetectionTrainer):
             self.data['names'] = {i: f'class_{i}' for i in range(nc_override)}
 
         _const.configure_rays(self.training_config.get('n_rays', 64) if self.training_config else 64)
+
+        if tcfg.get('architecture') == 'nulite':
+            return self._get_nulite_model(nc=nc, weights=weights, verbose=verbose)
 
         model = RayCastDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
 

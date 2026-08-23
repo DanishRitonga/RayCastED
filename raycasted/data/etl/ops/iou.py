@@ -180,4 +180,6 @@ def polar_iou_pairwise_flat_torch(d_pred, d_gt, eps=POLAR_IOU_EPS):
     intersection = torch.sum(torch.minimum(pred_area, gt_area), dim=2)  # (N_cand, N_gt)
     union = torch.sum(torch.maximum(pred_area, gt_area), dim=2)  # (N_cand, N_gt)
 
-    return intersection / (union + eps)
+    iou = intersection / (union + eps)
+    # Guard against non-finite entries from degenerate (inf/NaN) rays.
+    return torch.nan_to_num(iou, nan=0.0, posinf=0.0, neginf=0.0)

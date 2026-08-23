@@ -39,6 +39,18 @@ global_settings:
 
 # Training settings — recommended values for improved detection quality.
 training:
+  # Architecture selector: 'yolo26' (default v1 FCN) or 'nulite' (FastViT + NuLite decoder + NP seg head)
+  architecture: nulite
+
+  # NuLite-specific
+  nulite_variant: fastvit_s12   # FastViT encoder variant (timm create_model name)
+  nulite_ckpt: null             # NuLite pretrained checkpoint (V2 upper bound); null = from-scratch
+  pretrained: true              # ImageNet-pretrained encoder via timm (V1/V2); false = full scratch
+  lambda_seg: 0.0               # NP seg loss weight (0.0 = V3 no-seg baseline)
+  seed_map_target: false        # InstanSeg-style center-weighted distance-to-boundary target (vs hard binary NP mask)
+  gate_scale: 0.0               # SAM-conditioner gate bound (cond = det + gate_scale*fuse); 0.0 = bypass (pure backbone no-seg baseline)
+  freeze_encoder_decoder: false # phase-2a: freeze encoder+decoder+NP, train head only
+
   # Head architecture
   head_channel_scale: 0.5    # c2 = max(head_channel_min, ch * scale). Was 0.25
   head_channel_min: 64       # minimum channels in polygon head. Was 16

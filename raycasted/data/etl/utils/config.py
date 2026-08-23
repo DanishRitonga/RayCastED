@@ -47,6 +47,16 @@ class TrainingSettings(BaseModel):
     cls_channel_scale: float = 1.0  # c3 = max(cls_channel_min, ch[0] * scale). 1.0 = original
     cls_channel_min: int = 0  # minimum cls head intermediate channels. 0 = use ch[0]
 
+    # NuLite architecture (FastViT encoder + NuLite decoder + NP seg head + PAN + SAM conditioning)
+    architecture: str = 'yolo26'  # 'yolo26' = classic YAML-built FCN; 'nulite' = NuLiteRayCastModel
+    nulite_variant: str = 'fastvit_s12'  # FastViT encoder variant (timm create_model name)
+    nulite_ckpt: str | None = None  # NuLite-pretrained encoder/decoder ckpt (V2 upper bound); null = from-scratch
+    pretrained: bool = True  # ImageNet-pretrained encoder via timm (V1/V2); false = full scratch
+    lambda_seg: float = 1.0  # NP seg loss weight (0.0 = V3 no-seg baseline)
+    seed_map_target: bool = False  # InstanSeg-style center-weighted distance-to-boundary seg target (vs hard binary NP)
+    gate_scale: float = 1.0  # SAM gate bound (cond = det + gate_scale*fuse); <1.0 forces head to learn discrimination
+    freeze_encoder_decoder: bool = False  # phase-2a: freeze encoder+decoder+NP, train head only
+
     # LSP-DETR ray initialization: start at minimum plausible nucleus radius
     # so gradient is unidirectional (expand only), avoiding conflicting shrink/expand signals
     native_mpp: float = 0.25  # microns per pixel (PanNuke 40x = 0.25 um/px)

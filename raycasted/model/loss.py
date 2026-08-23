@@ -755,18 +755,17 @@ class RayCastE2ELoss(E2ELoss):
         # o2o head is gradient-starved (0.5% anchors) from 28 fg/image.
         # Distill o2m's sigmoid probs as soft targets for o2o logits on every anchor.
         if self._o2o_distill_weight > 0:
-            if (
-                'binary_scores' in one2many_preds
-                and 'binary_scores' in one2one_preds
-                and 'class_scores' in one2many_preds
-                and 'class_scores' in one2one_preds
-            ):
-                o2m_bin = one2many_preds['binary_scores'].detach()  # [B, 1, N]
-                o2o_bin = one2one_preds['binary_scores']  # [B, 1, N]
-                d_binary = F.binary_cross_entropy_with_logits(o2o_bin, o2m_bin.sigmoid(), reduction='mean')  # scalar
+            # o2m is always non-hierarchical (emits 'scores'). o2o may be
+            # hierarchical (emits 'binary_scores' + 'class_scores') when
+            # hierarchical_cls=True. Handle both o2o structures.
+            if 'binary_scores' in one2one_preds and 'class_scores' in one2one_preds:
+                o2o_bin = one2one_preds['binary_scores']  # [B, 1, N] fg/bg logits
+                o2o_cls = one2one_preds['class_scores']  # [B, nc, N] softmax logits
 
-                o2m_cls = one2many_preds['class_scores'].detach()  # [B, nc, N]
-                o2o_cls = one2one_preds['class_scores']  # [B, nc, N]
+                o2m_cls = one2many_preds['scores'].detach()  # [B, nc, N] sigmoid logits
+                o2m_bin = o2m_cls.sigmoid().max(dim=1, keepdim=True).values.detach()  # [B, 1, N]
+                d_binary = F.binary_cross_entropy_with_logits(o2o_bin, o2m_bin, reduction='mean')  # scalar
+
                 o2m_cls_probs = o2m_cls.softmax(dim=1)  # [B, nc, N]
                 d_class = F.kl_div(o2o_cls.log_softmax(dim=1), o2m_cls_probs, reduction='batchmean')  # scalar
 
