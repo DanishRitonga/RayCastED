@@ -193,6 +193,8 @@ class RayCastPipeline:
             overrides['cos_lr'] = True
         if self.training_config is not None and 'patience' in self.training_config:
             overrides['patience'] = self.training_config['patience']
+        if self.training_config is not None and 'amp' in self.training_config:
+            overrides['amp'] = bool(self.training_config['amp'])
 
         trainer = RayCastTrainer(overrides=overrides, training_config=self.training_config)
         trainer.train()

@@ -39,17 +39,37 @@ global_settings:
 
 # Training settings — recommended values for improved detection quality.
 training:
-  # Architecture selector: 'yolo26' (default v1 FCN) or 'nulite' (FastViT + NuLite decoder + NP seg head)
-  architecture: nulite
+  # Architecture selector: 'yolo26' (v1 FCN), 'nulite' (FastViT + NuLite decoder + NP seg head + FCN heads),
+  # or 'nulite_detr' (same backbone, single query-based DETR head with seed-map query selection)
+  architecture: nulite_detr
 
   # NuLite-specific
   nulite_variant: fastvit_s12   # FastViT encoder variant (timm create_model name)
   nulite_ckpt: null             # NuLite pretrained checkpoint (V2 upper bound); null = from-scratch
   pretrained: true              # ImageNet-pretrained encoder via timm (V1/V2); false = full scratch
-  lambda_seg: 0.0               # NP seg loss weight (0.0 = V3 no-seg baseline)
-  seed_map_target: false        # InstanSeg-style center-weighted distance-to-boundary target (vs hard binary NP mask)
-  gate_scale: 0.0               # SAM-conditioner gate bound (cond = det + gate_scale*fuse); 0.0 = bypass (pure backbone no-seg baseline)
+  lambda_seg: 1.0               # seed-map seg loss weight (0.0 = V3 no-seg baseline)
+  seed_map_target: true         # InstanSeg-style center-weighted distance-to-boundary target (vs hard binary NP mask)
+  gate_scale: 0.0               # SAM-conditioner gate bound (FCN-only; unused by nulite_detr)
   freeze_encoder_decoder: false # phase-2a: freeze encoder+decoder+NP, train head only
+
+  # NuLite DETR head
+  detr_nq: 300                  # number of queries (dense tiles reach ~200 nuclei)
+  detr_ndl: 3                   # decoder layers (lightweight DETR recipe: shallow decoder)
+  detr_hd: 256                  # decoder hidden dim
+  detr_seed_threshold: 0.5      # seed-map local-maxima min value for query seeding
+  detr_peak_distance: 3         # seed-map local-maxima neighbourhood (px)
+  detr_grid_size: 0.05          # grid cell diameter for grid-query init (normalized); ~3.5um at 256px
+  detr_query_selection: grid    # 'grid' (LSP-DETR fixed grid), 'learned' (enc_score_head top-k), or 'seed' (local maxima)
+  detr_seed_feature: true       # concat seed map as extra feature channel (seg conditioning)
+  detr_no_object: true          # explicit "no object" class via focal loss (LSP-DETR style)
+  detr_seed_in_content: true    # concat raw seed logit to score-head inputs (undiluted objectness read)
+  detr_no_object_weight: 2.0    # ∅ focal column weight (>1 = suppress redundant per-nucleus queries harder)
+  detr_mds: true                # MDS-DETR rank-causal self-attn mask (local winner-take-all vs duplicates)
+  fitness_warmup_epochs: 75     # mask fitness before this epoch (guards best-tracking vs early fluke spikes)
+
+  # Mixed precision: DETR (transformer) training overflows fp16 (scaler → 0.0,
+  # all-NaN ~epoch 87). false = train DETR in fp32.
+  amp: false
 
   # Head architecture
   head_channel_scale: 0.5    # c2 = max(head_channel_min, ch * scale). Was 0.25
@@ -63,11 +83,11 @@ training:
   min_nucleus_diameter_um: 3.5 # minimum nucleus diameter (PMC 4600468), radius = 1.75um → 7px
 
   # Early stopping
-  patience: 150
+  patience: 500
 
   # Learning rate
   cos_lr: true               # cosine LR schedule
-  warm_restarts: true        # SGDR: CosineAnnealingWarmRestarts 
+  warm_restarts: false       # plain cosine (SGDR restarts destabilize the DETR conf balance)
   warm_restarts_T0: 133      # first cycle length (3 cycles in 400: 133→266→399)
   warm_restarts_T_mult: 1    # period multiplier (1=equal cycles, 2=doubling)
   warm_restarts_eta_min: 0.0001  # minimum LR at cycle bottom

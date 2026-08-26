@@ -57,6 +57,26 @@ class TrainingSettings(BaseModel):
     gate_scale: float = 1.0  # SAM gate bound (cond = det + gate_scale*fuse); <1.0 forces head to learn discrimination
     freeze_encoder_decoder: bool = False  # phase-2a: freeze encoder+decoder+NP, train head only
 
+    # NuLite DETR architecture (single query-based head, seed-map query selection)
+    detr_nq: int = 300  # number of queries (dense tiles reach ~200 nuclei)
+    detr_ndl: int = 3  # decoder layers (lightweight DETR recipe: shallow decoder)
+    detr_hd: int = 256  # decoder hidden dim
+    detr_seed_threshold: float = 0.5  # seed-map local-maxima min value for query seeding
+    detr_peak_distance: int = 3  # seed-map local-maxima neighbourhood (px)
+    detr_grid_size: float = 0.05  # grid cell diameter for grid-query init (normalized); ~3.5um at 256px
+    detr_query_selection: str = 'grid'  # 'grid' (LSP-DETR fixed grid), 'learned' (enc_score_head top-k), or 'seed' (local maxima)
+    detr_seed_feature: bool = True  # concat seed map as extra feature channel (seg conditioning)
+    detr_no_object: bool = True  # explicit "no object" class via focal loss (LSP-DETR style)
+    detr_seed_in_content: bool = True  # concat raw seed logit to score-head inputs (undiluted objectness read)
+    detr_no_object_weight: float = 1.0  # ∅ focal column weight (>1 = suppress redundant queries harder)
+    detr_mds: bool = True  # MDS-DETR rank-causal self-attn mask (local winner-take-all, duplicate suppression)
+    fitness_warmup_epochs: int = 0  # mask fitness before this epoch (guards vs early fluke spikes)
+
+    # Mixed precision. DETR (transformer) training is fp16-overflow prone
+    # (observed: GradScaler scale → 0.0 → all-NaN at epoch ~87); set false to
+    # train the DETR architecture in fp32.
+    amp: bool = True
+
     # LSP-DETR ray initialization: start at minimum plausible nucleus radius
     # so gradient is unidirectional (expand only), avoiding conflicting shrink/expand signals
     native_mpp: float = 0.25  # microns per pixel (PanNuke 40x = 0.25 um/px)

@@ -149,9 +149,9 @@ class NuLiteRayCastModel(DetectionModel):
 
         if np_logits is not None and self.lambda_seg > 0:
             if self.seed_map_target and 'seed_map' in batch:
-                # InstanSeg-style: regression on normalized distance-to-boundary,
-                # center-weighted (peak at nucleus center, ~0 at boundary).
-                seg = F.smooth_l1_loss(torch.sigmoid(np_logits), batch['seed_map'])
+                # InstanSeg-exact: raw L1 regression of the head's raw logits
+                # against the (edt-0.5)*15 target (no sigmoid on the output).
+                seg = F.l1_loss(np_logits, batch['seed_map'])
             elif 'np_mask' in batch:
                 seg = F.binary_cross_entropy_with_logits(np_logits, batch['np_mask'])
             else:

@@ -43,6 +43,7 @@ from raycasted.data.etl.utils import constants as _const
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.builder import raycasted_parse_model
 from raycasted.model.loss import RayCastE2ELoss
+from raycasted.model.nulite_detr_model import NuLiteRayCastDETRModel
 from raycasted.model.nulite_model import NuLiteRayCastModel
 from raycasted.model.register import register_raycast_head
 from raycasted.model.val import RayCastValidator
@@ -144,19 +145,23 @@ def _raycast_collate_fn(batch: list) -> dict:
 
     # NP mask + seed map: rasterize binary nuclei mask from normalized polygon labels.
     # Labels are normalized [0,1]; multiply cx/cy/rays by crop_size to get pixel coords.
-    # seed_map = normalized distance-to-boundary (InstanSeg-style): ~1 at nucleus
-    # center, ~0 at the boundary — a center-weighted target for the conditioning head.
+    # seed_map = InstanSeg-style target (instance_wise_edt): per-instance
+    # distance-to-boundary, PER-INSTANCE normalized (each nucleus center = 1,
+    # boundary = 0), then transformed to (edt - 0.5) * 15 => range [-7.5, +7.5]
+    # (background negative, center positive). Matches InstanSeg exactly so the
+    # NP head can be queried by local-maxima for DETR query selection.
     np_masks = []
     seed_maps = []
     for labels in labels_list:
         h = w = images.shape[-1]
         mask = np.zeros((h, w), dtype=np.float32)
+        inst = np.zeros((h, w), dtype=np.int32)
         if labels.shape[0] > 0:
             n_rays = labels.shape[1] - 3
             angles = np.linspace(0, 2 * np.pi, n_rays, endpoint=False)
             cos_a = np.cos(angles)
             sin_a = np.sin(angles)
-            for ann in labels:
+            for idx, ann in enumerate(labels):
                 cx = float(ann[1]) * w
                 cy = float(ann[2]) * h
                 rays = ann[3:] * w
@@ -164,10 +169,20 @@ def _raycast_collate_fn(batch: list) -> dict:
                 ys = cy + rays * sin_a
                 polygon = np.stack([xs, ys], axis=1).astype(np.int32)
                 cv2.fillPoly(mask, [polygon], 1.0)
+                cv2.fillPoly(inst, [polygon], idx + 1)
         np_masks.append(torch.from_numpy(mask[None]))  # (1, H, W)
+        # Per-instance normalized EDT: center=1 regardless of nucleus size.
         dist = cv2.distanceTransform((mask * 255).astype(np.uint8), cv2.DIST_L2, 3)
-        dmax = float(dist.max())
-        seed = dist / dmax if dmax > 0 else dist
+        seed = np.zeros_like(dist)
+        for label in range(1, int(inst.max()) + 1):
+            m = inst == label
+            if m.sum() == 0:
+                continue
+            dmax = float(dist[m].max())
+            if dmax > 0:
+                seed[m] = dist[m] / dmax
+        # InstanSeg transform: symmetric around 0, scaled to mimic CE range.
+        seed = (seed - 0.5) * 15.0
         seed_maps.append(torch.from_numpy(seed[None]))  # (1, H, W)
 
     return {
@@ -476,6 +491,30 @@ class RayCastTrainer(DetectionTrainer):
         )
         return optimizer
 
+    def validate(self):
+        """Mask fitness during the early warmup window (fluke-spoke guard).
+
+        DETR-style runs have bimodal early metrics: a lucky epoch where the
+        conf distribution shifts past inference_conf produces a fitness spike
+        (e.g. ep2 bPQ 0.235 with recall 0.03) that poisons best-epoch tracking
+        and starts the EarlyStopping patience clock. Returning -inf fitness
+        before ``fitness_warmup_epochs`` keeps best_fitness/best.pt honest.
+        """
+        warmup = (self.training_config or {}).get('fitness_warmup_epochs', 0)
+        if warmup and self.epoch < warmup:
+            import logging
+
+            result = super().validate()
+            if result is not None and result[0] is not None:
+                metrics, _fitness = result
+                metrics['fitness'] = float('-inf')
+                logging.getLogger('raycasted.train').debug(
+                    'fitness masked (epoch %d < warmup %d)', self.epoch + 1, warmup
+                )
+                return metrics, float('-inf')
+            return result
+        return super().validate()
+
     def optimizer_step(self):
         """Override gradient clipping to use configurable max_norm (LSP-DETR uses 0.1).
 
@@ -524,6 +563,52 @@ class RayCastTrainer(DetectionTrainer):
             )
         else:
             super()._setup_scheduler()
+
+    def _get_nulite_detr_model(self, nc=None, weights=None, verbose=True):
+        """Build the NuLite DETR (single query-based head) model.
+
+        FastViT encoder + NuLite decoder feed a single DETR head whose queries
+        are seeded from local maxima of the NP seed map (InstanSeg-style
+        self-prompting). No PAN/conditioners/multi-scale FCN heads. Uses the
+        NuLiteDETRLoss (Hungarian 1:1 + VFL).
+        """
+        tcfg = self.training_config or {}
+        nc = nc if nc is not None else 5
+        is_resume = weights is not None and isinstance(weights, torch.nn.Module)
+
+        model = NuLiteRayCastDETRModel(
+            nc=nc,
+            n_rays=_const.N_RAYS,
+            variant=tcfg.get('nulite_variant', 'fastvit_s12'),
+            pretrained=bool(tcfg.get('pretrained', True)) and not is_resume,
+            lambda_seg=float(tcfg.get('lambda_seg', 1.0)),
+            nq=int(tcfg.get('detr_nq', 300)),
+            ndl=int(tcfg.get('detr_ndl', 3)),
+            hd=int(tcfg.get('detr_hd', 256)),
+            seed_threshold=float(tcfg.get('detr_seed_threshold', 0.5)),
+            peak_distance=int(tcfg.get('detr_peak_distance', 3)),
+            grid_size=float(tcfg.get('detr_grid_size', 0.05)),
+            query_selection=tcfg.get('detr_query_selection', 'grid'),
+            seed_feature=bool(tcfg.get('detr_seed_feature', True)),
+            no_object=bool(tcfg.get('detr_no_object', True)),
+            seed_in_content=bool(tcfg.get('detr_seed_in_content', True)),
+            no_object_weight=float(tcfg.get('detr_no_object_weight', 1.0)),
+            mds=bool(tcfg.get('detr_mds', True)),
+            verbose=verbose,
+        )
+
+        # On resume, restore full checkpoint weights.
+        if is_resume:
+            model.load_state_dict(weights.state_dict())
+
+        nulite_ckpt = tcfg.get('nulite_ckpt')
+        if nulite_ckpt:
+            model.load_nulite_ckpt(nulite_ckpt)
+
+        if tcfg.get('freeze_encoder_decoder', False):
+            model.freeze_encoder_decoder_np()
+
+        return model
 
     def _get_nulite_model(self, nc=None, weights=None, verbose=True):
         """Build the NuLite (FastViT + NuLite decoder + NP seg head) model.
@@ -608,6 +693,9 @@ class RayCastTrainer(DetectionTrainer):
 
         if tcfg.get('architecture') == 'nulite':
             return self._get_nulite_model(nc=nc, weights=weights, verbose=verbose)
+
+        if tcfg.get('architecture') == 'nulite_detr':
+            return self._get_nulite_detr_model(nc=nc, weights=weights, verbose=verbose)
 
         model = RayCastDetectionModel(cfg, ch=3, nc=nc, verbose=verbose)
 
