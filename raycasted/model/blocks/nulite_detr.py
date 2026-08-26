@@ -538,10 +538,12 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         update (SAP-DETR/LSP-DETR style): p = p0 + s*tanh((p - p0)/s), so a
         query can never drift more than half a cell from where it started.
 
-        When ``self.mds`` is set, the self-attention of every layer is masked
-        rank-causally by the previous layer's objectness confidence (encoder
-        scores for layer 0), giving local winner-take-all between adjacent grid
-        cells (MDS-DETR duplicate suppression).
+        When ``self.mds`` is set, the FINAL decoder layer's self-attention is
+        masked rank-causally by the previous layer's objectness confidence,
+        giving local winner-take-all between adjacent grid cells (MDS-DETR
+        duplicate suppression). Earlier layers keep full self-attention for
+        feature refinement — mirroring MDS-DETR's O2M-then-O2O design where only
+        the last (O2O) layer suppresses duplicates.
         """
         output = embed
         dec_polygons = []
@@ -553,7 +555,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         for i, layer in enumerate(self.decoder.layers):
             query_pos = self.query_pos_head(refer_centroids_2d)
             layer_attn_mask = attn_mask
-            if self.mds and prev_scores is not None:
+            if self.mds and i == self.decoder.eval_idx and prev_scores is not None:
                 layer_attn_mask = self._rank_causal_mask(prev_scores)
             output = layer(
                 output,
