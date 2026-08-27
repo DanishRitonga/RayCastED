@@ -27,7 +27,7 @@ results.csv
 
 .claude
 .opencode
-runs/
+/runs/
 
 log*
 *.pt

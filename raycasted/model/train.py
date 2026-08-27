@@ -337,24 +337,7 @@ def _best_epoch_callback(trainer):
     if fitness >= best:
         logger.info(f'  ⭐ Epoch {epoch} — new best (fitness={fitness:.4f})')
     else:
-        # Find best epoch from CSV (last column with max fitness)
-        try:
-            import csv
-
-            best_ep = epoch  # fallback
-            best_fit = best
-            csv_path = trainer.csv
-            if csv_path.exists():
-                with open(csv_path) as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        val = float(row.get('fitness', 0))
-                        if val >= best_fit:
-                            best_fit = val
-                            best_ep = int(float(row.get('epoch', epoch)))
-            logger.info(f'  Best so far: epoch {best_ep} (fitness={best_fit:.4f})')
-        except Exception:
-            logger.info(f'  Best so far: fitness={best:.4f}')
+        logger.info(f'  Best so far: fitness={best:.4f}')
 
 
 def _lr_log_callback(trainer):
@@ -492,27 +475,27 @@ class RayCastTrainer(DetectionTrainer):
         return optimizer
 
     def validate(self):
-        """Mask fitness during the early warmup window (fluke-spoke guard).
+        """Mask fitness during the early warmup window (fluke-spike guard).
 
         DETR-style runs have bimodal early metrics: a lucky epoch where the
         conf distribution shifts past inference_conf produces a fitness spike
         (e.g. ep2 bPQ 0.235 with recall 0.03) that poisons best-epoch tracking
-        and starts the EarlyStopping patience clock. Returning -inf fitness
-        before ``fitness_warmup_epochs`` keeps best_fitness/best.pt honest.
+        and starts the EarlyStopping patience clock. Before
+        ``fitness_warmup_epochs`` we run the validator directly (NOT through
+        ``super().validate()``, which updates ``best_fitness`` with the real
+        fitness before we could mask it) and return -inf fitness, keeping
+        best_fitness/best.pt honest.
         """
         warmup = (self.training_config or {}).get('fitness_warmup_epochs', 0)
         if warmup and self.epoch < warmup:
-            import logging
-
-            result = super().validate()
-            if result is not None and result[0] is not None:
-                metrics, _fitness = result
-                metrics['fitness'] = float('-inf')
-                logging.getLogger('raycasted.train').debug(
-                    'fitness masked (epoch %d < warmup %d)', self.epoch + 1, warmup
-                )
-                return metrics, float('-inf')
-            return result
+            metrics = self.validator(self)
+            if metrics is None:
+                return None, None
+            # Drop 'fitness' so the CSV header/rows stay consistent: the parent
+            # validate() also pops it, and re-adding it here (the old behaviour)
+            # made the warmup rows carry an extra column -> column misalignment.
+            metrics.pop('fitness', None)
+            return metrics, float('-inf')
         return super().validate()
 
     def optimizer_step(self):
@@ -594,6 +577,7 @@ class RayCastTrainer(DetectionTrainer):
             seed_in_content=bool(tcfg.get('detr_seed_in_content', True)),
             no_object_weight=float(tcfg.get('detr_no_object_weight', 1.0)),
             mds=bool(tcfg.get('detr_mds', True)),
+            cost_inside=float(tcfg.get('detr_cost_inside', 10.0)),
             verbose=verbose,
         )
 
@@ -894,15 +878,18 @@ class RayCastTrainer(DetectionTrainer):
 
     def get_validator(self):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
-        self.loss_names = (
-            'xy_loss',
-            'cls_loss',
-            'l1_loss',
-            'piou_loss',
-            'smooth_loss',
-            'distill_loss',
-            'aux_xy_loss',
-        )
+        if (self.training_config or {}).get('architecture') == 'nulite_detr':
+            self.loss_names = ('cls_loss', 'xy_loss', 'l1_loss', 'piou_loss', 'smooth_loss')
+        else:
+            self.loss_names = (
+                'xy_loss',
+                'cls_loss',
+                'l1_loss',
+                'piou_loss',
+                'smooth_loss',
+                'distill_loss',
+                'aux_xy_loss',
+            )
         args_copy = copy.copy(self.args)
         if self.training_config and 'inference_conf' in self.training_config:
             args_copy.conf = self.training_config['inference_conf']

@@ -70,6 +70,7 @@ class TrainingSettings(BaseModel):
     detr_seed_in_content: bool = True  # concat raw seed logit to score-head inputs (undiluted objectness read)
     detr_no_object_weight: float = 1.0  # ∅ focal column weight (>1 = suppress redundant queries harder)
     detr_mds: bool = True  # MDS-DETR rank-causal self-attn mask (local winner-take-all, duplicate suppression)
+    detr_cost_inside: float = 10.0  # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
     fitness_warmup_epochs: int = 0  # mask fitness before this epoch (guards vs early fluke spikes)
 
     # Mixed precision. DETR (transformer) training is fp16-overflow prone

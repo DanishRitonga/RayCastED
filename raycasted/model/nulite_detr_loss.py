@@ -5,13 +5,69 @@ GIoU with ray L1 + xy L1 + polar IoU, and HungarianMatcher's bbox/giou costs
 with ray/piou costs. Pure 1:1 assignment (no one-to-many branch, no NMS).
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.optimize import linear_sum_assignment
 
 from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch, polar_iou_torch
+from raycasted.data.etl.ops.loss import curvature_smoothness_loss_torch
 from raycasted.data.etl.utils import constants as _const
+from raycasted.model.blocks.star_distances_analytical import (
+    _normed_rays_to_vertices,
+    analytical_gt_rays,
+    build_ray_directions,
+)
+
+
+def _log_space_ray_loss(pred_rays: torch.Tensor, target_rays: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+    """L1 loss in log-space for ray distances (matches FCN RayCastDetectionLoss).
+
+    Equalizes relative errors across scales: a 10% error on a small ray gives
+    the same loss as a 10% error on a large ray.
+    """
+    log_pred = torch.clamp(pred_rays, min=eps).log()
+    log_tgt = torch.clamp(target_rays, min=eps).log()
+    return (log_pred - log_tgt).abs().mean(-1)
+
+
+def _points_inside_star(pred_xy, gt_xy, gt_rays, n_rays):
+    """Test whether each predicted centroid lies inside each GT star polygon.
+
+    LSP-DETR inner-mask cost term Wm: a centroid is "inside" a star-convex
+    nucleus iff its distance from the GT center along its angular direction is
+    <= the ray length interpolated between the two bracketing rays.
+
+    Args:
+        pred_xy: (nq, 2) predicted centroids, normalized [0,1].
+        gt_xy: (n_gt, 2) GT centers, normalized [0,1].
+        gt_rays: (n_gt, n_rays) GT ray lengths, normalized [0,1].
+        n_rays: number of radial rays.
+
+    Returns:
+        (nq, n_gt) bool tensor, True where the centroid is inside the polygon.
+    """
+    nq = pred_xy.shape[0]
+    n_gt = gt_xy.shape[0]
+    dx = pred_xy[:, 0].unsqueeze(1) - gt_xy[:, 0].unsqueeze(0)  # (nq, n_gt)
+    dy = pred_xy[:, 1].unsqueeze(1) - gt_xy[:, 1].unsqueeze(0)
+    dist = (dx * dx + dy * dy).sqrt()
+
+    phi = torch.remainder(torch.atan2(dy, dx), 2 * math.pi)  # [0, 2pi)
+    angle_step = 2 * math.pi / n_rays
+    idx = phi / angle_step  # continuous ray index
+    i0 = idx.floor().long().clamp(0, n_rays - 1)
+    frac = idx - i0.float()
+    i1 = (i0 + 1) % n_rays
+
+    gt_rays_exp = gt_rays.unsqueeze(0).expand(nq, n_gt, n_rays)  # (nq, n_gt, n_rays)
+    r0 = gt_rays_exp.gather(2, i0.unsqueeze(-1)).squeeze(-1)  # (nq, n_gt)
+    r1 = gt_rays_exp.gather(2, i1.unsqueeze(-1)).squeeze(-1)
+    d_phi = r0 * (1 - frac) + r1 * frac
+
+    return dist <= d_phi
 
 
 class RayCastHungarianMatcher(nn.Module):
@@ -28,10 +84,11 @@ class RayCastHungarianMatcher(nn.Module):
         alpha=0.25,
         gamma=2.0,
         n_rays=None,
+        cost_inside=10.0,
     ):
         super().__init__()
         if cost_gain is None:
-            cost_gain = {'class': 2, 'ray': 5, 'piou': 2}
+            cost_gain = {'class': 2, 'ray': 5, 'piou': 2, 'inside': cost_inside}
         self.cost_gain = cost_gain
         self.use_fl = use_fl
         self.alpha = alpha
@@ -101,10 +158,19 @@ class RayCastHungarianMatcher(nn.Module):
             else:
                 cost_piou = torch.zeros(nq, n_gt, device=pred_polygons.device)
 
+            # LSP-DETR inner-mask cost Wm: 0 if the predicted centroid is
+            # inside the GT nucleus, lambda otherwise. Dominates misassignment
+            # of displaced centroids (the train17 val->test gap culprit).
+            cost_inside = 0.0
+            if self.cost_gain.get('inside', 0.0) != 0.0:
+                inside = _points_inside_star(pred_xy, gt_xy, gt_rays, self.n_rays)
+                cost_inside = self.cost_gain['inside'] * (~inside).float()
+
             cost = (
                 self.cost_gain['class'] * cost_class
                 + self.cost_gain['ray'] * (cost_ray + cost_xy)
                 + self.cost_gain['piou'] * cost_piou
+                + cost_inside
             )
             cost[cost.isnan() | cost.isinf()] = 0.0
 
@@ -131,17 +197,21 @@ class NuLiteDETRLoss(nn.Module):
         use_vfl=True,
         no_object=True,
         n_rays=None,
+        cost_inside=10.0,
     ):
         super().__init__()
         if loss_gain is None:
-            loss_gain = {'class': 1, 'ray': 5, 'piou': 2, 'no_object': 1.0}
+            # FCN RayCastDetectionLoss parity: same regression terms + lambdas
+            # (xy=500, l1=14, piou=3.0, smooth=0, cls=2.0) plus the DETR-only
+            # "no object" column weight.
+            loss_gain = {'class': 2.0, 'xy': 500.0, 'l1': 14.0, 'piou': 3.0, 'smooth': 0.0, 'no_object': 1.0}
         self.nc = nc
         self.loss_gain = loss_gain
         self.aux_loss = aux_loss
         self.no_object = no_object
         self.n_rays = n_rays or _const.N_RAYS
         self.matcher = RayCastHungarianMatcher(
-            cost_gain={'class': 2, 'ray': 5, 'piou': 2},
+            cost_gain={'class': 2, 'ray': 5, 'piou': 2, 'inside': cost_inside},
             n_rays=self.n_rays,
         )
         from ultralytics.utils.loss import FocalLoss, VarifocalLoss
@@ -186,27 +256,50 @@ class NuLiteDETRLoss(nn.Module):
 
         return {name: loss_cls.squeeze() * self.loss_gain['class']}
 
-    def _get_loss_polygon(self, pred_polygons, gt_polygons, postfix=''):
-        name_ray = f'loss_ray{postfix}'
+    def _get_loss_bbox(self, pred_polygons, gt_polygons, crop_size, postfix=''):
+        """FCN-parity polygon regression losses: xy (Huber) + ray L1 (log) + pIoU + smooth."""
+        name_xy = f'loss_xy{postfix}'
+        name_l1 = f'loss_l1{postfix}'
         name_piou = f'loss_piou{postfix}'
+        name_smooth = f'loss_smooth{postfix}'
 
         loss = {}
         if len(gt_polygons) == 0:
-            loss[name_ray] = torch.tensor(0.0, device=pred_polygons.device)
+            loss[name_xy] = torch.tensor(0.0, device=pred_polygons.device)
+            loss[name_l1] = torch.tensor(0.0, device=pred_polygons.device)
             loss[name_piou] = torch.tensor(0.0, device=pred_polygons.device)
+            loss[name_smooth] = torch.tensor(0.0, device=pred_polygons.device)
             return loss
 
-        pred_rays = pred_polygons[:, 2:]
-        gt_rays = gt_polygons[:, 2:]
-        pred_xy = pred_polygons[:, :2]
-        gt_xy = gt_polygons[:, :2]
+        pred_xy = pred_polygons[:, :2].float()
+        gt_xy = gt_polygons[:, :2].float()
+        pred_rays = pred_polygons[:, 2:].float()
+        gt_rays_static = gt_polygons[:, 2:].float()
+        n_gt = len(gt_polygons)
 
-        ray_l1 = F.l1_loss(pred_rays, gt_rays, reduction='sum') + F.l1_loss(pred_xy, gt_xy, reduction='sum')
-        loss[name_ray] = self.loss_gain['ray'] * ray_l1 / len(gt_polygons)
+        # L_xy: Huber on centroid (delta=0.05), FCN loss[0].
+        loss_xy = F.huber_loss(pred_xy, gt_xy, reduction='none', delta=0.05).mean(-1)
+        loss[name_xy] = self.loss_gain['xy'] * loss_xy.sum() / n_gt
 
-        piou = polar_iou_torch(pred_rays.float(), gt_rays.float())
-        piou_loss = (1.0 - piou).sum() / len(gt_polygons)
-        loss[name_piou] = self.loss_gain['piou'] * piou_loss
+        # L_l1: log-space ray MAE on analytical target rays (decoupled from the
+        # predicted centroid, FCN loss[2] with log_ray_loss=true).
+        crop_size = float(crop_size)
+        pred_xy_px = pred_xy * crop_size
+        gt_centroids_px = gt_xy * crop_size
+        ray_cos, ray_sin = build_ray_directions(self.n_rays, device=pred_rays.device, dtype=pred_rays.dtype)
+        gt_vertices = _normed_rays_to_vertices(gt_centroids_px, gt_rays_static, crop_size, ray_cos, ray_sin)
+        analytical_target = analytical_gt_rays(pred_xy_px.detach(), gt_vertices, ray_cos, ray_sin, crop_size)
+        loss_l1 = _log_space_ray_loss(pred_rays, analytical_target)
+        loss[name_l1] = self.loss_gain['l1'] * loss_l1.sum() / n_gt
+
+        # L_piou: -log(polar IoU) vs STATIC GT rays, FCN loss[3].
+        piou = polar_iou_torch(pred_rays, gt_rays_static)
+        piou_loss = -torch.log(piou.clamp(min=1e-4))
+        loss[name_piou] = self.loss_gain['piou'] * piou_loss.sum() / n_gt
+
+        # L_smooth: 2nd-order curvature regularisation, FCN loss[4].
+        smooth_loss = curvature_smoothness_loss_torch(pred_rays)
+        loss[name_smooth] = self.loss_gain['smooth'] * smooth_loss.sum() / n_gt
 
         return {k: v.squeeze() for k, v in loss.items()}
 
@@ -224,6 +317,7 @@ class NuLiteDETRLoss(nn.Module):
         gt_polygons,
         gt_cls,
         gt_groups,
+        crop_size,
         postfix='',
         match_indices=None,
     ):
@@ -265,11 +359,11 @@ class NuLiteDETRLoss(nn.Module):
             gt_scores[batch_idx, src_idx] = piou.detach()
 
         loss_cls = self._get_loss_class(pred_scores, targets, gt_scores, num_gts, postfix)
-        loss_poly = self._get_loss_polygon(pred_polygons_assigned, gt_polygons_assigned, postfix)
+        loss_bbox = self._get_loss_bbox(pred_polygons_assigned, gt_polygons_assigned, crop_size, postfix)
 
         loss = {}
         loss.update(loss_cls)
-        loss.update(loss_poly)
+        loss.update(loss_bbox)
         return loss
 
     def _get_loss_aux(
@@ -279,24 +373,36 @@ class NuLiteDETRLoss(nn.Module):
         gt_polygons,
         gt_cls,
         gt_groups,
+        crop_size,
         match_indices=None,
         postfix='',
     ):
-        loss = torch.zeros(3, device=pred_polygons.device)
+        loss = torch.zeros(5, device=pred_polygons.device)
         if match_indices is None:
             match_indices = self.matcher(pred_polygons[-1], pred_scores[-1], gt_polygons, gt_cls, gt_groups)
         for aux_polygons, aux_scores in zip(pred_polygons, pred_scores):
             loss_ = self._get_loss(
-                aux_polygons, aux_scores, gt_polygons, gt_cls, gt_groups, postfix=postfix, match_indices=match_indices
+                aux_polygons,
+                aux_scores,
+                gt_polygons,
+                gt_cls,
+                gt_groups,
+                crop_size,
+                postfix=postfix,
+                match_indices=match_indices,
             )
             loss[0] += loss_[f'loss_class{postfix}']
-            loss[1] += loss_[f'loss_ray{postfix}']
-            loss[2] += loss_[f'loss_piou{postfix}']
+            loss[1] += loss_[f'loss_xy{postfix}']
+            loss[2] += loss_[f'loss_l1{postfix}']
+            loss[3] += loss_[f'loss_piou{postfix}']
+            loss[4] += loss_[f'loss_smooth{postfix}']
 
         return {
             f'loss_class_aux{postfix}': loss[0],
-            f'loss_ray_aux{postfix}': loss[1],
-            f'loss_piou_aux{postfix}': loss[2],
+            f'loss_xy_aux{postfix}': loss[1],
+            f'loss_l1_aux{postfix}': loss[2],
+            f'loss_piou_aux{postfix}': loss[3],
+            f'loss_smooth_aux{postfix}': loss[4],
         }
 
     def forward(
@@ -307,18 +413,21 @@ class NuLiteDETRLoss(nn.Module):
         dn_scores=None,
         dn_meta=None,
     ):
-        """Compute total detection loss (cls + ray L1 + polar IoU + aux)."""
+        """Compute total detection loss (cls + xy + ray L1 + polar IoU + smooth + aux)."""
         gt_polygons = targets['bboxes']
         gt_cls = targets['cls']
         gt_groups = targets['gt_groups']
+        crop_size = float(targets.get('imgsz', 256))
 
         dec_polygons, dec_scores = preds
         self.device = dec_polygons.device
 
-        loss = self._get_loss(dec_polygons[-1], dec_scores[-1], gt_polygons, gt_cls, gt_groups)
+        loss = self._get_loss(dec_polygons[-1], dec_scores[-1], gt_polygons, gt_cls, gt_groups, crop_size)
 
         if self.aux_loss:
-            loss_aux = self._get_loss_aux(dec_polygons[:-1], dec_scores[:-1], gt_polygons, gt_cls, gt_groups)
+            loss_aux = self._get_loss_aux(
+                dec_polygons[:-1], dec_scores[:-1], gt_polygons, gt_cls, gt_groups, crop_size
+            )
             loss.update(loss_aux)
 
         return loss

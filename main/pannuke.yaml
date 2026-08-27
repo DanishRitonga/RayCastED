@@ -65,6 +65,7 @@ training:
   detr_seed_in_content: true    # concat raw seed logit to score-head inputs (undiluted objectness read)
   detr_no_object_weight: 2.0    # ∅ focal column weight (>1 = suppress redundant per-nucleus queries harder)
   detr_mds: true                # MDS-DETR rank-causal self-attn mask (local winner-take-all vs duplicates)
+  detr_cost_inside: 10.0        # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
   fitness_warmup_epochs: 75     # mask fitness before this epoch (guards best-tracking vs early fluke spikes)
 
   # Mixed precision: DETR (transformer) training overflows fp16 (scaler → 0.0,

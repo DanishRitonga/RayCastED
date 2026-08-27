@@ -46,6 +46,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         seed_in_content: bool = True,
         no_object_weight: float = 1.0,
         mds: bool = True,
+        cost_inside: float = 10.0,
         verbose: bool = True,
     ):
         super(DetectionModel, self).__init__()
@@ -54,6 +55,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.lambda_seg = lambda_seg
         self.no_object = no_object
         self.no_object_weight = no_object_weight
+        self.cost_inside = cost_inside
         self.names = {i: str(i) for i in range(nc)}
         self.yaml = {'nc': nc, 'n_rays': n_rays, 'architecture': 'nulite_detr', 'variant': variant}
 
@@ -147,10 +149,18 @@ class NuLiteRayCastDETRModel(DetectionModel):
         """
         return NuLiteDETRLoss(
             nc=self.nc,
-            loss_gain={'class': 1, 'ray': 5, 'piou': 2, 'no_object': self.no_object_weight},
+            loss_gain={
+                'class': 2.0,
+                'xy': 500.0,
+                'l1': 14.0,
+                'piou': 3.0,
+                'smooth': 0.0,
+                'no_object': self.no_object_weight,
+            },
             use_vfl=not self.no_object,
             no_object=self.no_object,
             n_rays=self.n_rays,
+            cost_inside=self.cost_inside,
         )
 
     def loss(self, batch, preds=None):
@@ -174,6 +184,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             'bboxes': batch['bboxes'].to(device),
             'batch_idx': batch_idx,
             'gt_groups': gt_groups,
+            'imgsz': img.shape[-1],
         }
 
         if preds is None:
@@ -203,7 +214,13 @@ class NuLiteRayCastDETRModel(DetectionModel):
             total = total + self.lambda_seg * seg
 
         loss_items = torch.as_tensor(
-            [loss['loss_class'].detach(), loss['loss_ray'].detach(), loss['loss_piou'].detach()],
+            [
+                loss['loss_class'].detach(),
+                loss['loss_xy'].detach(),
+                loss['loss_l1'].detach(),
+                loss['loss_piou'].detach(),
+                loss['loss_smooth'].detach(),
+            ],
             device=device,
         )
         return total, loss_items
