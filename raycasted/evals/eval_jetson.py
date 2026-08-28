@@ -250,25 +250,33 @@ def compute_aji(pred_masks, gt_masks, iou_threshold=0.5):
     return float(total_intersection / total_union)
 
 
-def _compute_pq_masked(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
+def _instance_match_counts(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
+    """Instance-level Hungarian matching for PanNuke PQ.
+
+    Returns (tp, fp, fn, iou_sum) for global PQ accumulation.
+    """
     from scipy.optimize import linear_sum_assignment
 
     n_pred = len(pred_masks)
     n_gt = len(gt_masks)
-    if n_gt == 0 or n_pred == 0:
-        return 0.0, 0.0, 0.0
     if mask is not None:
         pred_masks = [m & mask for m in pred_masks]
         gt_masks = [m & mask for m in gt_masks]
+    if n_pred == 0 or n_gt == 0:
+        return 0, n_pred, n_gt, 0.0
     iou_matrix = _mask_iou_matrix(pred_masks, gt_masks)
     row_ind, col_ind = linear_sum_assignment(-iou_matrix)
-    valid = iou_matrix[row_ind, col_ind] >= iou_threshold
-    tp = valid.sum()
-    fp = n_pred - tp
-    fn = n_gt - tp
-    dq = tp / (tp + 0.5 * fp + 0.5 * fn) if (tp + fp + fn) > 0 else 0.0
-    sq = float(iou_matrix[row_ind[valid], col_ind[valid]].mean()) if tp > 0 else 0.0
-    return float(sq * dq), float(sq), float(dq)
+    matched_iou = iou_matrix[row_ind, col_ind]
+    valid = matched_iou >= iou_threshold
+    tp = int(valid.sum())
+    return tp, n_pred - tp, n_gt - tp, float(matched_iou[valid].sum())
+
+
+def _pq_from_counts(tp, fp, fn, iou_sum, eps=1e-6):
+    """PanNuke PQ from matched counts: DQ = TP/(TP + 0.5 FP + 0.5 FN), SQ = ΣIoU/TP."""
+    dq = tp / (tp + 0.5 * fp + 0.5 * fn + eps)
+    sq = iou_sum / tp if tp > 0 else 0.0
+    return dq * sq
 
 
 def _compute_ap(recall, precision):
@@ -289,9 +297,17 @@ def compute_metrics_streaming(results, num_classes):
     from scipy.optimize import linear_sum_assignment
 
     iou_thresholds = sorted(set(round(x, 2) for x in np.arange(0.5, 1.0, 0.05)))
-    aji_scores, bpq_scores, bmpq_scores = [], [], []
-    class_pq = {c: [] for c in range(num_classes)}
-    class_mpq = {c: [] for c in range(num_classes)}
+    aji_scores = []
+    bpq_tp, bpq_fp, bpq_fn, bpq_iou = 0, 0, 0, 0.0
+    bmpq_tp, bmpq_fp, bmpq_fn, bmpq_iou = 0, 0, 0, 0.0
+    class_tp = [0] * num_classes
+    class_fp = [0] * num_classes
+    class_fn = [0] * num_classes
+    class_iou = [0.0] * num_classes
+    class_mpq_tp = [0] * num_classes
+    class_mpq_fp = [0] * num_classes
+    class_mpq_fn = [0] * num_classes
+    class_mpq_iou = [0.0] * num_classes
     centroid_tp, centroid_fp, centroid_fn = 0, 0, 0
 
     class_set = set()
@@ -316,39 +332,41 @@ def compute_metrics_streaming(results, num_classes):
 
         aji_scores.append(compute_aji(pred_masks, gt_masks))
 
-        pred_binary = (
-            np.stack(pred_masks).max(axis=0).astype(np.uint8)
-            if pred_masks
-            else np.zeros((imgsz, imgsz), dtype=np.uint8)
-        )
-        gt_binary = (
-            np.stack(gt_masks).max(axis=0).astype(np.uint8) if gt_masks else np.zeros((imgsz, imgsz), dtype=np.uint8)
-        )
-        bpq, _, _ = _compute_pq_masked([pred_binary], [gt_binary])
-        bpq_scores.append(bpq)
-        if gt_binary.sum() > 0:
-            bmpq, _, _ = _compute_pq_masked([pred_binary], [gt_binary], mask=gt_binary > 0)
+        if gt_masks:
+            gt_any = np.stack(gt_masks).max(axis=0).astype(np.uint8)
         else:
-            bmpq = 0.0
-        bmpq_scores.append(bmpq)
+            gt_any = np.zeros((imgsz, imgsz), dtype=np.uint8)
+        fg = gt_any > 0
 
-        gt_idx_counts = [0] * num_classes
-        pred_idx_counts = [0] * num_classes
+        tp, fp, fn, iou_sum = _instance_match_counts(pred_masks, gt_masks)
+        bpq_tp += tp
+        bpq_fp += fp
+        bpq_fn += fn
+        bpq_iou += iou_sum
+
+        tp, fp, fn, iou_sum = _instance_match_counts(pred_masks, gt_masks, mask=fg)
+        bmpq_tp += tp
+        bmpq_fp += fp
+        bmpq_fn += fn
+        bmpq_iou += iou_sum
+
         for cls_id in range(num_classes):
             pred_idx = [j for j, c in enumerate(pred_cls) if c == cls_id]
             gt_idx = [j for j, c in enumerate(gt_cls) if c == cls_id]
-            gt_idx_counts[cls_id] = len(gt_idx)
-            pred_idx_counts[cls_id] = len(pred_idx)
-            pq, _, _ = _compute_pq_masked([pred_masks[j] for j in pred_idx], [gt_masks[j] for j in gt_idx])
-            class_pq[cls_id].append(pq)
-            if len(gt_masks) > 0:
-                gt_any = np.stack(gt_masks).max(axis=0).astype(np.uint8)
-                mpq, _, _ = _compute_pq_masked(
-                    [pred_masks[j] for j in pred_idx], [gt_masks[j] for j in gt_idx], mask=gt_any > 0
-                )
-            else:
-                mpq = 0.0
-            class_mpq[cls_id].append(mpq)
+            pred_cls_masks = [pred_masks[j] for j in pred_idx]
+            gt_cls_masks = [gt_masks[j] for j in gt_idx]
+
+            tp, fp, fn, iou_sum = _instance_match_counts(pred_cls_masks, gt_cls_masks)
+            class_tp[cls_id] += tp
+            class_fp[cls_id] += fp
+            class_fn[cls_id] += fn
+            class_iou[cls_id] += iou_sum
+
+            tp, fp, fn, iou_sum = _instance_match_counts(pred_cls_masks, gt_cls_masks, mask=fg)
+            class_mpq_tp[cls_id] += tp
+            class_mpq_fp[cls_id] += fp
+            class_mpq_fn[cls_id] += fn
+            class_mpq_iou[cls_id] += iou_sum
 
         for cls_id in sorted(class_set):
             cls_pred_masks = [
@@ -392,16 +410,20 @@ def compute_metrics_streaming(results, num_classes):
             print(f'  {i + 1}/{len(results)} images', flush=True)
 
     mean_aji = np.mean(aji_scores)
-    mean_bpq = np.mean(bpq_scores)
-    mean_bmpq = np.mean(bmpq_scores)
+    mean_bpq = _pq_from_counts(bpq_tp, bpq_fp, bpq_fn, bpq_iou)
+    mean_bmpq = _pq_from_counts(bmpq_tp, bmpq_fp, bmpq_fn, bmpq_iou)
     mpq_values = [
-        np.mean([v for v in class_pq[c] if v > 0]) for c in range(num_classes) if any(v > 0 for v in class_pq[c])
+        _pq_from_counts(class_tp[c], class_fp[c], class_fn[c], class_iou[c])
+        for c in range(num_classes)
+        if class_tp[c] + class_fn[c] > 0
     ]
-    mean_mpq = np.mean(mpq_values) if mpq_values else 0.0
+    mean_mpq = float(np.mean(mpq_values)) if mpq_values else 0.0
     mmpq_values = [
-        np.mean([v for v in class_mpq[c] if v > 0]) for c in range(num_classes) if any(v > 0 for v in class_mpq[c])
+        _pq_from_counts(class_mpq_tp[c], class_mpq_fp[c], class_mpq_fn[c], class_mpq_iou[c])
+        for c in range(num_classes)
+        if class_mpq_tp[c] + class_mpq_fn[c] > 0
     ]
-    mean_mmpq = np.mean(mmpq_values) if mmpq_values else 0.0
+    mean_mmpq = float(np.mean(mmpq_values)) if mmpq_values else 0.0
 
     ap_results = {}
     for t in iou_thresholds:

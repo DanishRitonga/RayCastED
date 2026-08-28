@@ -532,30 +532,41 @@ def _mask_iou_matrix(pred_masks: list[np.ndarray], gt_masks: list[np.ndarray]) -
     return np.divide(intersection, union, out=np.zeros_like(intersection, dtype=np.float64), where=union > 0)
 
 
-def _compute_pq_masked(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
-    """Compute PQ with optional foreground mask (bMPQ / mMPQ style)."""
+def _instance_match_counts(pred_masks, gt_masks, iou_threshold=0.5, mask=None):
+    """Instance-level Hungarian matching for PanNuke PQ.
+
+    Args:
+        pred_masks: List of [H, W] uint8 binary masks (predictions).
+        gt_masks: List of [H, W] uint8 binary masks (ground truth).
+        iou_threshold: Minimum IoU for a valid match.
+        mask: Optional [H, W] bool foreground mask restricting both sides.
+
+    Returns:
+        (tp, fp, fn, iou_sum) tuple for global PQ accumulation.
+    """
     n_pred = len(pred_masks)
     n_gt = len(gt_masks)
-
-    if n_gt == 0 or n_pred == 0:
-        return 0.0, 0.0, 0.0
-
     if mask is not None:
         pred_masks = [m & mask for m in pred_masks]
         gt_masks = [m & mask for m in gt_masks]
+    if n_pred == 0 or n_gt == 0:
+        return 0, n_pred, n_gt, 0.0
 
     iou_matrix = _mask_iou_matrix(pred_masks, gt_masks)
     row_ind, col_ind = linear_sum_assignment(-iou_matrix)
-    valid = iou_matrix[row_ind, col_ind] >= iou_threshold
+    matched_iou = iou_matrix[row_ind, col_ind]
+    valid = matched_iou >= iou_threshold
 
-    tp = valid.sum()
-    fp = n_pred - tp
-    fn = n_gt - tp
+    tp = int(valid.sum())
+    iou_sum = float(matched_iou[valid].sum())
+    return tp, n_pred - tp, n_gt - tp, iou_sum
 
-    dq = tp / (tp + 0.5 * fp + 0.5 * fn) if (tp + fp + fn) > 0 else 0.0
-    sq = float(iou_matrix[row_ind[valid], col_ind[valid]].mean()) if tp > 0 else 0.0
-    pq = sq * dq
-    return float(pq), float(sq), float(dq)
+
+def _pq_from_counts(tp, fp, fn, iou_sum, eps=1e-6):
+    """PanNuke PQ from matched counts: DQ = TP/(TP + 0.5 FP + 0.5 FN), SQ = ΣIoU/TP."""
+    dq = tp / (tp + 0.5 * fp + 0.5 * fn + eps)
+    sq = iou_sum / tp if tp > 0 else 0.0
+    return dq * sq
 
 
 def _compute_ap(recall, precision):
@@ -586,13 +597,20 @@ def compute_metrics_streaming(results, num_classes):
 
     # Accumulators
     aji_scores = []
-    bpq_scores = []
-    bmpq_scores = []
-    class_pq = {c: [] for c in range(num_classes)}
-    class_mpq = {c: [] for c in range(num_classes)}
     centroid_tp = 0
     centroid_fp = 0
     centroid_fn = 0
+    # Global PQ accumulators (PanNuke standard: TP/FP/FN/ΣIoU aggregated across all images)
+    bpq_tp, bpq_fp, bpq_fn, bpq_iou = 0, 0, 0, 0.0
+    bmpq_tp, bmpq_fp, bmpq_fn, bmpq_iou = 0, 0, 0, 0.0
+    class_tp = [0] * num_classes
+    class_fp = [0] * num_classes
+    class_fn = [0] * num_classes
+    class_iou = [0.0] * num_classes
+    class_mpq_tp = [0] * num_classes
+    class_mpq_fp = [0] * num_classes
+    class_mpq_fn = [0] * num_classes
+    class_mpq_iou = [0.0] * num_classes
     tissue_aji = {t: [] for t in range(19)}
     tissue_bpq = {t: [] for t in range(19)}
     tissue_mpq = {t: {c: [] for c in range(num_classes)} for t in range(19)}
@@ -628,28 +646,27 @@ def compute_metrics_streaming(results, num_classes):
         aji_val = compute_aji(pred_masks, gt_masks)
         aji_scores.append(aji_val)
 
-        # --- bPQ / bMPQ ---
-        if len(pred_masks) > 0:
-            pred_binary = np.stack(pred_masks).max(axis=0).astype(np.uint8)
+        # --- bPQ / bMPQ (instance-level binary PQ, PanNuke standard) ---
+        if gt_masks:
+            gt_any = np.stack(gt_masks).max(axis=0).astype(np.uint8)
         else:
-            pred_binary = np.zeros((imgsz, imgsz), dtype=np.uint8)
+            gt_any = np.zeros((imgsz, imgsz), dtype=np.uint8)
+        fg = gt_any > 0
 
-        if len(gt_masks) > 0:
-            gt_binary = np.stack(gt_masks).max(axis=0).astype(np.uint8)
-        else:
-            gt_binary = np.zeros((imgsz, imgsz), dtype=np.uint8)
+        tp, fp, fn, iou_sum = _instance_match_counts(pred_masks, gt_masks)
+        bpq_tp += tp
+        bpq_fp += fp
+        bpq_fn += fn
+        bpq_iou += iou_sum
+        bpq_img = _pq_from_counts(tp, fp, fn, iou_sum)
 
-        bpq, _, _ = _compute_pq_masked([pred_binary], [gt_binary])
-        bpq_scores.append(bpq)
+        tp, fp, fn, iou_sum = _instance_match_counts(pred_masks, gt_masks, mask=fg)
+        bmpq_tp += tp
+        bmpq_fp += fp
+        bmpq_fn += fn
+        bmpq_iou += iou_sum
 
-        if gt_binary.sum() > 0:
-            fg = gt_binary > 0
-            bmpq, _, _ = _compute_pq_masked([pred_binary], [gt_binary], mask=fg)
-        else:
-            bmpq = 0.0
-        bmpq_scores.append(bmpq)
-
-        # --- mPQ / mMPQ ---
+        # --- mPQ / mMPQ (per-class instance-level PQ) ---
         class_pq_img = [0.0] * num_classes
         gt_idx_counts = [0] * num_classes
         pred_idx_counts = [0] * num_classes
@@ -662,17 +679,18 @@ def compute_metrics_streaming(results, num_classes):
             pred_cls_masks = [pred_masks[j] for j in pred_idx]
             gt_cls_masks = [gt_masks[j] for j in gt_idx]
 
-            pq, _, _ = _compute_pq_masked(pred_cls_masks, gt_cls_masks)
-            class_pq[cls_id].append(pq)
-            class_pq_img[cls_id] = pq
+            tp, fp, fn, iou_sum = _instance_match_counts(pred_cls_masks, gt_cls_masks)
+            class_tp[cls_id] += tp
+            class_fp[cls_id] += fp
+            class_fn[cls_id] += fn
+            class_iou[cls_id] += iou_sum
+            class_pq_img[cls_id] = _pq_from_counts(tp, fp, fn, iou_sum)
 
-            if len(gt_masks) > 0:
-                gt_any = np.stack(gt_masks).max(axis=0).astype(np.uint8)
-                fg = gt_any > 0
-                mpq, _, _ = _compute_pq_masked(pred_cls_masks, gt_cls_masks, mask=fg)
-            else:
-                mpq = 0.0
-            class_mpq[cls_id].append(mpq)
+            tp, fp, fn, iou_sum = _instance_match_counts(pred_cls_masks, gt_cls_masks, mask=fg)
+            class_mpq_tp[cls_id] += tp
+            class_mpq_fp[cls_id] += fp
+            class_mpq_fn[cls_id] += fn
+            class_mpq_iou[cls_id] += iou_sum
 
         # --- AP (per-class Hungarian matching) ---
         for cls_id in sorted(class_set):
@@ -732,7 +750,7 @@ def compute_metrics_streaming(results, num_classes):
         tissue = int(r.get('tissue', 0))
         if tissue < 19 and aji_val > -1:
             tissue_aji[tissue].append(aji_val)
-            tissue_bpq[tissue].append(bpq)
+            tissue_bpq[tissue].append(bpq_img)
             for cls_id in range(num_classes):
                 if gt_idx_counts[cls_id] > 0 or pred_idx_counts[cls_id] > 0:
                     tissue_mpq[tissue][cls_id].append(class_pq_img[cls_id])
@@ -746,22 +764,20 @@ def compute_metrics_streaming(results, num_classes):
     # AJI
     mean_aji = np.mean(aji_scores)
 
-    # bPQ / bMPQ
-    mean_bpq = np.mean(bpq_scores)
-    mean_bmpq = np.mean(bmpq_scores)
+    # bPQ / bMPQ (global instance-level binary PQ)
+    mean_bpq = _pq_from_counts(bpq_tp, bpq_fp, bpq_fn, bpq_iou)
+    mean_bmpq = _pq_from_counts(bmpq_tp, bmpq_fp, bmpq_fn, bmpq_iou)
 
-    # mPQ / mMPQ
+    # mPQ / mMPQ (global per-class PQ, mean over classes present in GT)
     mpq_values = []
     mmpq_values = []
     for c in range(num_classes):
-        valid_pq = [v for v in class_pq[c] if v > 0]
-        valid_mpq = [v for v in class_mpq[c] if v > 0]
-        if valid_pq:
-            mpq_values.append(np.mean(valid_pq))
-        if valid_mpq:
-            mmpq_values.append(np.mean(valid_mpq))
-    mean_mpq = np.mean(mpq_values) if mpq_values else 0.0
-    mean_mmpq = np.mean(mmpq_values) if mmpq_values else 0.0
+        if class_tp[c] + class_fn[c] > 0:  # class has GT instances
+            mpq_values.append(_pq_from_counts(class_tp[c], class_fp[c], class_fn[c], class_iou[c]))
+        if class_mpq_tp[c] + class_mpq_fn[c] > 0:
+            mmpq_values.append(_pq_from_counts(class_mpq_tp[c], class_mpq_fp[c], class_mpq_fn[c], class_mpq_iou[c]))
+    mean_mpq = float(np.mean(mpq_values)) if mpq_values else 0.0
+    mean_mmpq = float(np.mean(mmpq_values)) if mmpq_values else 0.0
 
     # AP
     ap_results = {}
