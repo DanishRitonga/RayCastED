@@ -354,7 +354,9 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         enc_polygons = decode_polygon(refer_polygon_logits)
         refer_centroids = enc_polygons[..., :2]
         enc_scores = self._score(
-            self.enc_score_head, content, self._sample_seed_at(seed_map, p0) if seed_map is not None else None
+            self.enc_score_head,
+            content,
+            self._sample_seed_at(seed_map, p0) if (self.seed_in_content and seed_map is not None) else None,
         )
         embeddings = content
 
