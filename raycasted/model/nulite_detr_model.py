@@ -47,6 +47,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         no_object_weight: float = 1.0,
         mds: bool = True,
         cost_inside: float = 10.0,
+        seed_map_target: bool = True,
         verbose: bool = True,
     ):
         super(DetectionModel, self).__init__()
@@ -56,6 +57,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.no_object = no_object
         self.no_object_weight = no_object_weight
         self.cost_inside = cost_inside
+        self.seed_map_target = seed_map_target
         self.names = {i: str(i) for i in range(nc)}
         self.yaml = {'nc': nc, 'n_rays': n_rays, 'architecture': 'nulite_detr', 'variant': variant}
 
@@ -209,9 +211,15 @@ class NuLiteRayCastDETRModel(DetectionModel):
         total = sum(loss.values())
 
         seed = getattr(self, '_last_seed', None)
-        if seed is not None and self.lambda_seg > 0 and 'seed_map' in batch:
-            seg = F.l1_loss(seed, batch['seed_map'].to(device))
-            total = total + self.lambda_seg * seg
+        if seed is not None and self.lambda_seg > 0:
+            if self.seed_map_target and 'seed_map' in batch:
+                seg = F.l1_loss(seed, batch['seed_map'].to(device))
+            elif 'np_mask' in batch:
+                seg = F.binary_cross_entropy_with_logits(seed, batch['np_mask'].to(device))
+            else:
+                seg = None
+            if seg is not None:
+                total = total + self.lambda_seg * seg
 
         loss_items = torch.as_tensor(
             [

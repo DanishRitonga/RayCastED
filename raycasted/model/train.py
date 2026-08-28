@@ -578,6 +578,7 @@ class RayCastTrainer(DetectionTrainer):
             no_object_weight=float(tcfg.get('detr_no_object_weight', 1.0)),
             mds=bool(tcfg.get('detr_mds', True)),
             cost_inside=float(tcfg.get('detr_cost_inside', 10.0)),
+            seed_map_target=bool(tcfg.get('seed_map_target', True)),
             verbose=verbose,
         )
 
