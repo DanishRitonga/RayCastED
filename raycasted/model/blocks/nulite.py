@@ -39,13 +39,16 @@ class NuLiteEncoderDecoder(nn.Module):
         b1 (stride 1, 64ch)  — full-resolution segmentation feature
     """
 
-    def __init__(self, variant: str = 'fastvit_s12', pretrained: bool = True):
+    def __init__(self, variant: str = 'fastvit_s12', pretrained: bool = True, use_decoder: bool = True):
         import timm
 
         super().__init__()
+        self.use_decoder = use_decoder
         self.encoder = timm.create_model(f'{variant}.apple_in1k', features_only=True, pretrained=pretrained)
         dims = list(self.encoder.feature_info.channels())  # [64, 128, 256, 512] for s12
         self.embed_dims = dims
+        if not use_decoder:
+            return
         # dims order: stride4 -> stride32; decoder consumes reversed (coarse -> fine)
         e3, e2, e1, e0 = dims  # 64, 128, 256, 512
 
@@ -75,8 +78,16 @@ class NuLiteEncoderDecoder(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> dict:
-        """Encode and upsample, returning the multi-scale decoder features."""
-        z4, z3, z2, z1 = list(self.encoder(x))[::-1]
+        """Encode and (optionally) upsample, returning the multi-scale features.
+
+        With ``use_decoder=False`` the raw FastViT stage features (strides
+        4/8/16, channels 64/128/256 for s12) are returned directly as b3/b4/b5
+        and ``b1`` is None — the upsample decoder is bypassed entirely.
+        """
+        feats = list(self.encoder(x))  # [st4, st8, st16, st32]
+        if not self.use_decoder:
+            return {'b3': feats[0], 'b4': feats[1], 'b5': feats[2], 'b1': None}
+        z4, z3, z2, z1 = feats[::-1]
         b5 = self.bottleneck_upsampler(z4)
         b4 = self.decoder4_upsampler(torch.cat([b5, z3], dim=1))
         b3 = self.decoder3_upsampler(torch.cat([b4, z2], dim=1))

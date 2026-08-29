@@ -579,6 +579,7 @@ class RayCastTrainer(DetectionTrainer):
             mds=bool(tcfg.get('detr_mds', True)),
             cost_inside=float(tcfg.get('detr_cost_inside', 10.0)),
             seed_map_target=bool(tcfg.get('seed_map_target', True)),
+            use_decoder=bool(tcfg.get('detr_use_decoder', True)),
             verbose=verbose,
         )
 

@@ -47,7 +47,7 @@ training:
   nulite_variant: fastvit_s12   # FastViT encoder variant (timm create_model name)
   nulite_ckpt: null             # NuLite pretrained checkpoint (V2 upper bound); null = from-scratch
   pretrained: true              # ImageNet-pretrained encoder via timm (V1/V2); false = full scratch
-  lambda_seg: 1.0               # seed-map seg loss weight (ablation series: 1.0 train19 -> 0.0 train20/21 -> 1.0 train22 -> 1.0 train23)
+  lambda_seg: 0.0               # seed-map seg loss weight (ablation series: 1.0 train19 -> 0.0 train20/21 -> 1.0 train22 -> 1.0 train23 -> 0.0 train24 no-decoder)
   seed_map_target: true         # InstanSeg-style center-weighted distance-to-boundary target (vs hard binary NP mask)
   gate_scale: 0.0               # SAM-conditioner gate bound (FCN-only; unused by nulite_detr)
   freeze_encoder_decoder: false # phase-2a: freeze encoder+decoder+NP, train head only
@@ -66,6 +66,7 @@ training:
   detr_no_object_weight: 2.0    # ∅ focal column weight (>1 = suppress redundant per-nucleus queries harder)
   detr_mds: false               # MDS-DETR rank-causal self-attn mask (ablation: false = plain self-attn, train18 ref was true)
   detr_cost_inside: 10.0        # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
+  detr_use_decoder: false       # false = bypass NuLite decoder+NP head; DETR reads raw FastViT stage features (~12.2M). train24.
   fitness_warmup_epochs: 75     # mask fitness before this epoch (guards best-tracking vs early fluke spikes)
 
   # Mixed precision: DETR (transformer) training overflows fp16 (scaler → 0.0,

@@ -22,9 +22,13 @@ class NuLiteRayCastDETRModel(DetectionModel):
     Submodules (plain-list self.model ending in the DETR decoder so that
     model.model[-1] is the head, matching the v1 framework contract):
       encoder_decoder -> NuLiteEncoderDecoder (b3/b4/b5/b1)
-      decoder0        -> Conv(3, 64, 3)
-      np_head         -> NPHead(128)  (seed logits at full res)
+      decoder0        -> Conv(3, 64, 3)          [use_decoder only]
+      np_head         -> NPHead(128)  (seed logits at full res) [use_decoder only]
       detr            -> NuLiteDETRDecoder (nc, ch=(64,128,256), nq=300, ndl=3)
+
+    With ``use_decoder=False`` the NuLite upsample decoder + NP seed head are
+    dropped entirely: the DETR head reads the raw FastViT stage features
+    (strides 4/8/16). ~12.2M params vs 15.46M with the decoder.
     """
 
     def __init__(
@@ -48,6 +52,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         mds: bool = True,
         cost_inside: float = 10.0,
         seed_map_target: bool = True,
+        use_decoder: bool = True,
         verbose: bool = True,
     ):
         super(DetectionModel, self).__init__()
@@ -58,12 +63,14 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.no_object_weight = no_object_weight
         self.cost_inside = cost_inside
         self.seed_map_target = seed_map_target
+        self.use_decoder = use_decoder
         self.names = {i: str(i) for i in range(nc)}
         self.yaml = {'nc': nc, 'n_rays': n_rays, 'architecture': 'nulite_detr', 'variant': variant}
 
-        self.encoder_decoder = NuLiteEncoderDecoder(variant=variant, pretrained=pretrained)
-        self.decoder0 = Conv(3, 64, 3, s=1)
-        self.np_head = NPHead(in_channels=128)
+        self.encoder_decoder = NuLiteEncoderDecoder(variant=variant, pretrained=pretrained, use_decoder=use_decoder)
+        if use_decoder:
+            self.decoder0 = Conv(3, 64, 3, s=1)
+            self.np_head = NPHead(in_channels=128)
         self.detr = NuLiteDETRDecoder(
             nc=nc,
             ch=(64, 128, 256),
@@ -86,7 +93,10 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.detr.stride = stride
         self.stride = stride
 
-        self.model = [self.encoder_decoder, self.decoder0, self.np_head, self.detr]
+        if use_decoder:
+            self.model = [self.encoder_decoder, self.decoder0, self.np_head, self.detr]
+        else:
+            self.model = [self.encoder_decoder, self.detr]
         self.save = []
         # NOTE: end2end stays False. The DetectionModel.end2end getter reads
         # model[-1].end2end (absent on the DETR decoder), and the setter warns +
@@ -109,9 +119,12 @@ class NuLiteRayCastDETRModel(DetectionModel):
         format [cx, cy, d1..dn, conf, cls] (eval_pannuke / val.py compatible).
         """
         d = self.encoder_decoder(x)
-        x0 = self.decoder0(x)
-        xt = torch.cat([x0, d['b1']], dim=1)
-        seed = self.np_head(xt)
+        if self.use_decoder:
+            x0 = self.decoder0(x)
+            xt = torch.cat([x0, d['b1']], dim=1)
+            seed = self.np_head(xt)
+        else:
+            seed = None
         self._last_seed = seed
 
         out = self.detr([d['b3'], d['b4'], d['b5']], batch, seed_map=seed)
@@ -246,9 +259,10 @@ class NuLiteRayCastDETRModel(DetectionModel):
     def freeze_encoder_decoder_np(self):
         """Freeze encoder + decoder + decoder0 + NP seed head."""
         self.encoder_decoder.freeze_encoder()
-        self.encoder_decoder.freeze_decoder()
-        self.decoder0.requires_grad_(False)
-        self.np_head.requires_grad_(False)
+        if self.use_decoder:
+            self.encoder_decoder.freeze_decoder()
+            self.decoder0.requires_grad_(False)
+            self.np_head.requires_grad_(False)
 
     def unfreeze_all(self):
         """Unfreeze every parameter."""
