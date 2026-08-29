@@ -47,7 +47,7 @@ training:
   nulite_variant: fastvit_s12   # FastViT encoder variant (timm create_model name)
   nulite_ckpt: null             # NuLite pretrained checkpoint (V2 upper bound); null = from-scratch
   pretrained: true              # ImageNet-pretrained encoder via timm (V1/V2); false = full scratch
-  lambda_seg: 1.0               # seed-map seg loss weight (ablation series: 1.0 train19 -> 0.0 train20/21 -> 1.0 train22)
+  lambda_seg: 1.0               # seed-map seg loss weight (ablation series: 1.0 train19 -> 0.0 train20/21 -> 1.0 train22 -> 1.0 train23)
   seed_map_target: true         # InstanSeg-style center-weighted distance-to-boundary target (vs hard binary NP mask)
   gate_scale: 0.0               # SAM-conditioner gate bound (FCN-only; unused by nulite_detr)
   freeze_encoder_decoder: false # phase-2a: freeze encoder+decoder+NP, train head only
@@ -60,7 +60,7 @@ training:
   detr_peak_distance: 3         # seed-map local-maxima neighbourhood (px)
   detr_grid_size: 0.05          # grid cell diameter for grid-query init (normalized); ~3.5um at 256px
   detr_query_selection: grid    # 'grid' (LSP-DETR fixed grid), 'learned' (enc_score_head top-k), or 'seed' (local maxima)
-  detr_seed_feature: true       # concat seed map as extra feature channel (train22: seg loss + feature channel, seed_q OFF)
+  detr_seed_feature: false      # concat seed map as extra feature channel (train23: seg loss ONLY, feature channel OFF)
   detr_no_object: true          # explicit "no object" class via focal loss (LSP-DETR style)
   detr_seed_in_content: false   # concat raw seed logit to score-head inputs (train21 showed seed_q-alone HARMS bPQ -0.9; off)
   detr_no_object_weight: 2.0    # ∅ focal column weight (>1 = suppress redundant per-nucleus queries harder)
