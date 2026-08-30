@@ -22,6 +22,28 @@ Class centroid F1: Neoplastic 0.8667 / Inflammatory 0.9134 / Connective 0.8738 /
 ## Diagnosis
 **MDS is redundant** — train19 (off) within noise of train18 (on): bPQ 0.6728 vs 0.6713, mPQ 0.6294 vs 0.6321, ~10% faster (5.10 vs 5.70 ms/img). Duplicate suppression is carried by cost_inside + FCN-parity loss + the 1:1 Hungarian head, not the rank-causal mask. `detr_mds: false` becomes the standard. **train19 is the seed-arc winner (S+F+Q)** and the head-ladder base.
 
+## Exact original-mask eval (literature protocol)
+
+**User skepticism (m2058)**: "honestly im still kinda skeptical that we reached 0.6 mPQ. while even LKCell is only 0.5". Audited the metric and re-ran evaluation against the **exact original dense PanNuke masks** (decoded from the fold3 parquet PNG bytes, the same target literature methods compare against) via `/tmp/opencode/orig_mask_eval.py`.
+
+**Fold discovery**: the actual split is train=fold1 (2656), val=fold2 (2523), **test=fold3 (2722)** — the pannuke.yaml `split_map` (fold1=val, fold2=test, fold3=train) is stale. All test evals (train3/6/18-25) were already on fold3; the earlier fidelity measurement used fold2 (wrong fold).
+
+**Results (train19 best.pt, fold3, conf=0.20, identical pred masks in both columns)**:
+
+| metric | polygon-GT (current) | **original-mask GT** |
+|---|---|---|
+| bPQ (DQ/SQ) | 0.6728 (0.8333/0.8074) | **0.6901 (0.8318/0.8296)** |
+| mPQ | 0.6294 | **0.6489** |
+| AJI | 0.7521 | **0.7706** |
+| centroid F1 (P/R) | 0.8823 (0.7937/0.9933) | **0.8749 (0.7913/0.9783)** |
+| binary recall | 0.9381 (61,772/65,848) | 0.9301 (61,998/66,654) |
+
+Per-class PQ (original-mask GT): Neoplastic 0.6916, Inflammatory 0.7195, Connective 0.6728, Necrosis 0.4610, Epithelial 0.6995.
+
+**Interpretation**: evaluating against the original dense masks scores **higher** (bPQ 0.6901, mPQ 0.6489), not lower. My earlier 0.612/0.565 "fidelity-corrected estimate" double-counted boundary error multiplicatively and was wrong. The 64-ray GT polygon is a chord-inscribed inner approximation of the true boundary, so the model's slightly fuller polygons match the original shape better (SQ 0.830 vs 0.807). The original-mask column is also evaluated on a **harder** target: 66,654 instances vs 65,848 — the polygon ETL (`filter_and_clip_annotations`) drops 806 tiny nuclei across 645/2722 tiles, which are present in the original-mask GT.
+
+**Vs literature (3-fold CV + watershed protocol)**: LSP-DETR bPQ 0.675/mPQ 0.482 (45M params), LKCell bPQ 0.684/mPQ 0.503 (163.8M). Our single-fold bPQ 0.6901/mPQ 0.6489 at 15.46M params beats both. Caveats: single fold (fold3 test), largest-first overlap resolution (vs watershed), no 3-fold CV averaging.
+
 ## Next
 - train20 (pure-DETR, S/F/Q all off) → seed-arc completeness.
 - Head-slimming ladder on this base: A (ndl 3→2), B (d_ffn 1024→512), E (A+B), C (hd 256→128), D (weight-shared layers).
