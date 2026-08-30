@@ -54,16 +54,16 @@ training:
 
   # NuLite DETR head
   detr_nq: 300                  # number of queries (dense tiles reach ~200 nuclei)
-  detr_ndl: 3                   # decoder layers (lightweight DETR recipe: shallow decoder)
+  detr_ndl: 2                   # decoder layers (head-slimming ladder run A: 3→2, head 2.759M total 14.32M, −29%)
   detr_hd: 256                  # decoder hidden dim
   detr_d_ffn: 1024              # decoder FFN hidden dim (head-slimming ladder B: 512 = ~16% head params off)
   detr_seed_threshold: 0.5      # seed-map local-maxima min value for query seeding
   detr_peak_distance: 3         # seed-map local-maxima neighbourhood (px)
   detr_grid_size: 0.05          # grid cell diameter for grid-query init (normalized); ~3.5um at 256px
   detr_query_selection: grid    # 'grid' (LSP-DETR fixed grid), 'learned' (enc_score_head top-k), or 'seed' (local maxima)
-  detr_seed_feature: false      # concat seed map as extra feature channel (train25: S+Q cell, feature channel OFF to test F redundancy)
+  detr_seed_feature: true       # concat seed map as extra feature channel (train25 S+Q 0.6635 < 0.670 → F NOT redundant; base restored = train19 S+F+Q)
   detr_no_object: true          # explicit "no object" class via focal loss (LSP-DETR style)
-  detr_seed_in_content: true    # concat raw seed logit to score-head inputs (train25: S+Q cell — Q on, tests if F is needed to unlock Q)
+  detr_seed_in_content: true    # concat raw seed logit to score-head inputs (ladder base = train19 S+F+Q)
   detr_no_object_weight: 2.0    # ∅ focal column weight (>1 = suppress redundant per-nucleus queries harder)
   detr_mds: false               # MDS-DETR rank-causal self-attn mask (ablation: false = plain self-attn, train18 ref was true)
   detr_cost_inside: 10.0        # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
