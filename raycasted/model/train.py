@@ -568,6 +568,7 @@ class RayCastTrainer(DetectionTrainer):
             nq=int(tcfg.get('detr_nq', 300)),
             ndl=int(tcfg.get('detr_ndl', 3)),
             hd=int(tcfg.get('detr_hd', 256)),
+            d_ffn=int(tcfg.get('detr_d_ffn', 1024)),
             seed_threshold=float(tcfg.get('detr_seed_threshold', 0.5)),
             peak_distance=int(tcfg.get('detr_peak_distance', 3)),
             grid_size=float(tcfg.get('detr_grid_size', 0.05)),
@@ -580,6 +581,7 @@ class RayCastTrainer(DetectionTrainer):
             cost_inside=float(tcfg.get('detr_cost_inside', 10.0)),
             seed_map_target=bool(tcfg.get('seed_map_target', True)),
             use_decoder=bool(tcfg.get('detr_use_decoder', True)),
+            shared_layers=bool(tcfg.get('detr_shared_layers', False)),
             verbose=verbose,
         )
 

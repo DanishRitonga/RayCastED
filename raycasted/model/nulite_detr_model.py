@@ -41,6 +41,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         nq: int = 300,
         ndl: int = 3,
         hd: int = 256,
+        d_ffn: int = 1024,
         seed_threshold: float = 0.5,
         peak_distance: int = 3,
         grid_size: float = 0.05,
@@ -53,6 +54,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         cost_inside: float = 10.0,
         seed_map_target: bool = True,
         use_decoder: bool = True,
+        shared_layers: bool = False,
         verbose: bool = True,
     ):
         super(DetectionModel, self).__init__()
@@ -77,6 +79,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             hd=hd,
             nq=nq,
             ndl=ndl,
+            d_ffn=d_ffn,
             nd=0,
             n_rays=n_rays,
             seed_threshold=seed_threshold,
@@ -87,6 +90,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             no_object=no_object,
             seed_in_content=seed_in_content,
             mds=mds,
+            shared_layers=shared_layers,
         )
 
         stride = torch.tensor([4.0, 8.0, 16.0])

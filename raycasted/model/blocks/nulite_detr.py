@@ -94,6 +94,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         no_object: bool = True,
         seed_in_content: bool = True,
         mds: bool = True,
+        shared_layers: bool = False,
     ):
         self.n_rays = n_rays or _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays
@@ -122,6 +123,12 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         self.no_object = no_object
         self.seed_in_content = seed_in_content
         self.mds = mds
+        if shared_layers:
+            # weight-shared transformer layers: reuse ONE DeformableTransformerDecoderLayer
+            # instance across all ndl steps (params-only saving, FLOPs unchanged). Per-layer
+            # dec_bbox_head/dec_score_head stay distinct so iterative refinement still varies.
+            self.decoder.layers = nn.ModuleList([self.decoder.layers[0]] * self.decoder.num_layers)
+        self.shared_layers = shared_layers
 
         # When the seed map is concatenated as an extra feature channel, the
         # input projection must accept one more channel per scale.

@@ -56,6 +56,7 @@ training:
   detr_nq: 300                  # number of queries (dense tiles reach ~200 nuclei)
   detr_ndl: 3                   # decoder layers (lightweight DETR recipe: shallow decoder)
   detr_hd: 256                  # decoder hidden dim
+  detr_d_ffn: 1024              # decoder FFN hidden dim (head-slimming ladder B: 512 = ~16% head params off)
   detr_seed_threshold: 0.5      # seed-map local-maxima min value for query seeding
   detr_peak_distance: 3         # seed-map local-maxima neighbourhood (px)
   detr_grid_size: 0.05          # grid cell diameter for grid-query init (normalized); ~3.5um at 256px
@@ -67,6 +68,7 @@ training:
   detr_mds: false               # MDS-DETR rank-causal self-attn mask (ablation: false = plain self-attn, train18 ref was true)
   detr_cost_inside: 10.0        # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
   detr_use_decoder: true        # true = NuLite decoder+NP head on (train24 no-decoder bPQ 0.636 < 0.657 → decoder NEEDED; back on for train25)
+  detr_shared_layers: false     # weight-share the transformer decoder layer across all ndl steps (ladder D, params-only)
   fitness_warmup_epochs: 75     # mask fitness before this epoch (guards best-tracking vs early fluke spikes)
 
   # Mixed precision: DETR (transformer) training overflows fp16 (scaler → 0.0,

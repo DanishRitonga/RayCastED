@@ -61,6 +61,7 @@ class TrainingSettings(BaseModel):
     detr_nq: int = 300  # number of queries (dense tiles reach ~200 nuclei)
     detr_ndl: int = 3  # decoder layers (lightweight DETR recipe: shallow decoder)
     detr_hd: int = 256  # decoder hidden dim
+    detr_d_ffn: int = 1024  # decoder FFN hidden dim (head-slimming: 512 = ~16% head params off)
     detr_seed_threshold: float = 0.5  # seed-map local-maxima min value for query seeding
     detr_peak_distance: int = 3  # seed-map local-maxima neighbourhood (px)
     detr_grid_size: float = 0.05  # grid cell diameter for grid-query init (normalized); ~3.5um at 256px
@@ -72,6 +73,7 @@ class TrainingSettings(BaseModel):
     detr_mds: bool = True  # MDS-DETR rank-causal self-attn mask (local winner-take-all, duplicate suppression)
     detr_cost_inside: float = 10.0  # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
     detr_use_decoder: bool = True  # False = bypass NuLite decoder+NP head, DETR reads raw FastViT stage features (~12.2M)
+    detr_shared_layers: bool = False  # weight-share the transformer decoder layer across all ndl steps (params-only saving)
     fitness_warmup_epochs: int = 0  # mask fitness before this epoch (guards vs early fluke spikes)
 
     # Mixed precision. DETR (transformer) training is fp16-overflow prone
