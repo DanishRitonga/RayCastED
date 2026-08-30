@@ -44,7 +44,7 @@ training:
   architecture: nulite_detr
 
   # NuLite-specific
-  nulite_variant: fastvit_s12   # FastViT encoder variant (timm create_model name)
+  nulite_variant: fastvit_t8    # FastViT encoder variant (timm create_model name); t8 = smallest, ~8.89M total
   nulite_ckpt: null             # NuLite pretrained checkpoint (V2 upper bound); null = from-scratch
   pretrained: true              # ImageNet-pretrained encoder via timm (V1/V2); false = full scratch
   lambda_seg: 1.0               # seed-map seg loss weight (ablation series: ... -> 0.0 train24 no-decoder -> 1.0 train25 S+Q)
