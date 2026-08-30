@@ -85,7 +85,7 @@ class NuLiteEncoderDecoder(nn.Module):
         and ``b1`` is None — the upsample decoder is bypassed entirely.
         """
         feats = list(self.encoder(x))  # [st4, st8, st16, st32]
-        if not self.use_decoder:
+        if not getattr(self, 'use_decoder', True):
             return {'b3': feats[0], 'b4': feats[1], 'b5': feats[2], 'b1': None}
         z4, z3, z2, z1 = feats[::-1]
         b5 = self.bottleneck_upsampler(z4)

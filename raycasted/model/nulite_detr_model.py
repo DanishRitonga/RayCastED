@@ -119,7 +119,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         format [cx, cy, d1..dn, conf, cls] (eval_pannuke / val.py compatible).
         """
         d = self.encoder_decoder(x)
-        if self.use_decoder:
+        if getattr(self, 'use_decoder', True):
             x0 = self.decoder0(x)
             xt = torch.cat([x0, d['b1']], dim=1)
             seed = self.np_head(xt)
@@ -259,7 +259,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
     def freeze_encoder_decoder_np(self):
         """Freeze encoder + decoder + decoder0 + NP seed head."""
         self.encoder_decoder.freeze_encoder()
-        if self.use_decoder:
+        if getattr(self, 'use_decoder', True):
             self.encoder_decoder.freeze_decoder()
             self.decoder0.requires_grad_(False)
             self.np_head.requires_grad_(False)
