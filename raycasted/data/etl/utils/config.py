@@ -72,6 +72,7 @@ class TrainingSettings(BaseModel):
     detr_no_object_weight: float = 1.0  # ∅ focal column weight (>1 = suppress redundant queries harder)
     detr_mds: bool = True  # MDS-DETR rank-causal self-attn mask (local winner-take-all, duplicate suppression)
     detr_cost_inside: float = 10.0  # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
+    detr_per_layer_match: bool = False  # LSP-DETR 'look forward twice': run the Hungarian matcher per decoder layer (vs reuse last-layer match)
     detr_use_decoder: bool = True  # False = bypass NuLite decoder+NP head, DETR reads raw FastViT stage features (~12.2M)
     detr_shared_layers: bool = False  # weight-share the transformer decoder layer across all ndl steps (params-only saving)
     detr_backbone: str = 'nulite'  # 'nulite' (FastViT + NuLite decoder) or 'yolo11' (YOLO11n + FPN top-down)

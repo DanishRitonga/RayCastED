@@ -579,6 +579,7 @@ class RayCastTrainer(DetectionTrainer):
             no_object_weight=float(tcfg.get('detr_no_object_weight', 1.0)),
             mds=bool(tcfg.get('detr_mds', True)),
             cost_inside=float(tcfg.get('detr_cost_inside', 10.0)),
+            per_layer_match=bool(tcfg.get('detr_per_layer_match', False)),
             seed_map_target=bool(tcfg.get('seed_map_target', True)),
             use_decoder=bool(tcfg.get('detr_use_decoder', True)),
             shared_layers=bool(tcfg.get('detr_shared_layers', False)),

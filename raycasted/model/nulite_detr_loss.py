@@ -198,6 +198,7 @@ class NuLiteDETRLoss(nn.Module):
         no_object=True,
         n_rays=None,
         cost_inside=10.0,
+        per_layer_match=False,
     ):
         super().__init__()
         if loss_gain is None:
@@ -209,6 +210,7 @@ class NuLiteDETRLoss(nn.Module):
         self.loss_gain = loss_gain
         self.aux_loss = aux_loss
         self.no_object = no_object
+        self.per_layer_match = per_layer_match
         self.n_rays = n_rays or _const.N_RAYS
         self.matcher = RayCastHungarianMatcher(
             cost_gain={'class': 2, 'ray': 5, 'piou': 2, 'inside': cost_inside},
@@ -378,7 +380,8 @@ class NuLiteDETRLoss(nn.Module):
         postfix='',
     ):
         loss = torch.zeros(5, device=pred_polygons.device)
-        if match_indices is None:
+        if not self.per_layer_match and match_indices is None:
+            # Legacy: match once on the last layer, reuse indices for all aux layers.
             match_indices = self.matcher(pred_polygons[-1], pred_scores[-1], gt_polygons, gt_cls, gt_groups)
         for aux_polygons, aux_scores in zip(pred_polygons, pred_scores):
             loss_ = self._get_loss(
@@ -389,7 +392,8 @@ class NuLiteDETRLoss(nn.Module):
                 gt_groups,
                 crop_size,
                 postfix=postfix,
-                match_indices=match_indices,
+                # LSP-DETR "look forward twice": match each layer independently.
+                match_indices=None if self.per_layer_match else match_indices,
             )
             loss[0] += loss_[f'loss_class{postfix}']
             loss[1] += loss_[f'loss_xy{postfix}']

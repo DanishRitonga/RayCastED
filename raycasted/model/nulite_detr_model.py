@@ -55,6 +55,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         no_object_weight: float = 1.0,
         mds: bool = True,
         cost_inside: float = 10.0,
+        per_layer_match: bool = False,
         seed_map_target: bool = True,
         use_decoder: bool = True,
         shared_layers: bool = False,
@@ -71,6 +72,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.no_object = no_object
         self.no_object_weight = no_object_weight
         self.cost_inside = cost_inside
+        self.per_layer_match = per_layer_match
         self.seed_map_target = seed_map_target
         self.use_decoder = use_decoder
         self.backbone = backbone
@@ -209,6 +211,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             no_object=self.no_object,
             n_rays=self.n_rays,
             cost_inside=self.cost_inside,
+            per_layer_match=self.per_layer_match,
         )
 
     def loss(self, batch, preds=None):

@@ -44,7 +44,7 @@ training:
   architecture: nulite_detr
 
   # NuLite-specific
-  nulite_variant: fastvit_t8    # FastViT encoder variant (timm create_model name); t8 = smallest, ~8.89M total
+  nulite_variant: fastvit_s12   # FastViT encoder variant (timm create_model name); t8 = smallest, ~8.89M (train27 bPQ 0.611 < s12 → back to s12)
   nulite_ckpt: null             # NuLite pretrained checkpoint (V2 upper bound); null = from-scratch
   pretrained: true              # ImageNet-pretrained encoder via timm (V1/V2); false = full scratch
   lambda_seg: 1.0               # seed-map seg loss weight (ablation series: ... -> 0.0 train24 no-decoder -> 1.0 train25 S+Q)
@@ -67,6 +67,7 @@ training:
   detr_no_object_weight: 2.0    # ∅ focal column weight (>1 = suppress redundant per-nucleus queries harder)
   detr_mds: false               # MDS-DETR rank-causal self-attn mask (ablation: false = plain self-attn, train18 ref was true)
   detr_cost_inside: 10.0        # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
+  detr_per_layer_match: true    # LSP-DETR 'look forward twice': per-layer Hungarian matching in aux loss (vs reuse last-layer match)
   detr_use_decoder: true        # true = NuLite decoder+NP head on (train24 no-decoder bPQ 0.636 < 0.657 → decoder NEEDED; back on for train25)
   detr_shared_layers: false     # weight-share the transformer decoder layer across all ndl steps (ladder D, params-only)
   detr_backbone: nulite         # 'nulite' (FastViT+NuLite decoder) or 'yolo11' (YOLO11n + FPN top-down, ~5.4M total)
