@@ -22,9 +22,12 @@ class NuLiteRayCastDETRModel(DetectionModel):
     Submodules (plain-list self.model ending in the DETR decoder so that
     model.model[-1] is the head, matching the v1 framework contract):
       encoder_decoder -> NuLiteEncoderDecoder (b3/b4/b5/b1)
-      decoder0        -> Conv(3, 64, 3)          [use_decoder only]
-      np_head         -> NPHead(128)  (seed logits at full res) [use_decoder only]
-      detr            -> NuLiteDETRDecoder (nc, ch=(64,128,256), nq=300, ndl=3)
+      decoder0        -> Conv(3, dims[0], 3)    [use_decoder only]
+      np_head         -> NPHead(2*dims[0]) (seed logits at full res) [use_decoder only]
+      detr            -> NuLiteDETRDecoder (nc, ch=(dims[0],dims[1],dims[2]), nq=300, ndl=3)
+
+    Channel dimensions derive from the encoder variant (``dims``), so any
+    FastViT size works (s12: 15.46M params, t8: ~8.89M).
 
     With ``use_decoder=False`` the NuLite upsample decoder + NP seed head are
     dropped entirely: the DETR head reads the raw FastViT stage features
@@ -55,6 +58,10 @@ class NuLiteRayCastDETRModel(DetectionModel):
         seed_map_target: bool = True,
         use_decoder: bool = True,
         shared_layers: bool = False,
+        backbone: str = 'nulite',
+        use_seed: bool = True,
+        yolo11_scale: str = 'n',
+        yolo11_ckpt: str | None = None,
         verbose: bool = True,
     ):
         super(DetectionModel, self).__init__()
@@ -66,16 +73,34 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.cost_inside = cost_inside
         self.seed_map_target = seed_map_target
         self.use_decoder = use_decoder
+        self.backbone = backbone
         self.names = {i: str(i) for i in range(nc)}
         self.yaml = {'nc': nc, 'n_rays': n_rays, 'architecture': 'nulite_detr', 'variant': variant}
 
-        self.encoder_decoder = NuLiteEncoderDecoder(variant=variant, pretrained=pretrained, use_decoder=use_decoder)
-        if use_decoder:
-            self.decoder0 = Conv(3, 64, 3, s=1)
-            self.np_head = NPHead(in_channels=128)
+        if backbone == 'yolo11':
+            from raycasted.model.blocks.yolo11_fpn import Yolo11FPNBackbone
+
+            self.encoder_decoder = Yolo11FPNBackbone(scale=yolo11_scale, nc=nc, ch=3, verbose=False)
+            if yolo11_ckpt:
+                self.encoder_decoder.load_pretrained(yolo11_ckpt)
+            elif pretrained:
+                self.encoder_decoder.load_pretrained('yolo11n.pt')
+            dims = self.encoder_decoder.out_channels
+            self.use_decoder = False
+            self.decoder0 = None
+            self.np_head = NPHead(in_channels=dims[0]) if use_seed else None
+        else:
+            self.encoder_decoder = NuLiteEncoderDecoder(variant=variant, pretrained=pretrained, use_decoder=use_decoder)
+            dims = self.encoder_decoder.embed_dims  # [64,128,256,512] s12 / [48,96,192,384] t8
+            if use_decoder:
+                self.decoder0 = Conv(3, dims[0], 3, s=1)
+                self.np_head = NPHead(in_channels=2 * dims[0])  # xt = cat([decoder0(x), b1]), both dims[0]-wide
+            else:
+                self.decoder0 = None
+                self.np_head = None
         self.detr = NuLiteDETRDecoder(
             nc=nc,
-            ch=(64, 128, 256),
+            ch=(dims[0], dims[1], dims[2]),
             hd=hd,
             nq=nq,
             ndl=ndl,
@@ -97,7 +122,9 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.detr.stride = stride
         self.stride = stride
 
-        if use_decoder:
+        if backbone == 'yolo11':
+            self.model = [self.encoder_decoder] + ([self.np_head] if self.np_head is not None else []) + [self.detr]
+        elif use_decoder:
             self.model = [self.encoder_decoder, self.decoder0, self.np_head, self.detr]
         else:
             self.model = [self.encoder_decoder, self.detr]
@@ -123,7 +150,9 @@ class NuLiteRayCastDETRModel(DetectionModel):
         format [cx, cy, d1..dn, conf, cls] (eval_pannuke / val.py compatible).
         """
         d = self.encoder_decoder(x)
-        if getattr(self, 'use_decoder', True):
+        if getattr(self, 'backbone', 'nulite') == 'yolo11':
+            seed = self.np_head(d['b3']) if getattr(self, 'np_head', None) is not None else None
+        elif getattr(self, 'use_decoder', True):
             x0 = self.decoder0(x)
             xt = torch.cat([x0, d['b1']], dim=1)
             seed = self.np_head(xt)
@@ -230,9 +259,15 @@ class NuLiteRayCastDETRModel(DetectionModel):
         seed = getattr(self, '_last_seed', None)
         if seed is not None and self.lambda_seg > 0:
             if self.seed_map_target and 'seed_map' in batch:
-                seg = F.l1_loss(seed, batch['seed_map'].to(device))
+                seg_gt = batch['seed_map'].to(device)
+                if seg_gt.shape[-2:] != seed.shape[-2:]:
+                    seg_gt = F.interpolate(seg_gt, size=seed.shape[-2:], mode='bilinear', align_corners=False)
+                seg = F.l1_loss(seed, seg_gt)
             elif 'np_mask' in batch:
-                seg = F.binary_cross_entropy_with_logits(seed, batch['np_mask'].to(device))
+                seg_gt = batch['np_mask'].to(device)
+                if seg_gt.shape[-2:] != seed.shape[-2:]:
+                    seg_gt = F.interpolate(seg_gt, size=seed.shape[-2:], mode='nearest')
+                seg = F.binary_cross_entropy_with_logits(seed, seg_gt)
             else:
                 seg = None
             if seg is not None:
@@ -262,6 +297,11 @@ class NuLiteRayCastDETRModel(DetectionModel):
 
     def freeze_encoder_decoder_np(self):
         """Freeze encoder + decoder + decoder0 + NP seed head."""
+        if getattr(self, 'backbone', 'nulite') == 'yolo11':
+            self.encoder_decoder.freeze_backbone()
+            if getattr(self, 'np_head', None) is not None:
+                self.np_head.requires_grad_(False)
+            return
         self.encoder_decoder.freeze_encoder()
         if getattr(self, 'use_decoder', True):
             self.encoder_decoder.freeze_decoder()

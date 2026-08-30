@@ -74,6 +74,10 @@ class TrainingSettings(BaseModel):
     detr_cost_inside: float = 10.0  # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
     detr_use_decoder: bool = True  # False = bypass NuLite decoder+NP head, DETR reads raw FastViT stage features (~12.2M)
     detr_shared_layers: bool = False  # weight-share the transformer decoder layer across all ndl steps (params-only saving)
+    detr_backbone: str = 'nulite'  # 'nulite' (FastViT + NuLite decoder) or 'yolo11' (YOLO11n + FPN top-down)
+    detr_use_seed: bool = True  # add stride-4 NP seed head on P2 (yolo11 backbone only)
+    yolo11_scale: str = 'n'  # yolo11 variant scale (n/s/m/l/x) for detr_backbone=yolo11
+    yolo11_ckpt: str | None = None  # path to yolo11*.pt for layers 0-16 (None = auto 'yolo11n.pt' when pretrained)
     fitness_warmup_epochs: int = 0  # mask fitness before this epoch (guards vs early fluke spikes)
 
     # Mixed precision. DETR (transformer) training is fp16-overflow prone

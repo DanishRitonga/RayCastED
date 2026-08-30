@@ -56,7 +56,7 @@ training:
   detr_nq: 300                  # number of queries (dense tiles reach ~200 nuclei)
   detr_ndl: 3                   # decoder layers (run A 2→3 FAILED: bPQ 0.647 vs 0.673, keep 3)
   detr_hd: 256                  # decoder hidden dim
-  detr_d_ffn: 512               # decoder FFN hidden dim (head-slimming ladder run B: 1024→512, head 3.117M total 14.68M, −20%)
+  detr_d_ffn: 1024              # decoder FFN hidden dim (run B 512 shelved until after backbone tests; revert to train19 base)
   detr_seed_threshold: 0.5      # seed-map local-maxima min value for query seeding
   detr_peak_distance: 3         # seed-map local-maxima neighbourhood (px)
   detr_grid_size: 0.05          # grid cell diameter for grid-query init (normalized); ~3.5um at 256px
@@ -69,6 +69,10 @@ training:
   detr_cost_inside: 10.0        # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
   detr_use_decoder: true        # true = NuLite decoder+NP head on (train24 no-decoder bPQ 0.636 < 0.657 → decoder NEEDED; back on for train25)
   detr_shared_layers: false     # weight-share the transformer decoder layer across all ndl steps (ladder D, params-only)
+  detr_backbone: nulite         # 'nulite' (FastViT+NuLite decoder) or 'yolo11' (YOLO11n + FPN top-down, ~5.4M total)
+  detr_use_seed: true           # add stride-4 NP seed head on P2 (yolo11 backbone only)
+  yolo11_scale: n               # yolo11 variant scale (n/s/m/l/x) for detr_backbone=yolo11
+  yolo11_ckpt: null             # path to yolo11*.pt for layers 0-16 (null = auto 'yolo11n.pt' when pretrained=true)
   fitness_warmup_epochs: 75     # mask fitness before this epoch (guards best-tracking vs early fluke spikes)
 
   # Mixed precision: DETR (transformer) training overflows fp16 (scaler → 0.0,
@@ -87,7 +91,7 @@ training:
   min_nucleus_diameter_um: 3.5 # minimum nucleus diameter (PMC 4600468), radius = 1.75um → 7px
 
   # Early stopping
-  patience: 500
+  patience: 300
 
   # Learning rate
   cos_lr: true               # cosine LR schedule
