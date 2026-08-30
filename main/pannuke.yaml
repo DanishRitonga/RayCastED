@@ -54,9 +54,9 @@ training:
 
   # NuLite DETR head
   detr_nq: 300                  # number of queries (dense tiles reach ~200 nuclei)
-  detr_ndl: 2                   # decoder layers (head-slimming ladder run A: 3→2, head 2.759M total 14.32M, −29%)
+  detr_ndl: 3                   # decoder layers (run A 2→3 FAILED: bPQ 0.647 vs 0.673, keep 3)
   detr_hd: 256                  # decoder hidden dim
-  detr_d_ffn: 1024              # decoder FFN hidden dim (head-slimming ladder B: 512 = ~16% head params off)
+  detr_d_ffn: 512               # decoder FFN hidden dim (head-slimming ladder run B: 1024→512, head 3.117M total 14.68M, −20%)
   detr_seed_threshold: 0.5      # seed-map local-maxima min value for query seeding
   detr_peak_distance: 3         # seed-map local-maxima neighbourhood (px)
   detr_grid_size: 0.05          # grid cell diameter for grid-query init (normalized); ~3.5um at 256px
