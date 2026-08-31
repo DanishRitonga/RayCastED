@@ -85,7 +85,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             if yolo11_ckpt:
                 self.encoder_decoder.load_pretrained(yolo11_ckpt)
             elif pretrained:
-                self.encoder_decoder.load_pretrained('yolo11n.pt')
+                self.encoder_decoder.load_pretrained(f'yolo11{yolo11_scale}.pt')
             dims = self.encoder_decoder.out_channels
             self.use_decoder = False
             self.decoder0 = None

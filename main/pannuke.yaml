@@ -70,10 +70,10 @@ training:
   detr_per_layer_match: true    # LSP-DETR 'look forward twice': per-layer Hungarian matching in aux loss (vs reuse last-layer match)
   detr_use_decoder: true        # true = NuLite decoder+NP head on (train24 no-decoder bPQ 0.636 < 0.657 → decoder NEEDED; back on for train25)
   detr_shared_layers: false     # weight-share the transformer decoder layer across all ndl steps (ladder D, params-only)
-  detr_backbone: nulite         # 'nulite' (FastViT+NuLite decoder) or 'yolo11' (YOLO11n + FPN top-down, ~5.4M total)
+  detr_backbone: yolo11         # 'nulite' (FastViT+NuLite decoder) or 'yolo11' (YOLO11 + FPN top-down)
   detr_use_seed: true           # add stride-4 NP seed head on P2 (yolo11 backbone only)
-  yolo11_scale: n               # yolo11 variant scale (n/s/m/l/x) for detr_backbone=yolo11
-  yolo11_ckpt: null             # path to yolo11*.pt for layers 0-16 (null = auto 'yolo11n.pt' when pretrained=true)
+  yolo11_scale: s               # yolo11 variant scale (n/s/m/l/x) for detr_backbone=yolo11
+  yolo11_ckpt: null             # path to yolo11*.pt for layers 0-16 (null = auto 'yolo11<scale>.pt' when pretrained=true)
   fitness_warmup_epochs: 75     # mask fitness before this epoch (guards best-tracking vs early fluke spikes)
 
   # Mixed precision: DETR (transformer) training overflows fp16 (scaler → 0.0,
