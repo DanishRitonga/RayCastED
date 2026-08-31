@@ -8,10 +8,9 @@ NuLiteDETRLoss (Hungarian 1:1 matching + VFL + ray-L1 + polar-IoU).
 
 import torch
 import torch.nn.functional as F
-from ultralytics.nn.modules.conv import Conv
 from ultralytics.nn.tasks import DetectionModel
 
-from raycasted.model.blocks.nulite import NPHead, NuLiteEncoderDecoder
+from raycasted.model.blocks.nulite import NPHead, NuLiteEncoderDecoder, _ConvBlock
 from raycasted.model.blocks.nulite_detr import NuLiteDETRDecoder
 from raycasted.model.nulite_detr_loss import NuLiteDETRLoss
 
@@ -95,7 +94,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             self.encoder_decoder = NuLiteEncoderDecoder(variant=variant, pretrained=pretrained, use_decoder=use_decoder)
             dims = self.encoder_decoder.embed_dims  # [64,128,256,512] s12 / [48,96,192,384] t8
             if use_decoder:
-                self.decoder0 = Conv(3, dims[0], 3, s=1)
+                self.decoder0 = _ConvBlock(3, dims[0], 3)  # NuLite decoder0: Conv2DBlock(3 -> 64) ReLU (not SiLU Conv)
                 self.np_head = NPHead(in_channels=2 * dims[0])  # xt = cat([decoder0(x), b1]), both dims[0]-wide
             else:
                 self.decoder0 = None

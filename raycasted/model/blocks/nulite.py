@@ -16,17 +16,26 @@ import torch.nn.functional as F
 
 
 class _ConvBlock(nn.Module):
-    """Conv2d -> BN -> ReLU (NuLite decoder convention)."""
+    """Conv2d (bias) -> BN -> ReLU -> Dropout, mirroring NuLite's Conv2DBlock.
 
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3):
+    NuLite reference (models/utils.py:4): Conv2d(bias=True, k=3, stride=1,
+    padding=1) -> BatchNorm2d -> ReLU(inplace) -> Dropout(drop_rate). The
+    state-dict layout (``self.block = Sequential(conv, bn, relu, dropout)``)
+    must be kept identical so NuLite-pretrained decoder weights load.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3, dropout: float = 0.0):
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=kernel_size // 2, bias=False)
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size, stride=1, padding=(kernel_size - 1) // 2),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply conv-BN-ReLU."""
-        return self.relu(self.bn(self.conv(x)))
+        """Apply conv-BN-ReLU-dropout."""
+        return self.block(x)
 
 
 class NuLiteEncoderDecoder(nn.Module):
@@ -52,24 +61,23 @@ class NuLiteEncoderDecoder(nn.Module):
         # dims order: stride4 -> stride32; decoder consumes reversed (coarse -> fine)
         e3, e2, e1, e0 = dims  # 64, 128, 256, 512
 
+        # NuLite create_upsampling_branch (models/nulite.py:188-264), exact channels.
         self.bottleneck_upsampler = nn.Sequential(
             _ConvBlock(e0, e1),
-            _ConvBlock(e1, e1),
             nn.ConvTranspose2d(e1, e1, kernel_size=2, stride=2),
         )
         self.decoder4_upsampler = nn.Sequential(
-            _ConvBlock(2 * e1, e2),
-            _ConvBlock(e2, e2),
+            _ConvBlock(2 * e1, e1),
+            _ConvBlock(e1, e2),
             nn.ConvTranspose2d(e2, e2, kernel_size=2, stride=2),
         )
         self.decoder3_upsampler = nn.Sequential(
-            _ConvBlock(2 * e2, e3),
-            _ConvBlock(e3, e3),
+            _ConvBlock(2 * e2, e2),
+            _ConvBlock(e2, e3),
             nn.ConvTranspose2d(e3, e3, kernel_size=2, stride=2),
         )
         self.decoder2_upsampler = nn.Sequential(
             _ConvBlock(2 * e3, e3),
-            _ConvBlock(e3, e3),
             nn.ConvTranspose2d(e3, e3, kernel_size=2, stride=2),
         )
         self.decoder1_upsampler = nn.Sequential(
@@ -89,9 +97,9 @@ class NuLiteEncoderDecoder(nn.Module):
             return {'b3': feats[0], 'b4': feats[1], 'b5': feats[2], 'b1': None}
         z4, z3, z2, z1 = feats[::-1]
         b5 = self.bottleneck_upsampler(z4)
-        b4 = self.decoder4_upsampler(torch.cat([b5, z3], dim=1))
-        b3 = self.decoder3_upsampler(torch.cat([b4, z2], dim=1))
-        b2 = self.decoder2_upsampler(torch.cat([b3, z1], dim=1))
+        b4 = self.decoder4_upsampler(torch.cat([z3, b5], dim=1))
+        b3 = self.decoder3_upsampler(torch.cat([z2, b4], dim=1))
+        b2 = self.decoder2_upsampler(torch.cat([z1, b3], dim=1))
         b1 = self.decoder1_upsampler(b2)
         return {'b3': b3, 'b4': b4, 'b5': b5, 'b1': b1}
 
@@ -113,13 +121,19 @@ class NuLiteEncoderDecoder(nn.Module):
         """Load NuLite-pretrained weights into the encoder + decoder."""
         ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
         state = ckpt.get('model_state_dict', ckpt.get('state_dict', ckpt))
-        # NuLite stores FastViT under 'encoder.fast_vit.'; we store it under 'encoder.'
+        # NuLite stores FastViT under 'encoder.fast_vit.' (we store 'encoder.')
+        # and the decoder under 'decoder.<stage>.' (we store '<stage>.' directly).
         own = self.state_dict()
         remapped = {}
         for k, v in own.items():
             ckpt_key = k
             if k.startswith('encoder.'):
                 ckpt_key = 'encoder.fast_vit.' + k[len('encoder.') :]
+            elif k.startswith(
+                ('bottleneck_upsampler.', 'decoder4_upsampler.', 'decoder3_upsampler.',
+                 'decoder2_upsampler.', 'decoder1_upsampler.')
+            ):
+                ckpt_key = 'decoder.' + k
             if ckpt_key in state and state[ckpt_key].shape == v.shape:
                 remapped[k] = state[ckpt_key]
         self.load_state_dict(remapped, strict=False)

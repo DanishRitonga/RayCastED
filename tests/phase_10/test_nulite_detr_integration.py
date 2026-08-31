@@ -176,7 +176,7 @@ def test_fastvit_t8_variant():
     model = NuLiteRayCastDETRModel(nc=5, n_rays=64, variant='fastvit_t8', pretrained=False, verbose=False)
     n_params = sum(p.numel() for p in model.parameters())
     assert 8.5e6 < n_params < 9.3e6, n_params
-    assert model.decoder0.conv.in_channels == 3
+    assert model.decoder0.block[0].in_channels == 3
     assert model.np_head.conv1.in_channels == 96  # 2 * dims[0] (48)
     assert [p[0].in_channels for p in model.detr.input_proj] == [49, 97, 193]
     print(f'PASS: fastvit_t8 — {n_params / 1e6:.2f}M params, seed 96ch, input_proj [49,97,193]')
