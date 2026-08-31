@@ -21,9 +21,10 @@ Same fold3 test set, but evaluated against the **original dense PanNuke masks** 
 |---|---|---|---|---|---|---|---|---|---|
 | LSP-DETR (lit., 3-fold CV) | — | 0.675 | 0.482 | — | — | — | — | 45M | — |
 | LKCell (lit., 3-fold CV) | — | 0.684 | 0.503 | — | — | — | — | 163.8M | — |
-| **NuLite-DETR** (train19) | **0.7706** | **0.6901** (0.8318/0.8296) | **0.6489** | **0.8749** | 0.7913 | 0.9783 | 82,409 (1.25x) | **15.46M** | **5.10** |
+| NuLite-DETR (train19, shared match) | 0.7706 | 0.6901 (0.8318/0.8296) | 0.6489 | 0.8749 | 0.7913 | 0.9783 | 82,409 (1.25x) | 15.46M | 5.10 |
+| **NuLite-DETR** (train28, per-layer match) | **0.7738** | **0.7013** (0.8386/0.8362) | **0.6687** | **0.8799** | **0.8038** | 0.9719 | **80,596 (1.22x)** | **15.46M** | 5.55 |
 
-Per-class PQ (original-mask GT): Neoplastic 0.6916, Inflammatory 0.7195, Connective 0.6728, Necrosis 0.4610, Epithelial 0.6995.
+Per-class PQ (original-mask GT, train28): Neoplastic 0.7037, Inflammatory 0.7239, Connective 0.6828, Necrosis 0.5185, Epithelial 0.7147.
 Original-mask GT has 66,654 instances (806 tiny nuclei dropped by the polygon ETL are present). Evaluated on a harder target than the polygon protocol, scores are still higher (SQ 0.8296 vs 0.8074) because the 64-ray GT polygon is a chord-inscribed inner approximation of the true boundary.
 Caveats: single fold (fold3 test) vs literature 3-fold CV average; largest-first mask-overlap resolution vs literature watershed refinement; centroid F1 is our custom r=12 metric (not directly comparable to literature F1 columns).
 
