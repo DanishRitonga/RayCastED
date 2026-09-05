@@ -25,11 +25,13 @@ Same fold3 test set, but evaluated against the **original dense PanNuke masks** 
 | NuLite-DETR (train28, per-layer match) | 0.7738 | 0.7013 (0.8386/0.8362) | 0.6687 | 0.8799 | 0.8038 | 0.9719 | 80,596 (1.22x) | 15.46M | 5.55 |
 | **NuLite-DETR** (train31, shared layers) | **0.7824** | **0.7138** (0.8494/0.8403) | **0.6777** | **0.8559** | **0.8006** | **0.9282** | **79,113 (1.20x)** | **13.77M** | **5.24** |
 | **NuLite-DETR (submission)** (train33, hd=128) | 0.7618 | 0.6954 (0.8463/0.8217) | 0.6580 | 0.8560 | 0.8009 | 0.9287 | 78,991 (1.20x) | 12.53M | 5.05 |
-| **NuLite-DETR (submission, t12)** (train34, hd=128) | 0.7667 | 0.6993 (0.8449/0.8276) | 0.6595 | 0.8565 | 0.8026 | 0.9274 | ~79k (1.20x) | **10.61M** | **5.11** |
+| **NuLite-DETR (submission, t12)** (train34, hd=128) | 0.7667 | 0.6993 (0.8449/0.8276) | 0.6595 | 0.8565 | 0.8026 | 0.9274 | ~79k (1.20x) | 10.61M | 5.11 |
+| **NuLite-DETR (sub-10M, s12 sep)** (train35, hd=128) | 0.7687 | 0.6937 (0.8347/0.8311) | 0.6536 | 0.8506 | 0.7897 | 0.9323 | ~79k (1.20x) | **9.77M** | **5.27** |
 
 Per-class PQ (original-mask GT, train31 hd=256): Neoplastic 0.7152, Inflammatory 0.7429, Connective 0.6972, Necrosis 0.5123, Epithelial 0.7211.
 Per-class PQ (original-mask GT, train33 hd=128): Neoplastic 0.7003, Inflammatory 0.7145, Connective 0.6792, Necrosis 0.4920, Epithelial 0.7038.
 Per-class PQ (original-mask GT, train34 t12 hd=128): Neoplastic 0.7039, Inflammatory 0.7225, Connective 0.6795, Necrosis 0.4813, Epithelial 0.7105.
+Per-class PQ (original-mask GT, train35 s12 sep hd=128): Neoplastic 0.6946, Inflammatory 0.7201, Connective 0.6759, Necrosis 0.4716, Epithelial 0.7057.
 Original-mask GT has 66,654 instances (806 tiny nuclei dropped by the polygon ETL are present). Evaluated on a harder target than the polygon protocol, scores are still higher (SQ 0.8296 vs 0.8074) because the 64-ray GT polygon is a chord-inscribed inner approximation of the true boundary.
 Caveats: single fold (fold3 test) vs literature 3-fold CV average; largest-first mask-overlap resolution vs literature watershed refinement; centroid F1 is our custom r=12 metric (not directly comparable to literature F1 columns).
 
