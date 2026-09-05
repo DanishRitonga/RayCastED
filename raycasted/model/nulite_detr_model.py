@@ -58,6 +58,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         seed_map_target: bool = True,
         use_decoder: bool = True,
         shared_layers: bool = False,
+        separable_decoder: bool = False,
         backbone: str = 'nulite',
         use_seed: bool = True,
         yolo11_scale: str = 'n',
@@ -75,6 +76,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.seed_map_target = seed_map_target
         self.use_decoder = use_decoder
         self.backbone = backbone
+        self.separable_decoder = separable_decoder
         self.names = {i: str(i) for i in range(nc)}
         self.yaml = {'nc': nc, 'n_rays': n_rays, 'architecture': 'nulite_detr', 'variant': variant}
 
@@ -91,10 +93,17 @@ class NuLiteRayCastDETRModel(DetectionModel):
             self.decoder0 = None
             self.np_head = NPHead(in_channels=dims[0]) if use_seed else None
         else:
-            self.encoder_decoder = NuLiteEncoderDecoder(variant=variant, pretrained=pretrained, use_decoder=use_decoder)
+            self.encoder_decoder = NuLiteEncoderDecoder(
+                variant=variant,
+                pretrained=pretrained,
+                use_decoder=use_decoder,
+                separable_decoder=separable_decoder,
+            )
             dims = self.encoder_decoder.embed_dims  # [64,128,256,512] s12 / [48,96,192,384] t8
             if use_decoder:
-                self.decoder0 = _ConvBlock(3, dims[0], 3)  # NuLite decoder0: Conv2DBlock(3 -> 64) ReLU (not SiLU Conv)
+                self.decoder0 = _ConvBlock(
+                    3, dims[0], 3, separable=separable_decoder
+                )  # NuLite decoder0: Conv2DBlock(3 -> 64) ReLU (not SiLU Conv)
                 self.np_head = NPHead(in_channels=2 * dims[0])  # xt = cat([decoder0(x), b1]), both dims[0]-wide
             else:
                 self.decoder0 = None

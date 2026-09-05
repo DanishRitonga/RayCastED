@@ -22,16 +22,48 @@ class _ConvBlock(nn.Module):
     padding=1) -> BatchNorm2d -> ReLU(inplace) -> Dropout(drop_rate). The
     state-dict layout (``self.block = Sequential(conv, bn, relu, dropout)``)
     must be kept identical so NuLite-pretrained decoder weights load.
+
+    When ``separable=True`` the conv is replaced by a depthwise-separable
+    factorization (MobileNet-style): 3x3 depthwise (groups=in) -> BN -> ReLU
+    -> 1x1 pointwise -> BN -> ReLU -> Dropout. This preserves per-channel 3x3
+    spatial mixing while cutting params from ``in*out*9`` to ``9*in + in*out``.
     """
 
-    def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3, dropout: float = 0.0):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        dropout: float = 0.0,
+        separable: bool = False,
+    ):
         super().__init__()
-        self.block = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size, stride=1, padding=(kernel_size - 1) // 2),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Dropout(dropout),
-        )
+        self.separable = separable
+        if separable:
+            self.block = nn.Sequential(
+                nn.Conv2d(
+                    in_channels,
+                    in_channels,
+                    kernel_size,
+                    stride=1,
+                    padding=(kernel_size - 1) // 2,
+                    groups=in_channels,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(in_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(in_channels, out_channels, 1, stride=1, bias=False),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout),
+            )
+        else:
+            self.block = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size, stride=1, padding=(kernel_size - 1) // 2),
+                nn.BatchNorm2d(out_channels),
+                nn.ReLU(inplace=True),
+                nn.Dropout(dropout),
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Apply conv-BN-ReLU-dropout."""
@@ -48,11 +80,18 @@ class NuLiteEncoderDecoder(nn.Module):
         b1 (stride 1, 64ch)  — full-resolution segmentation feature
     """
 
-    def __init__(self, variant: str = 'fastvit_s12', pretrained: bool = True, use_decoder: bool = True):
+    def __init__(
+        self,
+        variant: str = 'fastvit_s12',
+        pretrained: bool = True,
+        use_decoder: bool = True,
+        separable_decoder: bool = False,
+    ):
         import timm
 
         super().__init__()
         self.use_decoder = use_decoder
+        self.separable_decoder = separable_decoder
         self.encoder = timm.create_model(f'{variant}.apple_in1k', features_only=True, pretrained=pretrained)
         dims = list(self.encoder.feature_info.channels())  # [64, 128, 256, 512] for s12
         self.embed_dims = dims
@@ -63,25 +102,25 @@ class NuLiteEncoderDecoder(nn.Module):
 
         # NuLite create_upsampling_branch (models/nulite.py:188-264), exact channels.
         self.bottleneck_upsampler = nn.Sequential(
-            _ConvBlock(e0, e1),
+            _ConvBlock(e0, e1, separable=separable_decoder),
             nn.ConvTranspose2d(e1, e1, kernel_size=2, stride=2),
         )
         self.decoder4_upsampler = nn.Sequential(
-            _ConvBlock(2 * e1, e1),
-            _ConvBlock(e1, e2),
+            _ConvBlock(2 * e1, e1, separable=separable_decoder),
+            _ConvBlock(e1, e2, separable=separable_decoder),
             nn.ConvTranspose2d(e2, e2, kernel_size=2, stride=2),
         )
         self.decoder3_upsampler = nn.Sequential(
-            _ConvBlock(2 * e2, e2),
-            _ConvBlock(e2, e3),
+            _ConvBlock(2 * e2, e2, separable=separable_decoder),
+            _ConvBlock(e2, e3, separable=separable_decoder),
             nn.ConvTranspose2d(e3, e3, kernel_size=2, stride=2),
         )
         self.decoder2_upsampler = nn.Sequential(
-            _ConvBlock(2 * e3, e3),
+            _ConvBlock(2 * e3, e3, separable=separable_decoder),
             nn.ConvTranspose2d(e3, e3, kernel_size=2, stride=2),
         )
         self.decoder1_upsampler = nn.Sequential(
-            _ConvBlock(e3, e3),
+            _ConvBlock(e3, e3, separable=separable_decoder),
             nn.ConvTranspose2d(e3, e3, kernel_size=2, stride=2),
         )
 

@@ -75,6 +75,7 @@ class TrainingSettings(BaseModel):
     detr_per_layer_match: bool = False  # LSP-DETR 'look forward twice': run the Hungarian matcher per decoder layer (vs reuse last-layer match)
     detr_use_decoder: bool = True  # False = bypass NuLite decoder+NP head, DETR reads raw FastViT stage features (~12.2M)
     detr_shared_layers: bool = False  # weight-share the transformer decoder layer across all ndl steps (params-only saving)
+    detr_separable_decoder: bool = False  # depthwise-separable NuLite decoder convs (sub-10M model)
     detr_backbone: str = 'nulite'  # 'nulite' (FastViT + NuLite decoder) or 'yolo11' (YOLO11n + FPN top-down)
     detr_use_seed: bool = True  # add stride-4 NP seed head on P2 (yolo11 backbone only)
     yolo11_scale: str = 'n'  # yolo11 variant scale (n/s/m/l/x) for detr_backbone=yolo11

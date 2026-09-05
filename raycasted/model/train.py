@@ -583,6 +583,7 @@ class RayCastTrainer(DetectionTrainer):
             seed_map_target=bool(tcfg.get('seed_map_target', True)),
             use_decoder=bool(tcfg.get('detr_use_decoder', True)),
             shared_layers=bool(tcfg.get('detr_shared_layers', False)),
+            separable_decoder=bool(tcfg.get('detr_separable_decoder', False)),
             backbone=tcfg.get('detr_backbone', 'nulite'),
             use_seed=bool(tcfg.get('detr_use_seed', True)),
             yolo11_scale=tcfg.get('yolo11_scale', 'n'),
