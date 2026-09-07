@@ -15,6 +15,18 @@ All models evaluated on PanNuke Fold3 test set (2,722 tiles, 65,848 GT instances
 
 ## NuLite-DETR (current method) — original-mask protocol
 
+> ⚠️ **CONTAMINATED — DO NOT CITE ABSOLUTE NUMBERS.** Every NuLite-DETR row below
+> (train19/28/31/33/34/35/36) was evaluated on **fold3 tiles that were the model's
+> TRAINING fold** (all these models trained on `output/nulite/transformed/train` =
+> fold3; the eval `--data-dir output/pannuke_64/transformed/test` = fold3 = identical
+> tiles). These numbers are only valid for RELATIVE run-to-run comparison. The honest,
+> literature-comparable numbers are produced by `raycasted/evals/eval_lsp.py` on
+> genuinely held-out folds — see `HANDOVER.md` + `docs/runs/nulite-detr/cv-lsp-protocol.md`
+> (locked t12-sep rotation-1 fold1→fold3: macro bPQ 0.6202 / mPQ 0.4293). Also note
+> this section uses global-PQ accumulation + conf 0.20; LSP-DETR's published numbers use
+> per-image-mean PQ, no conf threshold, and 3-fold CV averaging. Rewrite with clean
+> numbers before any paper use.
+
 Same fold3 test set, but evaluated against the **original dense PanNuke masks** (decoded from the parquet), conf=0.20, corrected instance-level PQ (global accumulation). The numbers above (this file) predate the metric fix and use the ray-polygon GT + buggy union-IoU bPQ — **this table is the apples-to-apples one vs literature**.
 
 | Model | AJI | bPQ (DQ/SQ) | mPQ | F1 (centroid) | Prec | Rec | preds | Params | ms/img |

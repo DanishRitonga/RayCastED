@@ -1,5 +1,36 @@
 # AGENTS.md - RayCastED Instructions
 
+## ⚠️ CURRENT PROJECT STATE (2026-09) — read this first
+
+**This repo is now the NuLite-DETR project** (branch `feature/nulite-raycast-seg`), NOT
+the YOLO26-FCN described in the historical gotchas/experiment-log below. For the current
+objective, protocol, architecture, CV workflow, and next steps, read **`HANDOVER.md`**
+at repo root FIRST. Key facts:
+
+- Objective: beat LSP-DETR on PanNuke under THEIR protocol. Reference (Table 3 macro):
+  LSP-DETR bPQ 0.675/mPQ 0.482. Our honest standing: ~0.62/0.43 (recall-limited).
+- **CRITICAL: historical "test-set" numbers in this file and in `docs/runs/nulite-detr/*.md`
+  and `docs/paper/benchmark.md` are CONTAMINATED** — they were evaluated on the training
+  fold (fold3). Treat them as relative-only, never as comparable-to-literature.
+- The ONLY literature-comparable eval is `raycasted/evals/eval_lsp.py` (dense parquet GT,
+  no conf threshold, per-image-mean PQ, per-tissue macro) run on genuinely held-out folds.
+  `eval_pannuke.py` uses an older global-PQ protocol — numbers are not directly
+  comparable to published PanNuke results.
+- Architecture = NuLite-DETR: FastViT encoder + NuLite decoder + NP seed head (S+F+Q
+  dual-use) + LSP-DETR-style 20×20 grid-query DETR head with Hungarian 1:1 matching +
+  focal ∅ class + cost_inside. Locked spec: `docs/paper/architecture.md` (mermaid).
+  Config knobs: `main/pannuke.yaml` training section (`architecture: nulite_detr`, ...).
+- Folds == HF RationAI/PanNuke: fold1=2656/fold2=2523/fold3=2722, categories 0-4, 19
+  tissues. Parquets under `raycasted/data/dataset/PanNuke/data/`.
+- CV: one model per training fold (cyclic), fresh `--output` dir per rotation, eval test
+  fold with eval_lsp.py, report mean±std over 3 test folds using the final ckpt.
+- Machine HAS a GPU (cuda:0 RTX 5070 Ti) and the user runs training here interactively —
+  agents may run evals but must NOT launch training.
+- Agent must respect plan-mode when active (no file writes / no training / no long
+  compute jobs without switching to build).
+
+Everything below this header is the historical v1/YOLO26-FCN record.
+
 ## PRIME DIRECTIVE: NO POST-PROCESSING
 
 **The entire point of this project is NMS-free, post-processing-free inference.** The model must produce the correct set of predictions directly from the o2o head — no NMS, no deduplication, no clustering, no confidence thresholding tricks, no post-hoc filtering. If the model overpredicts, the fix must be in **training** (loss, assignment, cls signal quality), never in post-processing.
