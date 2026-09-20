@@ -28,6 +28,12 @@ at repo root FIRST. Key facts:
   agents may run evals but must NOT launch training.
 - Agent must respect plan-mode when active (no file writes / no training / no long
   compute jobs without switching to build).
+- **DO NOT EDIT ANYTHING UNLESS THE USER EXPLICITLY TELLS YOU TO.** If the user only
+  asks a question or asks you to check/inspect something, answer that question (or report
+  what you found) and stop — do not proactively edit configs, code, or docs, and do not
+  "set up" follow-up changes on your own. Wait for an explicit instruction before writing.
+  (Even when the user picks an option from a menu, treat it as a decision to record, not
+  an instruction to edit, unless they say to implement/apply/change it.)
 
 Everything below this header is the historical v1/YOLO26-FCN record.
 

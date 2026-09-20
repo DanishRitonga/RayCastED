@@ -343,3 +343,81 @@ def random_translate(
     shifted_ann = filter_and_clip_annotations(shifted_ann, 0, 0, crop_size, crop_size, min_rays_after_clip=0.3)
 
     return shifted_image, shifted_ann
+
+
+def gaussian_noise(
+    image: np.ndarray,
+    rng: np.random.Generator,
+    std: float,
+) -> np.ndarray:
+    """Add zero-mean additive Gaussian noise (photometric, annotation-safe).
+
+    Args:
+        image: HWC uint8 RGB image.
+        rng: NumPy random generator.
+        std: Noise standard deviation in [0, 1] image units (scaled by 255).
+
+    Returns:
+        Noisy image, uint8, same shape.
+    """
+    if std <= 0:
+        return image
+    noise = rng.normal(0.0, std * 255.0, size=image.shape).astype(np.float32)
+    out = image.astype(np.float32) + noise
+    return np.clip(out, 0.0, 255.0).astype(np.uint8)
+
+
+def random_sized_crop(
+    image: np.ndarray,
+    annotations: np.ndarray,
+    min_size: int,
+    max_size: int,
+    crop_size: int,
+    rng: np.random.Generator,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Crop a random sub-window and resize it back to crop_size (zoom-in).
+
+    The crop side is sampled uniformly in [min_size, max_size]; the window is
+    then resized to crop_size x crop_size. Centroids are shifted/scaled and
+    rays are scaled by the same factor, then filtered/clipped.
+
+    Args:
+        image: HWC uint8 RGB image.
+        annotations: Array of shape (N, 3+n_rays) in pixel space (ETL format).
+        min_size: Minimum crop side (px).
+        max_size: Maximum crop side (px).
+        crop_size: Target canvas size (assumes square).
+        rng: NumPy random generator.
+
+    Returns:
+        (cropped_image, cropped_annotations) — same shapes as input.
+    """
+    import cv2
+
+    from .filter import filter_and_clip_annotations
+
+    if annotations is None or len(annotations) == 0:
+        return image, annotations
+
+    h, w = image.shape[:2]
+    side = int(rng.integers(min_size, max_size + 1))
+    side = min(side, h, w)
+    if side <= 0 or side == crop_size and side == h == w:
+        return image, annotations
+
+    ox = int(rng.integers(0, w - side + 1))
+    oy = int(rng.integers(0, h - side + 1))
+    crop = image[oy : oy + side, ox : ox + side]
+
+    scale = crop_size / side
+    resized = cv2.resize(
+        crop, (crop_size, crop_size), interpolation=cv2.INTER_LINEAR if scale > 1 else cv2.INTER_AREA
+    )
+
+    ann = annotations.copy()
+    ann[:, 1] = (ann[:, 1] - ox) * scale  # cx
+    ann[:, 2] = (ann[:, 2] - oy) * scale  # cy
+    ann[:, 3:] *= scale  # all rays
+
+    ann = filter_and_clip_annotations(ann, 0, 0, crop_size, crop_size, min_rays_after_clip=0.3)
+    return resized, ann

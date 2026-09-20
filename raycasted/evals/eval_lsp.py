@@ -36,6 +36,7 @@ import cv2
 import numpy as np
 import polars as pl
 import torch
+from scipy.ndimage import distance_transform_edt
 from scipy.optimize import linear_sum_assignment
 from torch.utils.data import DataLoader
 
@@ -44,9 +45,25 @@ from raycasted.evals.eval_pannuke import load_model
 from raycasted.model.register import register_raycast_head
 
 TISSUE_NAMES = [
-    'Adrenal Gland', 'Bile Duct', 'Bladder', 'Breast', 'Cervix', 'Colon',
-    'Esophagus', 'Head&Neck', 'Kidney', 'Liver', 'Lung', 'Ovarian',
-    'Pancreatic', 'Prostate', 'Skin', 'Stomach', 'Testis', 'Thyroid', 'Uterus',
+    'Adrenal Gland',
+    'Bile Duct',
+    'Bladder',
+    'Breast',
+    'Cervix',
+    'Colon',
+    'Esophagus',
+    'Head&Neck',
+    'Kidney',
+    'Liver',
+    'Lung',
+    'Ovarian',
+    'Pancreatic',
+    'Prostate',
+    'Skin',
+    'Stomach',
+    'Testis',
+    'Thyroid',
+    'Uterus',
 ]
 
 
@@ -103,17 +120,12 @@ def _binary_pq_masked(pred_masks, gt_masks, threshold=0.5):
     if n_pred == 0:
         return 0.0, 0.0, 0.0
 
-    gt_union = np.stack(gt_masks).any(0) if n_gt > 0 else np.zeros(
-        pred_masks[0].shape, dtype=bool
-    )
+    gt_union = np.stack(gt_masks).any(0) if n_gt > 0 else np.zeros(pred_masks[0].shape, dtype=bool)
     pred_stack = np.stack(pred_masks).reshape(n_pred, -1).astype(np.float64)
     gt_stack = np.stack(gt_masks).reshape(n_gt, -1).astype(np.float64)
 
     intersection = pred_stack @ gt_stack.T
-    masked_pred_area = (
-        pred_stack[:, gt_union.reshape(-1) == 0].sum(1) if gt_union.any()
-        else pred_stack.sum(1)
-    )
+    masked_pred_area = pred_stack[:, gt_union.reshape(-1) == 0].sum(1) if gt_union.any() else pred_stack.sum(1)
     # masked_pred_area[i] = pixels of pred i outside any GT
     gt_area = gt_stack.sum(1, keepdims=True)  # (n_gt, 1)
     union = gt_area.T + masked_pred_area[:, None]  # (n_pred, n_gt)
@@ -139,11 +151,16 @@ def _binary_pq_masked(pred_masks, gt_masks, threshold=0.5):
 def _decode_instance_mask(bytes_):
     """Decode a stored instance PNG into a (256, 256) bool mask."""
     arr = cv2.imdecode(np.frombuffer(bytes_, np.uint8), cv2.IMREAD_UNCHANGED)
-    return (arr > 127)
+    return arr > 127
 
 
 class ParquetGT:
-    """Hold per-ROI dense instance masks + labels + tissue for one fold."""
+    """Hold per-ROI dense instance masks + labels + tissue for one fold.
+
+    Instance masks are decoded lazily in ``get`` (one ROI at a time) so a
+    whole-fold run never materializes every GT mask simultaneously (~4.4 GB
+    for 66k instances at 256x256 bool each).
+    """
 
     def __init__(self, parquet_path):
         self.df = pl.read_parquet(parquet_path)
@@ -151,22 +168,24 @@ class ParquetGT:
         for row in self.df.iter_rows(named=True):
             insts = row.get('instances') or []
             cats = row.get('categories') or []
-            masks = []
-            labels = []
-            for inst, cat in zip(insts, cats):
-                m = _decode_instance_mask(inst['bytes'])
-                if m.any():
-                    masks.append(m)
-                    labels.append(int(cat))
-            self.rows.append((masks, np.asarray(labels, dtype=int), int(row['tissue'])))
+            self.rows.append(([i['bytes'] for i in insts], [int(c) for c in cats], int(row['tissue'])))
+        self.df = None  # drop the polars frame once rows are extracted
 
     def __len__(self):
         """Number of ROIs in the fold."""
         return len(self.rows)
 
     def get(self, roi_id):
-        """Return (masks, labels, tissue) for the given roi id."""
-        return self.rows[roi_id]
+        """Return (masks, labels, tissue) for the given roi id (decoded now)."""
+        inst_bytes, cats, tissue = self.rows[roi_id]
+        masks = []
+        labels = []
+        for blob, cat in zip(inst_bytes, cats):
+            m = _decode_instance_mask(blob)
+            if m.any():
+                masks.append(m)
+                labels.append(cat)
+        return masks, np.asarray(labels, dtype=int), tissue
 
 
 def roi_id_from_path(path: str) -> int:
@@ -212,9 +231,7 @@ def run_inference_raw(model, dataloader, device):
                 poly_n = dec_polys[si].cpu().numpy()  # normalized [0,1]
                 logits = dec_logits[si].cpu().numpy()
                 keep = (
-                    logits.argmax(-1) != (logits.shape[-1] - 1)
-                    if no_object
-                    else np.ones(logits.shape[0], dtype=bool)
+                    logits.argmax(-1) != (logits.shape[-1] - 1) if no_object else np.ones(logits.shape[0], dtype=bool)
                 )
                 poly_n = poly_n[keep]
                 labels = logits[keep].argmax(-1)
@@ -289,6 +306,7 @@ class TissueStats:
 
     def update_f1(self, pred_masks, gt_masks, radius=12):
         """Accumulate global centroid-based F1 tp/fp/fn for one image."""
+
         # centroid-based F1 (global tp/fp/fn). GT centroids vs pred centroids.
         def _centroids(masks):
             pts = []
@@ -329,8 +347,10 @@ class TissueStats:
 
     def summary(self):
         """Return dict of per-image-mean PQ metrics over accumulated images."""
+
         def _avg(s, n):
             return s / n if n else float('nan')
+
         return {
             'bDQ': _avg(self.bdq_s, self.b_count),
             'bSQ': _avg(self.bsq_s, self.b_count),
@@ -365,6 +385,44 @@ def rasterize_polys(polys, h, w, labels):
     return masks, np.asarray(kept, dtype=int) if kept else np.zeros((0,), dtype=int)
 
 
+def rasterize_polys_watershed(polys, h, w, labels):
+    """LSP distance-transform watershed overlap resolution over pred polys.
+
+    Each polygon is filled independently (no occlusion merge), then every
+    pixel is assigned to the instance whose EDT of its own mask is largest
+    there (nearest center). Overlapping predictions can therefore BOTH
+    survive, each keeping the pixels closest to its center. Mirrors LSP-DETR
+    image_processing.py resolve_nuclei_overlaps used at PanNuke eval/val.
+    """
+    n = len(polys)
+    if n == 0:
+        return [], np.zeros((0,), dtype=int)
+
+    inst = np.zeros((n, h, w), dtype=bool)
+    for i, poly in enumerate(polys):
+        m = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(m, [_poly_xy(poly)], 1)
+        inst[i] = m.astype(bool)
+
+    dist = np.zeros((n, h, w), dtype=np.float32)
+    for i in range(n):
+        if inst[i].any():
+            dist[i] = distance_transform_edt(inst[i])
+
+    owner = dist.argmax(0)  # per-pixel nearest center (torch.max first-max)
+    owned = np.arange(n)[:, None, None] == owner[None]
+    resolved = owned & (dist > 0)
+
+    masks = []
+    kept = []
+    for i in range(n):
+        m = resolved[i]
+        if m.any():
+            masks.append(m)
+            kept.append(labels[i])
+    return masks, np.asarray(kept, dtype=int) if kept else np.zeros((0,), dtype=int)
+
+
 def _poly_area(poly):
     cx, cy = poly[0], poly[1]
     rays = poly[2:]
@@ -393,6 +451,7 @@ def _poly_xy(poly):
 def collate_fn(batch):
     """Stack only the image tensor from RayCastTileDataset 3-tuples."""
     import torch as _t
+
     images = _t.stack([item[0] for item in batch])
     return {'img': images}
 
@@ -406,10 +465,17 @@ def main():
     ap.add_argument('--batch', type=int, default=16)
     ap.add_argument('--device', default='0')
     ap.add_argument('--workers', type=int, default=4)
+    ap.add_argument(
+        '--watershed',
+        action='store_true',
+        help='also resolve pred overlaps via LSP distance-transform '
+        'watershed and print the delta vs largest-first occlusion',
+    )
     args = ap.parse_args()
 
     register_raycast_head()
     from raycasted.data.etl.utils import constants as _const
+
     _const.configure_rays(64)
 
     device = torch.device('cuda' if args.device != 'cpu' else 'cpu')
@@ -423,14 +489,16 @@ def main():
     assert len(tile_paths) == len(gt), (len(tile_paths), len(gt))
 
     ds = RayCastTileDataset(str(args.data_dir), crop_size=crop, augment=False)
-    dl = DataLoader(ds, batch_size=args.batch, shuffle=False,
-                    num_workers=args.workers, collate_fn=collate_fn)
+    dl = DataLoader(ds, batch_size=args.batch, shuffle=False, num_workers=args.workers, collate_fn=collate_fn)
 
     preds = run_inference_raw(model, dl, device)
 
     per_tissue = {}
     total = TissueStats()
+    per_tissue_ws = {} if args.watershed else None
+    total_ws = TissueStats() if args.watershed else None
     n_pred_total = n_gt_total = 0
+    n_pred_total_ws = 0
     for path, res in zip(tile_paths, preds):
         roi = roi_id_from_path(path)
         gt_masks, gt_labels, tissue = gt.get(roi)
@@ -438,15 +506,27 @@ def main():
         pred_labels = res['labels']
         if len(pred_polys) == 0:
             pm, pl = [], np.zeros((0,), dtype=int)
+            ws_pm, ws_pl = [], np.zeros((0,), dtype=int)
         else:
             pm, pl = rasterize_polys(pred_polys, crop, crop, pred_labels)
+            if args.watershed:
+                ws_pm, ws_pl = rasterize_polys_watershed(pred_polys, crop, crop, pred_labels)
+            else:
+                ws_pm, ws_pl = [], np.zeros((0,), dtype=int)
         n_pred_total += len(pm)
+        n_pred_total_ws += len(ws_pm)
         n_gt_total += len(gt_masks)
         ts = per_tissue.setdefault(tissue, TissueStats())
         ts.update(pm, pl, gt_masks, gt_labels)
         ts.update_f1(pm, gt_masks)
         total.update(pm, pl, gt_masks, gt_labels)
         total.update_f1(pm, gt_masks)
+        if args.watershed:
+            tsw = per_tissue_ws.setdefault(tissue, TissueStats())
+            tsw.update(ws_pm, ws_pl, gt_masks, gt_labels)
+            tsw.update_f1(ws_pm, gt_masks)
+            total_ws.update(ws_pm, ws_pl, gt_masks, gt_labels)
+            total_ws.update_f1(ws_pm, gt_masks)
 
     print(f'GT instances: {n_gt_total}   Pred instances (all non-∅): {n_pred_total}')
     print(f'Per-image-mean bPQ (whole fold): {total.summary()["bPQ"]:.4f}')
@@ -461,11 +541,12 @@ def main():
         bpq_list.append(s['bPQ'])
         mpq_list.append(s['mPQ'])
         name = TISSUE_NAMES[t] if t < len(TISSUE_NAMES) else str(t)
-        print(f'{name:<15}{s["bDQ"]:>8.4f}{s["bSQ"]:>8.4f}{s["bPQ"]:>8.4f}'
-              f'{s["mPQ"]:>8.4f}{f1:>8.4f}{p:>8.4f}{r:>8.4f}')
+        print(f'{name:<15}{s["bDQ"]:>8.4f}{s["bSQ"]:>8.4f}{s["bPQ"]:>8.4f}{s["mPQ"]:>8.4f}{f1:>8.4f}{p:>8.4f}{r:>8.4f}')
     if bpq_list:
-        print(f'{"Average":<15}{"":>8}{"":>8}{np.mean(bpq_list):>8.4f}'
-              f'{np.mean(mpq_list):>8.4f}   (macro over {len(bpq_list)} tissues)')
+        print(
+            f'{"Average":<15}{"":>8}{"":>8}{np.mean(bpq_list):>8.4f}'
+            f'{np.mean(mpq_list):>8.4f}   (macro over {len(bpq_list)} tissues)'
+        )
     print()
     st = total.summary()
     f1, p, r = total.f1()
@@ -473,6 +554,46 @@ def main():
     for k in ['bDQ', 'bSQ', 'bPQ', 'bMPQ', 'mDQ', 'mSQ', 'mPQ', 'mMPQ']:
         print(f'  {k}: {st[k]:.4f}')
     print(f'  F1: {f1:.4f}  P: {p:.4f}  R: {r:.4f}  (centroid, r=12, global)')
+
+    if args.watershed:
+        print()
+        print('=== LSP watershed overlap resolution (resolve_nuclei_overlaps) ===')
+        print(f'Pred instances: occlusion {n_pred_total}   watershed {n_pred_total_ws}')
+        print(f'{"tissue":<15}{"bDQ":>8}{"bSQ":>8}{"bPQ":>8}{"mPQ":>8}{"F1":>8}{"P":>8}{"R":>8}')
+        ws_bpq, ws_mpq = [], []
+        for t in sorted(per_tissue_ws):
+            ts = per_tissue_ws[t]
+            s = ts.summary()
+            f1_w, p_w, r_w = ts.f1()
+            ws_bpq.append(s['bPQ'])
+            ws_mpq.append(s['mPQ'])
+            name = TISSUE_NAMES[t] if t < len(TISSUE_NAMES) else str(t)
+            print(
+                f'{name:<15}{s["bDQ"]:>8.4f}{s["bSQ"]:>8.4f}{s["bPQ"]:>8.4f}'
+                f'{s["mPQ"]:>8.4f}{f1_w:>8.4f}{p_w:>8.4f}{r_w:>8.4f}'
+            )
+        if ws_bpq:
+            print(
+                f'{"Average":<15}{"":>8}{"":>8}{np.mean(ws_bpq):>8.4f}'
+                f'{np.mean(ws_mpq):>8.4f}   (macro over {len(ws_bpq)} tissues)'
+            )
+        st_ws = total_ws.summary()
+        f1_ws, p_ws, r_ws = total_ws.f1()
+        print()
+        print('Whole-fold totals (watershed):')
+        for k in ['bDQ', 'bSQ', 'bPQ', 'bMPQ', 'mDQ', 'mSQ', 'mPQ', 'mMPQ']:
+            print(f'  {k}: {st_ws[k]:.4f}')
+        print(f'  F1: {f1_ws:.4f}  P: {p_ws:.4f}  R: {r_ws:.4f}  (centroid, r=12, global)')
+        print()
+        print('delta (watershed - occlusion), per-image-mean whole fold:')
+        for k in ['bPQ', 'mPQ', 'bDQ', 'bSQ', 'mDQ', 'mSQ']:
+            if k in st_ws and k in st:
+                d = st_ws[k] - st[k]
+                print(f'  {k}: {d:+.4f}')
+        d_f1 = f1_ws - f1
+        d_p = p_ws - p
+        d_r = r_ws - r
+        print(f'  F1: {d_f1:+.4f}  P: {d_p:+.4f}  R: {d_r:+.4f}')
 
 
 if __name__ == '__main__':

@@ -17,7 +17,16 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from ..ops.augment import flip_horizontal, flip_vertical, random_scale, random_translate, rotate_90, stain_jitter
+from ..ops.augment import (
+    flip_horizontal,
+    flip_vertical,
+    gaussian_noise,
+    random_scale,
+    random_sized_crop,
+    random_translate,
+    rotate_90,
+    stain_jitter,
+)
 from ..ops.filter import filter_and_clip_annotations
 
 if TYPE_CHECKING:
@@ -264,6 +273,24 @@ class RayCastTileDataset(Dataset):
         6. Rotation (0/90/180/270)
         """
         if len(annotations) == 0:
+            cfg_early = self.augment_config
+            # Photometric augmentations are annotation-independent, so apply them
+            # even to empty-GT tiles: those tiles are still fed to the model, and
+            # skipping them would make empty tiles a different train distribution.
+            if cfg_early.get('stain_jitter', False):
+                image = stain_jitter(
+                    image,
+                    self.rng,
+                    hsv_h=cfg_early.get('stain_hsv_h', 0.05),
+                    hsv_s=cfg_early.get('stain_hsv_s', 0.3),
+                    hsv_v=cfg_early.get('stain_hsv_v', 0.2),
+                    blur_prob=cfg_early.get('stain_blur_prob', 0.2),
+                    blur_sigma=cfg_early.get('stain_blur_sigma', 1.0),
+                )
+            if cfg_early.get('aug_noise_prob', 0.0) > 0 and self.rng.random() < cfg_early.get(
+                'aug_noise_prob', 0.0
+            ):
+                image = gaussian_noise(image, self.rng, std=cfg_early.get('aug_noise_std', 0.1))
             return image, annotations
 
         cfg = self.augment_config
@@ -279,6 +306,23 @@ class RayCastTileDataset(Dataset):
                 blur_prob=cfg.get('stain_blur_prob', 0.2),
                 blur_sigma=cfg.get('stain_blur_sigma', 1.0),
             )
+
+        # Additive Gaussian noise (photometric, annotation-safe)
+        if cfg.get('aug_noise_prob', 0.0) > 0 and self.rng.random() < cfg.get('aug_noise_prob', 0.0):
+            image = gaussian_noise(image, self.rng, std=cfg.get('aug_noise_std', 0.1))
+
+        # Random-sized crop + resize (zoom-in; affine, annotation-safe)
+        if cfg.get('aug_randcrop_prob', 0.0) > 0 and self.rng.random() < cfg.get('aug_randcrop_prob', 0.0):
+            image, annotations = random_sized_crop(
+                image,
+                annotations,
+                min_size=cfg.get('aug_randcrop_min', 128),
+                max_size=cfg.get('aug_randcrop_max', 256),
+                crop_size=self.crop_size,
+                rng=self.rng,
+            )
+            if len(annotations) == 0:
+                return image, annotations
 
         # Random scale
         if cfg.get('scale_augment', False):

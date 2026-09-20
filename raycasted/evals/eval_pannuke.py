@@ -441,6 +441,22 @@ def load_model(weights_path: str, device: torch.device):
     model = ckpt.get('model') or ckpt.get('ema') if isinstance(ckpt, dict) else ckpt
     model = model.float().to(device)
     model.eval()
+    detr = getattr(model, 'detr', None)
+    if detr is not None:
+        for attr, default in (
+            ('query_block_size', 0.0),
+            ('content_top', False),
+            ('content_top_channels', 0),
+            ('seed_resize', 'bilinear'),
+            ('seed_resize_frac', 0.25),
+            ('seed_level', False),
+            ('seed_level_stride', 4),
+            ('layer_schedule', None),
+            ('query_selection', 'grid'),
+            ('mds', False),
+        ):
+            if not hasattr(detr, attr):
+                setattr(detr, attr, default)
     return model
 
 

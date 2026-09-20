@@ -390,6 +390,11 @@ class RayCastTrainer(DetectionTrainer):
         self.add_callback('on_fit_epoch_end', _best_epoch_callback)
         # Register per-epoch LR logging — critical for MuSGD multi-group debugging
         self.add_callback('on_fit_epoch_end', _lr_log_callback)
+        # Staged backbone unfreeze (no-op unless backbone_freeze_epochs > 0)
+        self.add_callback('on_train_epoch_start', self._staged_backbone_unfreeze)
+        self.add_callback('on_train_epoch_start', self._staged_decoder_unfreeze)
+        # Grid -> seed query warm-up (no-op unless detr_query_warmup_epochs > 0)
+        self.add_callback('on_train_epoch_start', self._query_warmup_switch)
 
     def plot_training_labels(self):
         """Skip standard bbox label plotting — incompatible with raycast polygon data."""
@@ -454,6 +459,20 @@ class RayCastTrainer(DetectionTrainer):
         g[0] = {'params': g[0], **optim_args, 'weight_decay': decay, 'param_group': 'weight'}
         g[1] = {'params': g[1], **optim_args, 'weight_decay': 0.0, 'param_group': 'bn'}
         muon, sgd = (0.2, 1.0)
+
+        # Staged backbone freeze (LSP-DETR-style): the ImageNet-pretrained FastViT
+        # lives under `encoder_decoder.encoder.*`. When backbone_freeze_epochs > 0
+        # its params get their own MuSGD groups at lr * backbone_lr_scale and are
+        # kept requires_grad=False until _staged_backbone_unfreeze flips them on at
+        # the freeze boundary (the groups stay in the optimizer as no-ops while
+        # frozen — MuSGD skips params whose .grad is None).
+        freeze_epochs = int((self.training_config or {}).get('backbone_freeze_epochs', 0) or 0)
+        backbone_lr_scale = float((self.training_config or {}).get('backbone_lr_scale', 0.1))
+        dec_freeze_epochs = int((self.training_config or {}).get('decoder_freeze_epochs', 0) or 0)
+        decoder_lr_scale = float((self.training_config or {}).get('decoder_lr_scale', 0.1))
+        enc_pre = 'encoder_decoder.encoder.'
+        enc_dec = 'encoder_decoder.'
+
         if use_muon:
             num_params[0] = len(g[3])
             g[3] = {'params': g[3], **optim_args, 'weight_decay': decay, 'use_muon': True, 'param_group': 'muon'}
@@ -462,11 +481,99 @@ class RayCastTrainer(DetectionTrainer):
             g_ = []  # new param groups
             for x in g:
                 p = x.pop('params')
-                p1 = [v for k, v in p.items() if pattern.search(k)]
-                p2 = [v for k, v in p.items() if not pattern.search(k)]
-                g_.extend([{'params': p1, **x, 'lr': lr * 3}, {'params': p2, **x}])
+                if freeze_epochs or dec_freeze_epochs:
+                    # partition each bucket by (lr*3 boost subset, encoder membership,
+                    # NuLite-decoder membership) so each frozen region carries its own
+                    # lr scale for the post-unfreeze phase (groups stay in the optimizer
+                    # as no-ops while frozen — MuSGD skips params whose .grad is None).
+                    def _region(k):
+                        if k.startswith(enc_pre):
+                            return 'enc'
+                        if k.startswith(enc_dec):
+                            return 'dec'
+                        return 'other'
+
+                    subs = {}
+                    for k, v in p.items():
+                        key = (bool(pattern.search(k)), _region(k))
+                        subs.setdefault(key, []).append(v)
+                    if not subs:
+                        subs[(False, 'other')] = []
+                    for (boosted, region), params in sorted(
+                        subs.items(), key=lambda kv: (not kv[0][0], {'enc': 0, 'dec': 1, 'other': 2}[kv[0][1]])
+                    ):
+                        mult = (3.0 if boosted else 1.0)
+                        if region == 'enc':
+                            mult *= backbone_lr_scale
+                        elif region == 'dec':
+                            mult *= decoder_lr_scale
+                        g_.append({'params': params, **x, 'lr': lr * mult})
+                else:
+                    p1 = [v for k, v in p.items() if pattern.search(k)]
+                    p2 = [v for k, v in p.items() if not pattern.search(k)]
+                    g_.extend([{'params': p1, **x, 'lr': lr * 3}, {'params': p2, **x}])
             g = g_
         optimizer = getattr(optim, name, partial(MuSGD, muon=muon, sgd=sgd))(params=g)
+
+        if freeze_epochs and not getattr(self, '_backbone_frozen', 0):
+            n_frozen = sum(
+                1 for k, v in model.named_parameters() if k.startswith(enc_pre) and v.requires_grad
+            )
+            if n_frozen:
+                for k, v in model.named_parameters():
+                    if k.startswith(enc_pre) and v.requires_grad:
+                        v.requires_grad = False
+                self._backbone_frozen = n_frozen
+                LOGGER.info(
+                    f'Backbone freeze: {n_frozen} encoder params requires_grad=False for the first '
+                    f'{freeze_epochs} epochs, then fine-tuned at lr x{backbone_lr_scale}'
+                )
+
+        if dec_freeze_epochs and not getattr(self, '_decoder_frozen', 0):
+            n_frozen = sum(
+                1
+                for k, v in model.named_parameters()
+                if k.startswith(enc_dec) and not k.startswith(enc_pre) and v.requires_grad
+            )
+            if n_frozen:
+                for k, v in model.named_parameters():
+                    if k.startswith(enc_dec) and not k.startswith(enc_pre) and v.requires_grad:
+                        v.requires_grad = False
+                self._decoder_frozen = n_frozen
+                LOGGER.info(
+                    f'Decoder freeze: {n_frozen} NuLite-decoder params requires_grad=False for the first '
+                    f'{dec_freeze_epochs} epochs, then fine-tuned at lr x{decoder_lr_scale}'
+                )
+
+        # Frozen FG/BG seg stream (dual / two_stream): __init__ freezes it, but the
+        # ultralytics _setup_train freeze loop re-enables any param not listed in
+        # self.args.freeze (which is null here). build_optimizer runs AFTER that
+        # loop, so re-apply the freeze to keep the oracle prior frozen for the whole
+        # run (MuSGD skips params whose .grad is None, so the no-op groups are safe).
+        if getattr(model, 'backbone', 'nulite') in ('dual', 'two_stream'):
+            seg = getattr(model, 'seg_encoder', None)
+            if seg is not None:
+                n_seg = sum(1 for p in seg.parameters() if p.requires_grad)
+                if n_seg:
+                    seg.requires_grad_(False)
+                    LOGGER.info(f'Seg-stream freeze: {n_seg} frozen FG/BG prior params (whole run)')
+
+        # freeze_encoder_decoder (phase-2a: train head only): get_model calls
+        # model.freeze_encoder_decoder_np(), but ultralytics _setup_train then
+        # re-enables every param not in self.args.freeze (null), silently undoing
+        # it. build_optimizer runs after that loop, so re-apply the freeze here.
+        if (self.training_config or {}).get('freeze_encoder_decoder', False) and not getattr(
+            self, '_enc_dec_frozen', 0
+        ):
+            n_frozen = sum(
+                1 for k, v in model.named_parameters() if k.startswith(enc_dec) and v.requires_grad
+            )
+            if n_frozen:
+                model.freeze_encoder_decoder_np()
+                self._enc_dec_frozen = n_frozen
+                LOGGER.info(
+                    f'Encoder+decoder freeze: {n_frozen} params requires_grad=False (train head only)'
+                )
 
         LOGGER.info(
             f'{colorstr("optimizer:")} {type(optimizer).__name__}(lr={lr}, momentum={momentum}) with parameter groups '
@@ -513,6 +620,94 @@ class RayCastTrainer(DetectionTrainer):
         self.optimizer.zero_grad()
         if self.ema:
             self.ema.update(self.model)
+
+    def _staged_backbone_unfreeze(self, trainer=None):
+        """Unfreeze the FastViT encoder once the backbone_freeze_epochs window ends.
+
+        Registered on 'on_train_epoch_start'; it fires before the batch loop of the
+        epoch, so a resume landing at/past the freeze boundary re-enables backbone
+        gradients immediately (requires_grad is not persisted in checkpoints). The
+        reduced backbone LR was already baked into its param groups at
+        build_optimizer time via backbone_lr_scale.
+
+        ``trainer`` is ignored: ultralytics run_callbacks invokes callbacks as
+        callback(trainer), and this bound method already closes over self.
+        """
+        tcfg = self.training_config or {}
+        freeze_epochs = int(tcfg.get('backbone_freeze_epochs', 0) or 0)
+        if not freeze_epochs or not getattr(self, '_backbone_frozen', 0):
+            return
+        if self.epoch < freeze_epochs:
+            return
+        enc_pre = 'encoder_decoder.encoder.'
+        n = 0
+        for k, v in self.model.named_parameters():
+            if k.startswith(enc_pre) and not v.requires_grad:
+                v.requires_grad = True
+                n += 1
+        self._backbone_frozen = 0
+        if n:
+            scale = float(tcfg.get('backbone_lr_scale', 0.1))
+            LOGGER.info(f'Epoch {self.epoch + 1}: backbone unfrozen ({n} params) at lr x{scale}')
+
+    def _staged_decoder_unfreeze(self, trainer=None):
+        """Unfreeze the NuLite upsampling decoder after its freeze window ends.
+
+        Mirrors ``_staged_backbone_unfreeze`` but targets the NuLite decoder
+        branches (``encoder_decoder.*`` excluding ``encoder_decoder.encoder.*``:
+        bottleneck_upsampler + decoder4..1_upsampler). Used by the curriculum
+        stage-2 warm-up (decoder_freeze_epochs): the oracle-initialised decoder
+        stays frozen while the from-scratch DETR head learns to read its
+        features, so head gradients cannot wreck the decoder's segmentation
+        geometry before it adapts. ``trainer`` is ignored (see sibling).
+        """
+        tcfg = self.training_config or {}
+        dec_freeze_epochs = int(tcfg.get('decoder_freeze_epochs', 0) or 0)
+        if not dec_freeze_epochs or not getattr(self, '_decoder_frozen', 0):
+            return
+        if self.epoch < dec_freeze_epochs:
+            return
+        enc_pre = 'encoder_decoder.encoder.'
+        enc_dec = 'encoder_decoder.'
+        n = 0
+        for k, v in self.model.named_parameters():
+            if k.startswith(enc_dec) and not k.startswith(enc_pre) and not v.requires_grad:
+                v.requires_grad = True
+                n += 1
+        self._decoder_frozen = 0
+        if n:
+            scale = float(tcfg.get('decoder_lr_scale', 0.1))
+            LOGGER.info(f'Epoch {self.epoch + 1}: decoder unfrozen ({n} params) at lr x{scale}')
+
+    def _query_warmup_switch(self, trainer=None):
+        """Flip query_selection from 'grid' to 'seed' after the warm-up window.
+
+        Curriculum for seg-governed queries (detr_query_warmup_epochs > 0 with
+        detr_query_selection: seed): train with the fixed grid for the first N
+        epochs (stable convergence, established geometry) then hand over to
+        oracle-peak seed queries. Flips BOTH self.model.detr and the EMA copy
+        (self.ema.ema.detr) since validation and best.pt saving run on the EMA.
+        ``trainer`` is ignored (see sibling callbacks).
+        """
+        tcfg = self.training_config or {}
+        warmup = int(tcfg.get('detr_query_warmup_epochs', 0) or 0)
+        target = str(tcfg.get('detr_query_selection', 'grid'))
+        if not warmup or target != 'seed' or getattr(self, '_query_switched', False):
+            return
+        if self.epoch < warmup:
+            # Both the training model (built with query_selection='seed') and the
+            # EMA copy (used for validation/best.pt) must run grid during warm-up.
+            for detr in (getattr(self.model, 'detr', None),
+                         getattr(getattr(self, 'ema', None), 'ema', None) and getattr(self.ema.ema, 'detr', None)):
+                if detr is not None:
+                    detr.query_selection = 'grid'
+            return
+        for detr in (getattr(self.model, 'detr', None),
+                     getattr(getattr(self, 'ema', None), 'ema', None) and getattr(self.ema.ema, 'detr', None)):
+            if detr is not None:
+                detr.query_selection = 'seed'
+        self._query_switched = True
+        LOGGER.info(f'Epoch {self.epoch + 1}: query_selection switched grid -> seed (warmup={warmup})')
 
     def _setup_scheduler(self):
         """Override scheduler setup for CosineAnnealingWarmRestarts (SGDR).
@@ -577,6 +772,25 @@ class RayCastTrainer(DetectionTrainer):
             no_object=bool(tcfg.get('detr_no_object', True)),
             seed_in_content=bool(tcfg.get('detr_seed_in_content', True)),
             no_object_weight=float(tcfg.get('detr_no_object_weight', 1.0)),
+            cls_weight=float(tcfg.get('detr_cls_weight', 2.0)),
+            piou_weight=float(tcfg.get('detr_piou_weight', 3.0)),
+            xy_weight=float(tcfg.get('detr_xy_weight', 500.0)),
+            detr_lsp=bool(tcfg.get('detr_lsp', False)),
+            detr_matcher_lsp=bool(tcfg.get('detr_matcher_lsp', False)),
+            query_block_size=float(tcfg.get('detr_query_block_size', 0.0) or 0.0),
+            content_top=bool(tcfg.get('detr_content_top', False)),
+            seed_resize=str(tcfg.get('detr_seed_resize', 'bilinear')),
+            seed_resize_frac=float(tcfg.get('detr_seed_resize_frac', 0.25)),
+            detr_layer_schedule=str(tcfg.get('detr_layer_schedule', '')),
+            hybrid_peaks=int(tcfg.get('detr_hybrid_peaks', 100)),
+            seed_level=bool(tcfg.get('detr_seed_level', False)),
+            seed_level_stride=int(tcfg.get('detr_seed_level_stride', 4)),
+            recast=bool(tcfg.get('detr_recast', False)),
+            recast_after_layer=int(tcfg.get('detr_recast_after_layer', 3)),
+            recast_radius_px=float(tcfg.get('detr_recast_radius_px', 4.0)),
+            respawn=bool(tcfg.get('detr_respawn', False)),
+            respawn_peaks=int(tcfg.get('detr_respawn_peaks', 64)),
+            respawn_min_seed=float(tcfg.get('detr_respawn_min_seed', 0.5)),
             mds=bool(tcfg.get('detr_mds', True)),
             cost_inside=float(tcfg.get('detr_cost_inside', 10.0)),
             per_layer_match=bool(tcfg.get('detr_per_layer_match', False)),
@@ -588,6 +802,7 @@ class RayCastTrainer(DetectionTrainer):
             use_seed=bool(tcfg.get('detr_use_seed', True)),
             yolo11_scale=tcfg.get('yolo11_scale', 'n'),
             yolo11_ckpt=tcfg.get('yolo11_ckpt'),
+            det_variant=tcfg.get('det_variant', 'fastvit_t12'),
             verbose=verbose,
         )
 
@@ -598,6 +813,14 @@ class RayCastTrainer(DetectionTrainer):
         nulite_ckpt = tcfg.get('nulite_ckpt')
         if nulite_ckpt:
             model.load_nulite_ckpt(nulite_ckpt)
+
+        # encoder_input_norm is a plain Python attr (not in state_dict), so it is
+        # lost by load_state_dict on resume. Preserve the trained input mode
+        # ('11' for an oracle-initialized encoder) across restarts.
+        if is_resume:
+            model.encoder_input_norm = getattr(
+                weights, 'encoder_input_norm', getattr(model, 'encoder_input_norm', '01')
+            )
 
         if tcfg.get('freeze_encoder_decoder', False):
             model.freeze_encoder_decoder_np()
@@ -939,6 +1162,11 @@ class RayCastTrainer(DetectionTrainer):
                     'scale_range',
                     'translate_augment',
                     'translate_range',
+                    'aug_noise_prob',
+                    'aug_noise_std',
+                    'aug_randcrop_prob',
+                    'aug_randcrop_min',
+                    'aug_randcrop_max',
                 )
             }
 

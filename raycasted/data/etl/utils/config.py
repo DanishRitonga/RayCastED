@@ -66,10 +66,34 @@ class TrainingSettings(BaseModel):
     detr_peak_distance: int = 3  # seed-map local-maxima neighbourhood (px)
     detr_grid_size: float = 0.05  # grid cell diameter for grid-query init (normalized); ~3.5um at 256px
     detr_query_selection: str = 'grid'  # 'grid' (LSP-DETR fixed grid), 'learned' (enc_score_head top-k), or 'seed' (local maxima)
+    detr_query_warmup_epochs: int = 0  # >0 with query_selection=seed: run 'grid' for N epochs then switch to seed
     detr_seed_feature: bool = True  # concat seed map as extra feature channel (seg conditioning)
     detr_no_object: bool = True  # explicit "no object" class via focal loss (LSP-DETR style)
     detr_seed_in_content: bool = True  # concat raw seed logit to score-head inputs (undiluted objectness read)
     detr_no_object_weight: float = 1.0  # ∅ focal column weight (>1 = suppress redundant queries harder)
+    detr_cls_weight: float = 2.0  # cls loss gain for the DETR criterion (loss_gain['class'])
+    detr_piou_weight: float = 3.0  # polar-IoU loss gain for the DETR criterion (loss_gain['piou'])
+    detr_xy_weight: float = 500.0  # centroid loss gain (loss_gain['xy']); 500 was tuned for Huber delta=0.05
+    detr_lsp: bool = False  # LSP-DETR-exact loss/matching+query init (equal ∅ cols, no pIoU, 9999 gate)
+    detr_matcher_lsp: bool = False  # LSP-DETR-exact MATCHER only (class1/pointL1/radial-from-centroid/9999 gate); loss + query init stay locked
+    detr_query_block_size: float = 0.0  # grid cell dia in PIXELS for LSP init (0 = legacy grid_size grid)
+    detr_content_top: bool = False  # query content from top-level (st32) feature (LSP FeatureSampling)
+    detr_seed_resize: str = 'bilinear'  # F-channel seed downsample: bilinear (locked) | max | avg | topk
+    detr_seed_resize_frac: float = 0.25  # 'topk' only: fraction of cell pixels averaged (1/k_cell at each scale)
+    detr_layer_schedule: str = ''  # per-layer cross-attn scale: 0=b3,1=b4,2=b5; '2,1,0,2,1,0'; '' = all levels
+    detr_hybrid_peaks: int = 100  # query_selection=hybrid: extra seed-peak queries appended to the grid
+    detr_seed_level: bool = False  # seed map as 4th cross-attn level (own strided proj) instead of +1 F channel
+    detr_seed_level_stride: int = 4  # seed-level proj conv stride (4 = b3 res; smaller = finer/expensive)
+    detr_recast: bool = False  # local embedding correction between existing decoder layers
+    detr_recast_after_layer: int = 3  # one-based; must precede final layer
+    detr_recast_radius_px: float = 4.0  # nine local samples spanning +/- radius in input pixels
+    detr_respawn: bool = False  # recall-repair 2nd decoder pass: re-anchor emptiest queries on uncovered seed peaks
+    detr_respawn_peaks: int = 64  # max respawned queries per image
+    detr_respawn_min_seed: float = 0.5  # min seed value for a candidate respawn peak
+    backbone_freeze_epochs: int = 0  # freeze FastViT encoder for N initial epochs (LSP-DETR: 30); 0 = end-to-end
+    backbone_lr_scale: float = 0.1  # encoder LR multiplier after unfreeze (LSP-DETR: backbone at 10% base LR)
+    decoder_freeze_epochs: int = 0  # freeze the NuLite upsampling decoder (encoder_decoder.* minus encoder) for N initial epochs (curriculum stage-2 warm-up); 0 = train decoder from ep0
+    decoder_lr_scale: float = 0.1  # decoder LR multiplier after its freeze window ends (guards oracle-initialised decoder from head gradients)
     detr_mds: bool = True  # MDS-DETR rank-causal self-attn mask (local winner-take-all, duplicate suppression)
     detr_cost_inside: float = 10.0  # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
     detr_per_layer_match: bool = False  # LSP-DETR 'look forward twice': run the Hungarian matcher per decoder layer (vs reuse last-layer match)
@@ -77,6 +101,7 @@ class TrainingSettings(BaseModel):
     detr_shared_layers: bool = False  # weight-share the transformer decoder layer across all ndl steps (params-only saving)
     detr_separable_decoder: bool = False  # depthwise-separable NuLite decoder convs (sub-10M model)
     detr_backbone: str = 'nulite'  # 'nulite' (FastViT + NuLite decoder) or 'yolo11' (YOLO11n + FPN top-down)
+    det_variant: str = 'fastvit_t12'  # detection-stream encoder variant for detr_backbone=two_stream (seg stream uses nulite_variant)
     detr_use_seed: bool = True  # add stride-4 NP seed head on P2 (yolo11 backbone only)
     yolo11_scale: str = 'n'  # yolo11 variant scale (n/s/m/l/x) for detr_backbone=yolo11
     yolo11_ckpt: str | None = None  # path to yolo11*.pt for layers 0-16 (None = auto 'yolo11n.pt' when pretrained)
@@ -159,6 +184,15 @@ class TrainingSettings(BaseModel):
 
     translate_augment: bool = True  # random translation augmentation
     translate_range: float = 0.1  # fraction of crop_size
+
+    # Extra photometric aug (annotation-safe, LSP-DETR parity)
+    aug_noise_prob: float = 0.0  # probability of additive Gaussian noise (0 = off)
+    aug_noise_std: float = 0.1  # noise std in [0, 1] image units
+
+    # Random-sized crop: random sub-window resized back to crop_size (zoom-in)
+    aug_randcrop_prob: float = 0.0  # probability (0 = off)
+    aug_randcrop_min: int = 128  # min crop side (px)
+    aug_randcrop_max: int = 256  # max crop side (px)
 
     inference_conf: float = 0.20  # confidence threshold at inference
 

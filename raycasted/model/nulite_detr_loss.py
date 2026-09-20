@@ -16,6 +16,7 @@ from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch, polar_iou_
 from raycasted.data.etl.ops.loss import curvature_smoothness_loss_torch
 from raycasted.data.etl.utils import constants as _const
 from raycasted.model.blocks.star_distances_analytical import (
+    _analytical_ray_distances_paired,
     _normed_rays_to_vertices,
     analytical_gt_rays,
     build_ray_directions,
@@ -85,6 +86,7 @@ class RayCastHungarianMatcher(nn.Module):
         gamma=2.0,
         n_rays=None,
         cost_inside=10.0,
+        lsp_mode=False,
     ):
         super().__init__()
         if cost_gain is None:
@@ -94,6 +96,10 @@ class RayCastHungarianMatcher(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
         self.n_rays = n_rays or _const.N_RAYS
+        # LSP-DETR-exact matching: cost = 1*focal_class + 1*point_L1 +
+        # 1*log-space radial (measured from the PRED centroid) + 9999*inside-gate.
+        # Replaces the legacy static two-origin ray/polar-IoU cost terms.
+        self.lsp_mode = lsp_mode
 
     def forward(
         self,
@@ -144,35 +150,71 @@ class RayCastHungarianMatcher(nn.Module):
 
             pred_rays = p_poly[:, 2:]
             gt_rays = g_poly[:, 2:]
-            cost_ray = (pred_rays.unsqueeze(1) - gt_rays.unsqueeze(0)).abs().sum(-1)
-
             pred_xy = p_poly[:, :2]
             gt_xy = g_poly[:, :2]
-            cost_xy = (pred_xy.unsqueeze(1) - gt_xy.unsqueeze(0)).abs().sum(-1)
 
-            if nq > 0 and n_gt > 0:
-                pred_exp = pred_rays.unsqueeze(1).expand(nq, n_gt, -1)
-                gt_exp = gt_rays.unsqueeze(0).expand(nq, n_gt, -1)
-                piou = polar_iou_pairwise_flat_torch(pred_exp, gt_exp)
-                cost_piou = 1.0 - piou
+            if self.lsp_mode:
+                # LSP-DETR cost matrix: Wc*cls + Wp*point_L1 + Wr*radial + Wm*inner.
+                # All weights 1.0 except the near-hard inner gate (9999): a
+                # centroid outside a GT mask is effectively un-matchable.
+                cost_xy = (pred_xy.unsqueeze(1) - gt_xy.unsqueeze(0)).abs().sum(-1)  # point L1
+                inside = _points_inside_star(pred_xy, gt_xy, gt_rays, self.n_rays)  # (nq, n_gt) bool
+                # Radial cost is only meaningful where the query centroid is inside
+                # the GT polygon (outside pairs are overwritten with 1.0 below and
+                # dominated by the 9999 gate anyway). Solve ONLY those pairs with the
+                # O(m) paired kernel instead of the full (nq, n_gt, n_verts, R)
+                # broadcast — identical math, but peak memory drops from ~GBs (dense
+                # tiles: nq*ngt*64*64 intermediates) to O(inside_pairs). This was the
+                # per-epoch slowdown AND the post-epoch-1 OOM source.
+                cost_radial = torch.ones(nq, n_gt, device=pred_polygons.device, dtype=pred_polygons.dtype)
+                i_in, j_in = inside.nonzero(as_tuple=True)
+                if len(i_in) > 0:
+                    ray_cos, ray_sin = build_ray_directions(
+                        self.n_rays, device=pred_polygons.device, dtype=pred_polygons.dtype
+                    )
+                    # GT polygon in normalized space; radial target = distance from the
+                    # PRED centroid to the GT boundary along each ray (the self-consistent
+                    # analog of LSP's per-pixel rmin map — no static two-origin profile).
+                    gt_vertices = _normed_rays_to_vertices(gt_xy, gt_rays, 1.0, ray_cos, ray_sin)
+                    dnorm = _analytical_ray_distances_paired(
+                        pred_xy[i_in], gt_vertices[j_in], ray_cos, ray_sin
+                    )  # (m, R), m = #inside pairs
+                    log_pred = torch.clamp(pred_rays[i_in], min=1e-4).log()  # (m, R)
+                    log_tgt = torch.clamp(dnorm, min=1e-4).log()
+                    radial_in = (log_pred - log_tgt).abs().mean(-1)  # log-space L1 over rays
+                    cost_radial[i_in, j_in] = radial_in
+                cost = cost_class + cost_xy + cost_radial + 9999.0 * (~inside).float()
             else:
-                cost_piou = torch.zeros(nq, n_gt, device=pred_polygons.device)
+                cost_ray = (pred_rays.unsqueeze(1) - gt_rays.unsqueeze(0)).abs().sum(-1)
+                cost_xy = (pred_xy.unsqueeze(1) - gt_xy.unsqueeze(0)).abs().sum(-1)
 
-            # LSP-DETR inner-mask cost Wm: 0 if the predicted centroid is
-            # inside the GT nucleus, lambda otherwise. Dominates misassignment
-            # of displaced centroids (the train17 val->test gap culprit).
-            cost_inside = 0.0
-            if self.cost_gain.get('inside', 0.0) != 0.0:
-                inside = _points_inside_star(pred_xy, gt_xy, gt_rays, self.n_rays)
-                cost_inside = self.cost_gain['inside'] * (~inside).float()
+                if nq > 0 and n_gt > 0:
+                    pred_exp = pred_rays.unsqueeze(1).expand(nq, n_gt, -1)
+                    gt_exp = gt_rays.unsqueeze(0).expand(nq, n_gt, -1)
+                    piou = polar_iou_pairwise_flat_torch(pred_exp, gt_exp)
+                    cost_piou = 1.0 - piou
+                else:
+                    cost_piou = torch.zeros(nq, n_gt, device=pred_polygons.device)
 
-            cost = (
-                self.cost_gain['class'] * cost_class
-                + self.cost_gain['ray'] * (cost_ray + cost_xy)
-                + self.cost_gain['piou'] * cost_piou
-                + cost_inside
-            )
-            cost[cost.isnan() | cost.isinf()] = 0.0
+                # LSP-DETR inner-mask cost Wm: 0 if the predicted centroid is
+                # inside the GT nucleus, lambda otherwise. Dominates misassignment
+                # of displaced centroids (the train17 val->test gap culprit).
+                cost_inside = 0.0
+                if self.cost_gain.get('inside', 0.0) != 0.0:
+                    inside = _points_inside_star(pred_xy, gt_xy, gt_rays, self.n_rays)
+                    cost_inside = self.cost_gain['inside'] * (~inside).float()
+
+                cost = (
+                    self.cost_gain['class'] * cost_class
+                    + self.cost_gain['ray'] * (cost_ray + cost_xy)
+                    + self.cost_gain['piou'] * cost_piou
+                    + cost_inside
+                )
+            # Non-finite costs must NOT be attractive to linear_sum_assignment:
+            # filling 0.0 made degenerate/garbage pairs the *cheapest* and let
+            # them hijack the matching (poisoning supervision). Fill a large
+            # finite sentinel instead.
+            cost[cost.isnan() | cost.isinf()] = 1e6
 
             i, j = linear_sum_assignment(cost.cpu())
             indices.append((torch.tensor(i, dtype=torch.long), torch.tensor(j, dtype=torch.long) + gt_offset))
@@ -199,6 +241,8 @@ class NuLiteDETRLoss(nn.Module):
         n_rays=None,
         cost_inside=10.0,
         per_layer_match=False,
+        lsp_mode=False,
+        matcher_lsp=False,
     ):
         super().__init__()
         if loss_gain is None:
@@ -212,9 +256,13 @@ class NuLiteDETRLoss(nn.Module):
         self.no_object = no_object
         self.per_layer_match = per_layer_match
         self.n_rays = n_rays or _const.N_RAYS
+        # LSP-DETR-exact: drop polar-IoU/smooth regression terms, keep our
+        # calibrated xy/l1 gains, equal ∅/class columns, matcher gate ~9999.
+        self.lsp_mode = lsp_mode
         self.matcher = RayCastHungarianMatcher(
             cost_gain={'class': 2, 'ray': 5, 'piou': 2, 'inside': cost_inside},
             n_rays=self.n_rays,
+            lsp_mode=(lsp_mode or matcher_lsp),
         )
         from ultralytics.utils.loss import FocalLoss, VarifocalLoss
 
@@ -241,7 +289,10 @@ class NuLiteDETRLoss(nn.Module):
             # "no object" class (index nc). gain=1.0 == plain focal (LSP-DETR).
             no_obj_gain = self.loss_gain['no_object']
             per_col = torch.ones(self.nc + 1, device=one_hot.device, dtype=pred_scores.dtype)
-            per_col[-1] = no_obj_gain
+            if not self.lsp_mode:
+                # Legacy: extra gain on the ∅ column. LSP-DETR-exact leaves all
+                # nc+1 columns equal (plain focal).
+                per_col[-1] = no_obj_gain
             loss_cls = F.binary_cross_entropy_with_logits(
                 pred_scores, one_hot.float(), weight=per_col.view(1, 1, -1), reduction='none'
             )
@@ -279,7 +330,13 @@ class NuLiteDETRLoss(nn.Module):
         gt_rays_static = gt_polygons[:, 2:].float()
         n_gt = len(gt_polygons)
 
-        # L_xy: Huber on centroid (delta=0.05), FCN loss[0].
+        # L_xy: Huber on centroid (delta=0.05), FCN loss[0]. Same term in both
+        # modes: LSP-DETR uses plain centroid L1 at weight 1.0, but our 500 gain
+        # was calibrated for the saturating Huber (which caps per-element loss at
+        # delta*500 and gives a ~500*err gradient near convergence). Replacing it
+        # with L1 at the same gain made centroid the whole gradient budget
+        # (train4: xy ~60% of loss vs ~1% legacy) and starved the classifier, so
+        # detr_lsp keeps Huber; scale it via detr_xy_weight if needed.
         loss_xy = F.huber_loss(pred_xy, gt_xy, reduction='none', delta=0.05).mean(-1)
         loss[name_xy] = self.loss_gain['xy'] * loss_xy.sum() / n_gt
 
@@ -294,14 +351,20 @@ class NuLiteDETRLoss(nn.Module):
         loss_l1 = _log_space_ray_loss(pred_rays, analytical_target)
         loss[name_l1] = self.loss_gain['l1'] * loss_l1.sum() / n_gt
 
-        # L_piou: -log(polar IoU) vs STATIC GT rays, FCN loss[3].
-        piou = polar_iou_torch(pred_rays, gt_rays_static)
-        piou_loss = -torch.log(piou.clamp(min=1e-4))
-        loss[name_piou] = self.loss_gain['piou'] * piou_loss.sum() / n_gt
+        if self.lsp_mode:
+            # LSP-DETR-exact: no polar-IoU (their loss is cls + centroid L1 +
+            # log-space radial only) and no curvature smoothing.
+            loss[name_piou] = torch.tensor(0.0, device=pred_rays.device)
+            loss[name_smooth] = torch.tensor(0.0, device=pred_rays.device)
+        else:
+            # L_piou: -log(polar IoU) vs STATIC GT rays, FCN loss[3].
+            piou = polar_iou_torch(pred_rays, gt_rays_static)
+            piou_loss = -torch.log(piou.clamp(min=1e-4))
+            loss[name_piou] = self.loss_gain['piou'] * piou_loss.sum() / n_gt
 
-        # L_smooth: 2nd-order curvature regularisation, FCN loss[4].
-        smooth_loss = curvature_smoothness_loss_torch(pred_rays)
-        loss[name_smooth] = self.loss_gain['smooth'] * smooth_loss.sum() / n_gt
+            # L_smooth: 2nd-order curvature regularisation, FCN loss[4].
+            smooth_loss = curvature_smoothness_loss_torch(pred_rays)
+            loss[name_smooth] = self.loss_gain['smooth'] * smooth_loss.sum() / n_gt
 
         return {k: v.squeeze() for k, v in loss.items()}
 
@@ -426,12 +489,57 @@ class NuLiteDETRLoss(nn.Module):
         dec_polygons, dec_scores = preds
         self.device = dec_polygons.device
 
-        loss = self._get_loss(dec_polygons[-1], dec_scores[-1], gt_polygons, gt_cls, gt_groups, crop_size)
+        # ``respawn_layer_idx`` is the index of the appended respawn layer
+        # (set by NuLiteDETRDecoder._respawn_pass + the model's encoder-layer
+        # prepend offset). Stage-1 head loss stays on the layer BEFORE it;
+        # the respawn layer is supervised with RESIDUAL matching (GT unmatched
+        # in stage 1).
+        respawn_idx = getattr(self, 'respawn_layer_idx', None)
+        if respawn_idx is not None and respawn_idx >= 1 and len(dec_polygons) > respawn_idx:
+            main_idx = respawn_idx - 1
+        else:
+            main_idx = len(dec_polygons) - 1
+            respawn_idx = None
+        loss = self._get_loss(dec_polygons[main_idx], dec_scores[main_idx], gt_polygons, gt_cls, gt_groups, crop_size)
 
         if self.aux_loss:
             loss_aux = self._get_loss_aux(
-                dec_polygons[:-1], dec_scores[:-1], gt_polygons, gt_cls, gt_groups, crop_size
+                dec_polygons[:main_idx], dec_scores[:main_idx], gt_polygons, gt_cls, gt_groups, crop_size
             )
             loss.update(loss_aux)
+
+        # Respawn layer supervision with RESIDUAL matching: the appended
+        # pass-2 layer (see NuLiteDETRDecoder._respawn_pass) is matched only
+        # against GT that stage 1 failed to match, so a respawned query is
+        # trained to fire on what was missed and stay EMPTY on seed false
+        # positives - duplicates are trained away rather than suppressed.
+        if respawn_idx is not None:
+            s1_indices = self.matcher(
+                dec_polygons[respawn_idx - 1], dec_scores[respawn_idx - 1], gt_polygons, gt_cls, gt_groups
+            )
+            r_polygons, r_scores = dec_polygons[respawn_idx], dec_scores[respawn_idx]
+            r_loss = torch.zeros(5, device=dec_polygons.device)
+            off = 0
+            for b, n_gt in enumerate(gt_groups):
+                si, gj = s1_indices[b]
+                matched_local = set(gj.detach().cpu().tolist() if torch.is_tensor(gj) else list(gj))
+                keep = [li for li in range(n_gt) if li not in matched_local]
+                # residual GT subset for this image
+                sub_poly = gt_polygons[off + torch.tensor(keep, device=dec_polygons.device, dtype=torch.long)] \
+                    if keep else gt_polygons.new_zeros((0, gt_polygons.shape[-1]))
+                sub_cls = gt_cls[off + torch.tensor(keep, device=dec_polygons.device, dtype=torch.long)] \
+                    if keep else gt_cls.new_zeros((0,), dtype=gt_cls.dtype)
+                loss_ = self._get_loss(
+                    r_polygons[b:b + 1], r_scores[b:b + 1], sub_poly, sub_cls, [len(keep)], crop_size, postfix='_rs'
+                )
+                for kk, key in enumerate(
+                    ('loss_class_rs', 'loss_xy_rs', 'loss_l1_rs', 'loss_piou_rs', 'loss_smooth_rs')
+                ):
+                    r_loss[kk] += loss_[key]
+                off += n_gt
+            loss.update({
+                'loss_class_rs': r_loss[0], 'loss_xy_rs': r_loss[1], 'loss_l1_rs': r_loss[2],
+                'loss_piou_rs': r_loss[3], 'loss_smooth_rs': r_loss[4],
+            })
 
         return loss

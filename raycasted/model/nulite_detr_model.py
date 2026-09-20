@@ -7,10 +7,11 @@ NuLiteDETRLoss (Hungarian 1:1 matching + VFL + ray-L1 + polar-IoU).
 """
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from ultralytics.nn.tasks import DetectionModel
 
-from raycasted.model.blocks.nulite import NPHead, NuLiteEncoderDecoder, _ConvBlock
+from raycasted.model.blocks.nulite import NPHead, NuLiteEncoderDecoder, NuLiteSegOracle, _ConvBlock
 from raycasted.model.blocks.nulite_detr import NuLiteDETRDecoder
 from raycasted.model.nulite_detr_loss import NuLiteDETRLoss
 
@@ -38,6 +39,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         nc: int = 5,
         n_rays: int = 64,
         variant: str = 'fastvit_s12',
+        det_variant: str = 'fastvit_t12',
         pretrained: bool = True,
         lambda_seg: float = 1.0,
         nq: int = 300,
@@ -52,9 +54,22 @@ class NuLiteRayCastDETRModel(DetectionModel):
         no_object: bool = True,
         seed_in_content: bool = True,
         no_object_weight: float = 1.0,
+        cls_weight: float = 2.0,
+        piou_weight: float = 3.0,
+        xy_weight: float = 500.0,
         mds: bool = True,
         cost_inside: float = 10.0,
         per_layer_match: bool = False,
+        detr_lsp: bool = False,
+        detr_matcher_lsp: bool = False,
+        detr_layer_schedule: str = '',
+        hybrid_peaks: int = 100,
+        seed_level: bool = False,
+        seed_level_stride: int = 4,
+        query_block_size: float = 0.0,
+        content_top: bool = False,
+        seed_resize: str = 'bilinear',
+        seed_resize_frac: float = 0.25,
         seed_map_target: bool = True,
         use_decoder: bool = True,
         shared_layers: bool = False,
@@ -63,6 +78,12 @@ class NuLiteRayCastDETRModel(DetectionModel):
         use_seed: bool = True,
         yolo11_scale: str = 'n',
         yolo11_ckpt: str | None = None,
+        recast: bool = False,
+        recast_after_layer: int = 3,
+        recast_radius_px: float = 4.0,
+        respawn: bool = False,
+        respawn_peaks: int = 64,
+        respawn_min_seed: float = 0.5,
         verbose: bool = True,
     ):
         super(DetectionModel, self).__init__()
@@ -71,12 +92,28 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.lambda_seg = lambda_seg
         self.no_object = no_object
         self.no_object_weight = no_object_weight
+        self.cls_weight = cls_weight
+        self.piou_weight = piou_weight
+        self.xy_weight = xy_weight
         self.cost_inside = cost_inside
         self.per_layer_match = per_layer_match
+        self.detr_lsp = detr_lsp
+        self.detr_matcher_lsp = detr_matcher_lsp
+        self.detr_layer_schedule = detr_layer_schedule
+        self.seed_level = seed_level
+        self.seed_level_stride = seed_level_stride
+        self.query_block_size = query_block_size
+        self.content_top = content_top and backbone == 'nulite'
+        self.respawn = respawn
+        self.respawn_peaks = respawn_peaks
+        self.respawn_min_seed = respawn_min_seed
+        self.seed_resize = seed_resize
+        self.seed_resize_frac = seed_resize_frac
         self.seed_map_target = seed_map_target
         self.use_decoder = use_decoder
         self.backbone = backbone
         self.separable_decoder = separable_decoder
+        self.encoder_input_norm = '01'
         self.names = {i: str(i) for i in range(nc)}
         self.yaml = {'nc': nc, 'n_rays': n_rays, 'architecture': 'nulite_detr', 'variant': variant}
 
@@ -92,6 +129,54 @@ class NuLiteRayCastDETRModel(DetectionModel):
             self.use_decoder = False
             self.decoder0 = None
             self.np_head = NPHead(in_channels=dims[0]) if use_seed else None
+        elif backbone == 'dual':
+            # Dual-encoder, SPAR-Det CAHF-style FG/BG disentanglement:
+            #   frozen NuLite-T FastViT seg stream (no decoder) gates the
+            #   trainable yolo11 detection stream at every scale via a
+            #   multiplicative dual (deformable-spatial x SE-channel) attention
+            #   gate (Branch3Gate). No seed map / score-head cue (faithful CAHF).
+            from raycasted.model.blocks.nulite import Branch3Gate
+            from raycasted.model.blocks.yolo11_fpn import Yolo11FPNBackbone
+
+            self.seg_encoder = NuLiteEncoderDecoder(variant=variant, pretrained=False, use_decoder=False)
+            self.np_head = None
+            self.encoder_decoder = Yolo11FPNBackbone(scale=yolo11_scale, nc=nc, ch=3, verbose=False)
+            if yolo11_ckpt:
+                self.encoder_decoder.load_pretrained(yolo11_ckpt)
+            elif pretrained:
+                self.encoder_decoder.load_pretrained(f'yolo11{yolo11_scale}.pt')
+            dims = self.encoder_decoder.out_channels
+            self.use_decoder = False
+            self.decoder0 = None
+            seg_dims = self.seg_encoder.embed_dims  # [64,128,256,512] s12
+            assert list(dims[:3]) == seg_dims[:3], (
+                f'dual-encoder channel mismatch: det {list(dims[:3])} vs seg {seg_dims[:3]}'
+            )
+            # per-scale CAHF gates fusing the frozen seg stream into the det stream
+            self.cahf_gates = nn.ModuleList([Branch3Gate(c) for c in (dims[0], dims[1], dims[2])])
+            # the seg stream is frozen (pretrained FG/BG prior); NuLite-T weights
+            # are loaded into it later via load_nulite_ckpt().
+            self.seg_encoder.freeze_encoder()
+        elif backbone == 'two_stream':
+            # Two-stream baseline: a frozen NuLite-T oracle seg stream (s12 +
+            # separable decoder, full U-Net -> foreground map) + a separate
+            # trainable fastvit_t12 detection stream (encoder + NuLite decoder)
+            # + DETR head. The seg foreground map is fed to the DETR head as the
+            # per-query score cue (Q) and feature channel (F), decoupling 'where
+            # nuclei are' (frozen prior) from 'precise regression' (trainable det
+            # features) — the SPAR-Det FG/BG disentanglement mapped to our DETR
+            # readout (vs CAHF's dense feature gating, which missed the sparse
+            # per-query classifier).
+            self.seg_encoder = NuLiteSegOracle(variant=variant, separable_decoder=True)
+            self.encoder_decoder = NuLiteEncoderDecoder(
+                variant=det_variant, pretrained=pretrained, use_decoder=True, separable_decoder=False
+            )
+            dims = self.encoder_decoder.embed_dims  # [64,128,256,512] t12 st4/8/16/32
+            self.use_decoder = True
+            self.decoder0 = None
+            self.np_head = None
+            self.lambda_seg = 0.0  # seg loss is inert (frozen prior stream)
+            self.seg_encoder.requires_grad_(False)  # frozen FG/BG prior
         else:
             self.encoder_decoder = NuLiteEncoderDecoder(
                 variant=variant,
@@ -108,6 +193,15 @@ class NuLiteRayCastDETRModel(DetectionModel):
             else:
                 self.decoder0 = None
                 self.np_head = None
+        if backbone == 'dual':
+            # CAHF gating replaces the seed-map F/Q fusion entirely (no seed map
+            # is produced in dual mode), so the DETR head's seed conditioning is
+            # disabled and input_proj stays c-channel.
+            detr_seed_feature = False
+            detr_seed_in_content = False
+        else:
+            detr_seed_feature = seed_feature
+            detr_seed_in_content = seed_in_content
         self.detr = NuLiteDETRDecoder(
             nc=nc,
             ch=(dims[0], dims[1], dims[2]),
@@ -121,19 +215,46 @@ class NuLiteRayCastDETRModel(DetectionModel):
             peak_distance=peak_distance,
             grid_size=grid_size,
             query_selection=query_selection,
-            seed_feature=seed_feature,
+            seed_feature=detr_seed_feature,
             no_object=no_object,
-            seed_in_content=seed_in_content,
+            seed_in_content=detr_seed_in_content,
             mds=mds,
             shared_layers=shared_layers,
+            query_block_size=query_block_size,
+            content_top=self.content_top,
+            content_top_channels=dims[3] if (self.content_top and len(dims) > 3) else 0,
+            seed_resize=seed_resize,
+            seed_resize_frac=seed_resize_frac,
+            layer_schedule=detr_layer_schedule,
+            hybrid_peaks=hybrid_peaks,
+            seed_level=seed_level and backbone in ('nulite', 'two_stream'),
+            seed_level_stride=seed_level_stride,
+            recast=recast,
+            recast_after_layer=recast_after_layer,
+            recast_radius_px=recast_radius_px,
+            respawn=respawn,
+            respawn_peaks=respawn_peaks,
+            respawn_min_seed=respawn_min_seed,
         )
 
-        stride = torch.tensor([4.0, 8.0, 16.0])
+        # The decoder already stores the right stride vector (3 or 4 entries when
+        # the seed map is attended as an extra level); fall back to the default.
+        stride = getattr(self.detr, 'stride', None)
+        if stride is None:
+            stride = torch.tensor([4.0, 8.0, 16.0])
         self.detr.stride = stride
         self.stride = stride
 
-        if backbone == 'yolo11':
+        if backbone == 'dual':
+            self.model = (
+                [self.seg_encoder]
+                + ([self.np_head] if self.np_head is not None else [])
+                + [self.encoder_decoder, self.detr]
+            )
+        elif backbone == 'yolo11':
             self.model = [self.encoder_decoder] + ([self.np_head] if self.np_head is not None else []) + [self.detr]
+        elif backbone == 'two_stream':
+            self.model = [self.seg_encoder, self.encoder_decoder, self.detr]
         elif use_decoder:
             self.model = [self.encoder_decoder, self.decoder0, self.np_head, self.detr]
         else:
@@ -159,9 +280,36 @@ class NuLiteRayCastDETRModel(DetectionModel):
         Eval: returns (y, out) where y = (B, nq, raycast_dim + 2) in the Detect
         format [cx, cy, d1..dn, conf, cls] (eval_pannuke / val.py compatible).
         """
+        if getattr(self, 'backbone', 'nulite') == 'nulite' and getattr(self, 'encoder_input_norm', '01') == '11':
+            # Oracle-loaded NuLite encoder was trained on [-1, 1] input
+            # (0.5/0.5 normalization). Its frozen BN stats are calibrated to
+            # that distribution, so feed it the same domain; decoder0 is
+            # concatenated with the oracle decoder output and must match too.
+            x = (x - 0.5) / 0.5
         d = self.encoder_decoder(x)
-        if getattr(self, 'backbone', 'nulite') == 'yolo11':
+        if getattr(self, 'backbone', 'nulite') == 'dual':
+            # NuLite seg stream was trained with 0.5/0.5 normalization, i.e. it
+            # expects input in [-1, 1]; the det stream (yolo11) expects [0, 1].
+            # Gate the det stream features with the frozen seg features at each
+            # scale (SPAR-Det CAHF) — no seed map / score-head cue.
+            seg_x = (x - 0.5) / 0.5
+            d_seg = self.seg_encoder(seg_x)
+            seed = None
+            d = {
+                'b3': self.cahf_gates[0](d['b3'], d_seg['b3']),
+                'b4': self.cahf_gates[1](d['b4'], d_seg['b4']),
+                'b5': self.cahf_gates[2](d['b5'], d_seg['b5']),
+            }
+        elif getattr(self, 'backbone', 'nulite') == 'yolo11':
             seed = self.np_head(d['b3']) if getattr(self, 'np_head', None) is not None else None
+        elif getattr(self, 'backbone', 'nulite') == 'two_stream':
+            # Frozen NuLite-T oracle seg stream was trained on [-1, 1] input
+            # (0.5/0.5 normalization); the det stream expects raw [0, 1]. The
+            # 2-channel CE logits collapse to a foreground logit (sigmoid ==
+            # P(nucleus)) for the DETR seed cue.
+            seg_x = (x - 0.5) / 0.5
+            seg_logits = self.seg_encoder(seg_x)
+            seed = seg_logits[:, 1:2] - seg_logits[:, 0:1]
         elif getattr(self, 'use_decoder', True):
             x0 = self.decoder0(x)
             xt = torch.cat([x0, d['b1']], dim=1)
@@ -170,13 +318,14 @@ class NuLiteRayCastDETRModel(DetectionModel):
             seed = None
         self._last_seed = seed
 
-        out = self.detr([d['b3'], d['b4'], d['b5']], batch, seed_map=seed)
+        top_feat = d.get('top') if getattr(self.detr, 'content_top', False) else None
+        out = self.detr([d['b3'], d['b4'], d['b5']], batch, seed_map=seed, top_feat=top_feat)
         if self.training:
             return out
 
         y, out = out
         poly = y[..., : self.detr.raycast_dim]
-        scores = y[..., self.detr.raycast_dim:]  # already sigmoid prob (nc or nc+1)
+        scores = y[..., self.detr.raycast_dim :]  # already sigmoid prob (nc or nc+1)
         if self.no_object:
             # LSP-DETR: last column is the explicit "no object" prob.
             # conf = 1 - P(no-object); cls = argmax over the nc real classes.
@@ -204,14 +353,38 @@ class NuLiteRayCastDETRModel(DetectionModel):
         Focal loss with an explicit "no object" class (LSP-DETR style) when
         ``no_object`` is enabled; ``no_object_weight`` scales the ∅ column
         (>1 = suppress redundant per-nucleus queries harder).
+
+        With ``detr_lsp`` the criterion switches to LSP-DETR-exact terms: class
+        focal with EQUAL ∅/class columns (no per-column gain), centroid L1 +
+        log-space radial (analytical from the predicted centroid), no polar-IoU
+        or curvature smoothing, and a near-hard (9999) centroid-inside-GT
+        matching gate.
         """
+        if getattr(self, 'detr_lsp', False):
+            return NuLiteDETRLoss(
+                nc=self.nc,
+                loss_gain={
+                    'class': self.cls_weight,
+                    'xy': self.xy_weight,
+                    'l1': 14.0,
+                    'piou': 0.0,
+                    'smooth': 0.0,
+                    'no_object': 1.0,
+                },
+                use_vfl=False,
+                no_object=True,
+                n_rays=self.n_rays,
+                cost_inside=9999.0,
+                per_layer_match=self.per_layer_match,
+                lsp_mode=True,
+            )
         return NuLiteDETRLoss(
             nc=self.nc,
             loss_gain={
-                'class': 2.0,
-                'xy': 500.0,
+                'class': self.cls_weight,
+                'xy': self.xy_weight,
                 'l1': 14.0,
-                'piou': 3.0,
+                'piou': self.piou_weight,
                 'smooth': 0.0,
                 'no_object': self.no_object_weight,
             },
@@ -220,6 +393,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             n_rays=self.n_rays,
             cost_inside=self.cost_inside,
             per_layer_match=self.per_layer_match,
+            matcher_lsp=getattr(self, 'detr_matcher_lsp', False),
         )
 
     def loss(self, batch, preds=None):
@@ -264,6 +438,12 @@ class NuLiteRayCastDETRModel(DetectionModel):
         dec_polygons = torch.cat([enc_polygons.unsqueeze(0), dec_polygons], dim=0)
         dec_scores = torch.cat([enc_scores.unsqueeze(0), dec_scores], dim=0)
 
+        # Respawn pass: the decoder records which stack index is the stage-1
+        # final layer; here the encoder layer is prepended (+1 offset) so the
+        # criterion can residual-match the appended respawn layer.
+        rs_idx = getattr(self.detr, '_respawn_layer_idx', None)
+        self.criterion.respawn_layer_idx = (rs_idx + 1) if rs_idx is not None else None
+
         loss = self.criterion((dec_polygons, dec_scores), targets)
         total = sum(loss.values())
 
@@ -303,11 +483,38 @@ class NuLiteRayCastDETRModel(DetectionModel):
         return self
 
     def load_nulite_ckpt(self, ckpt_path):
-        """Load NuLite pretrained encoder/decoder weights."""
-        self.encoder_decoder.load_nulite_ckpt(ckpt_path)
+        """Load NuLite weights into the seg stream (dual) or encoder+decoder (nulite).
+
+        NuLite-T was trained with 0.5/0.5 normalization (input in [-1, 1]).
+        When the checkpoint lands in the single-stream ``nulite`` encoder (the
+        curriculum / oracle-init path), flag the model so ``predict`` feeds it
+        [-1, 1] input; a frozen oracle encoder otherwise receives [0, 1] images
+        and its BN stats see a shifted distribution. The ``dual`` stream applies
+        its own (x-0.5)/0.5 internally, so it is left alone. The ``two_stream``
+        seg oracle (full U-Net) loads via its own ``load_ckpt`` remap.
+        """
+        if getattr(self, 'backbone', 'nulite') == 'two_stream':
+            self.seg_encoder.load_ckpt(ckpt_path)
+            return
+        target = self.seg_encoder if getattr(self, 'backbone', 'nulite') == 'dual' else self.encoder_decoder
+        target.load_nulite_ckpt(ckpt_path)
+        if getattr(self, 'backbone', 'nulite') == 'nulite':
+            self.encoder_input_norm = '11'
 
     def freeze_encoder_decoder_np(self):
         """Freeze encoder + decoder + decoder0 + NP seed head."""
+        if getattr(self, 'backbone', 'nulite') == 'two_stream':
+            self.seg_encoder.requires_grad_(False)
+            self.encoder_decoder.freeze_encoder()
+            if getattr(self.encoder_decoder, 'use_decoder', True):
+                self.encoder_decoder.freeze_decoder()
+            return
+        if getattr(self, 'backbone', 'nulite') == 'dual':
+            self.seg_encoder.freeze_encoder()
+            self.encoder_decoder.freeze_backbone()
+            if getattr(self, 'np_head', None) is not None:
+                self.np_head.requires_grad_(False)
+            return
         if getattr(self, 'backbone', 'nulite') == 'yolo11':
             self.encoder_decoder.freeze_backbone()
             if getattr(self, 'np_head', None) is not None:

@@ -133,14 +133,14 @@ class NuLiteEncoderDecoder(nn.Module):
         """
         feats = list(self.encoder(x))  # [st4, st8, st16, st32]
         if not getattr(self, 'use_decoder', True):
-            return {'b3': feats[0], 'b4': feats[1], 'b5': feats[2], 'b1': None}
+            return {'b3': feats[0], 'b4': feats[1], 'b5': feats[2], 'b1': None, 'top': feats[3]}
         z4, z3, z2, z1 = feats[::-1]
         b5 = self.bottleneck_upsampler(z4)
         b4 = self.decoder4_upsampler(torch.cat([z3, b5], dim=1))
         b3 = self.decoder3_upsampler(torch.cat([z2, b4], dim=1))
         b2 = self.decoder2_upsampler(torch.cat([z1, b3], dim=1))
         b1 = self.decoder1_upsampler(b2)
-        return {'b3': b3, 'b4': b4, 'b5': b5, 'b1': b1}
+        return {'b3': b3, 'b4': b4, 'b5': b5, 'b1': b1, 'top': feats[3]}
 
     def freeze_encoder(self) -> None:
         """Freeze the FastViT encoder parameters."""
@@ -169,13 +169,167 @@ class NuLiteEncoderDecoder(nn.Module):
             if k.startswith('encoder.'):
                 ckpt_key = 'encoder.fast_vit.' + k[len('encoder.') :]
             elif k.startswith(
-                ('bottleneck_upsampler.', 'decoder4_upsampler.', 'decoder3_upsampler.',
-                 'decoder2_upsampler.', 'decoder1_upsampler.')
+                (
+                    'bottleneck_upsampler.',
+                    'decoder4_upsampler.',
+                    'decoder3_upsampler.',
+                    'decoder2_upsampler.',
+                    'decoder1_upsampler.',
+                )
             ):
                 ckpt_key = 'decoder.' + k
             if ckpt_key in state and state[ckpt_key].shape == v.shape:
                 remapped[k] = state[ckpt_key]
+        missing = [k for k in own if k not in remapped]
+        print(
+            f'NuLite ckpt load: {len(remapped)}/{len(own)} keys matched'
+            + (f' (missing {len(missing)}, e.g. {missing[:4]})' if missing else '')
+        )
         self.load_state_dict(remapped, strict=False)
+
+
+class NuLiteSegOracle(nn.Module):
+    """Frozen NuLite-T foreground oracle (segmentation prior stream).
+
+    Replicates the trained NuLite-T U-Net EXACTLY (encoder + decoder0 + full
+    upsample decoder + 2-channel np_head) so a fold1-only oracle checkpoint
+    saved by ``train_nulite_seg.py`` loads wholesale (state_dict key-for-key,
+    622 keys for the separable-decoder variant). Used as the frozen seg stream
+    in the two-stream baseline: it produces a 2-class CE logit map whose
+    foreground logit (``ch1 - ch0``) is the per-query foreground cue fed to the
+    DETR score head / feature conditioning.
+    """
+
+    def __init__(self, variant: str = 'fastvit_s12', separable_decoder: bool = True):
+        super().__init__()
+        self.encoder_decoder = NuLiteEncoderDecoder(
+            variant=variant, pretrained=False, use_decoder=True, separable_decoder=separable_decoder
+        )
+        emb0 = self.encoder_decoder.embed_dims[0]  # 64
+        self.decoder0 = _ConvBlock(3, emb0, 3, separable=False)
+        self.np_head = nn.Sequential(
+            _ConvBlock(2 * emb0, emb0),
+            nn.Conv2d(emb0, 2, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the full U-Net and return the 2-channel CE logits (B, 2, H, W)."""
+        d = self.encoder_decoder(x)
+        x0 = self.decoder0(x)
+        xt = torch.cat([x0, d['b1']], dim=1)
+        return self.np_head(xt)
+
+    def load_ckpt(self, ckpt_path: str) -> None:
+        """Load a NuLite-T oracle checkpoint into all four submodules.
+
+        Remaps our key layout onto the NuLite-T state-dict: ``encoder_decoder.
+        encoder.*`` -> ``encoder.fast_vit.*``, ``encoder_decoder.<branch>.*`` ->
+        ``decoder.<branch>.*``, ``decoder0.block.*`` -> ``decoder0.0.block.*``
+        (oracle decoder0 is a Sequential of one block). ``np_head.*`` matches
+        exactly and needs no remap.
+        """
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        state = ckpt.get('model_state_dict', ckpt.get('state_dict', ckpt))
+        own = self.state_dict()
+        remapped = {}
+        for k, v in own.items():
+            ck = k
+            if k.startswith('encoder_decoder.encoder.'):
+                ck = 'encoder.fast_vit.' + k[len('encoder_decoder.encoder.') :]
+            elif k.startswith('encoder_decoder.'):
+                ck = 'decoder.' + k[len('encoder_decoder.') :]
+            elif k.startswith('decoder0.'):
+                ck = 'decoder0.0.' + k[len('decoder0.') :]
+            if ck in state and state[ck].shape == v.shape:
+                remapped[k] = state[ck]
+        missing = [k for k in own if k not in remapped]
+        print(
+            f'NuLite seg-oracle load: {len(remapped)}/{len(own)} keys matched'
+            + (f' (missing {len(missing)}, e.g. {missing[:4]})' if missing else '')
+        )
+        self.load_state_dict(remapped, strict=False)
+
+
+class _DeformConv2d(nn.Module):
+    """Deformable conv with internally-computed offsets (mmcv DCN-style).
+
+    torchvision's DeformConv2d requires an explicit ``offset`` argument, so we
+    wrap it and compute the offset (2*deform_groups*k*k channels) via a
+    zero-initialized 3x3 conv, matching SPAR-Det's mmcv DCN.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        padding: int = 1,
+        bias: bool = False,
+        deform_groups: int = 1,
+    ):
+        from torchvision.ops import DeformConv2d
+
+        super().__init__()
+        self.deform = DeformConv2d(
+            in_channels, out_channels, kernel_size, stride, padding, bias=bias
+        )
+        offset_channels = 2 * deform_groups * kernel_size * kernel_size
+        self.conv_offset = nn.Conv2d(in_channels, offset_channels, kernel_size, stride, padding)
+        nn.init.zeros_(self.conv_offset.weight)
+        nn.init.zeros_(self.conv_offset.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute offsets and apply the deformable convolution."""
+        offset = self.conv_offset(x)
+        return self.deform(x, offset)
+
+
+class Branch3Gate(nn.Module):
+    """SPAR-Det CAHF fusion gate (foreground/background disentanglement).
+
+    Multiplicatively gates the detection feature ``x`` with a dual
+    (deformable-spatial x SE-channel) attention map derived from the FUSED
+    [det, seg] features. Faithful port of SPAR-Det's Branch3 (cahf.py:207-282):
+
+        px, py = conv1_1(x), conv1_1(y)
+        processed = cat[px, py]              # in//2 + in//2 == in channels
+        out = spatial_attention(processed) * channel_attention(processed) * x
+
+    ``x`` is the trainable detection-stream feature, ``y`` the frozen
+    segmentation-stream feature at the same scale (equal channels). The frozen
+    seg stream supplies the FG/BG identity; the gate selectively amplifies
+    foreground and suppresses background in the det stream (replacing ``x``,
+    not adding to it).
+    """
+
+    def __init__(self, in_channels: int):
+        super().__init__()
+        self.conv1_1 = nn.Conv2d(in_channels, in_channels // 2, kernel_size=1)
+        self.spatial_attention = nn.Sequential(
+            _DeformConv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.channel_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(1),
+            nn.Linear(in_channels, 2 * in_channels),
+            nn.ReLU(inplace=True),
+            nn.Linear(2 * in_channels, in_channels),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Gate det feature ``x`` by a dual attention map fused from [det, seg]."""
+        px = self.conv1_1(x)
+        py = self.conv1_1(y)
+        processed = torch.cat([px, py], dim=1)
+        spatial = self.spatial_attention(processed)
+        channel = self.channel_attention(processed).unsqueeze(-1).unsqueeze(-1)
+        return spatial * channel * x
 
 
 class NPHead(nn.Module):

@@ -208,6 +208,7 @@ class RayCastValidator(DetectionValidator):
             head = child
         self.raycast_dim = getattr(head, 'raycast_dim', 2 + _val_const.N_RAYS)
         self.n_rays = getattr(head, 'n_rays', _val_const.N_RAYS)
+        self.no_object = bool(getattr(head, 'no_object', False))
         configure_rays(self.n_rays)
 
     def finalize_metrics(self, *args, **kwargs):
@@ -242,12 +243,24 @@ class RayCastValidator(DetectionValidator):
                     }
                 )
         else:
-            # RTDETRDecoder format: per-class scores
-            cls_scores = pred_tensor[..., self.raycast_dim :]
-            conf, cls = cls_scores.max(dim=-1)
+            # RTDETRDecoder format: per-class scores. With the ∅ ("no object")
+            # head the last column is P(no-object); decode matching the eval_lsp
+            # protocol: drop a query iff its overall argmax is the ∅ column, and
+            # use conf = 1 - P(∅) with cls = argmax over the real classes (instead
+            # of a raw max over all nc+1 columns, which can select ∅ as a class).
+            all_scores = pred_tensor[..., self.raycast_dim :]
+            if self.no_object:
+                no_obj = all_scores[..., -1]
+                real_scores = all_scores[..., :-1]
+                is_bg = all_scores.argmax(dim=-1) == all_scores.shape[-1] - 1
+                conf = 1.0 - no_obj.sigmoid()
+                cls = real_scores.argmax(dim=-1)
+            else:
+                conf, cls = all_scores.max(dim=-1)
+                is_bg = torch.zeros_like(conf, dtype=torch.bool)
             outputs = []
             for i in range(pred_tensor.shape[0]):
-                mask = conf[i] > self.args.conf
+                mask = (conf[i] > self.args.conf) & (~is_bg[i])
                 outputs.append(
                     {
                         'bboxes': pred_tensor[i, mask, : self.raycast_dim],
