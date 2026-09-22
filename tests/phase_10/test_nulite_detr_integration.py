@@ -10,6 +10,7 @@ Run with: uv run python -m pytest tests/phase_10/test_nulite_detr_integration.py
 
 import os
 import tempfile
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -113,12 +114,18 @@ def _synthetic_batch(bs=2, anns=7, h=256, nc=5, n_rays=64):
     bboxes[:, 2:] = 0.02 + 0.04 * torch.rand(anns, n_rays)
     seed_map = torch.zeros(bs, 1, h, h)
     seed_map[:, :, 40:50, 40:50] = 1.0
+    np_mask = torch.zeros(bs, 1, h, h)
+    np_mask[:, :, 40:50, 40:50] = 1.0
+    semantic_mask = torch.zeros(bs, h, h, dtype=torch.long)
+    semantic_mask[:, 40:50, 40:50] = 1
     return {
         'img': torch.rand(bs, 3, h, h),
         'batch_idx': torch.zeros(anns, dtype=torch.long),
         'cls': torch.randint(0, nc, (anns,)),
         'bboxes': bboxes,
         'seed_map': seed_map,
+        'np_mask': np_mask,
+        'semantic_mask': semantic_mask,
     }
 
 
@@ -156,6 +163,66 @@ def test_detr_eval_forward_detect_format():
         print('PASS: eval (1,400,68) Detect format, pixel-scaled')
 
 
+def test_two_stream_oracle_stays_in_eval_mode():
+    """The frozen oracle must not update BatchNorm statistics during detector training."""
+    model = NuLiteRayCastDETRModel(
+        nc=5,
+        n_rays=64,
+        variant='fastvit_t8',
+        det_variant='fastvit_t8',
+        backbone='two_stream',
+        pretrained=False,
+        nq=16,
+        ndl=2,
+        hd=32,
+        d_ffn=64,
+        grid_size=0.25,
+        verbose=False,
+    )
+    model.train()
+    assert not model.seg_encoder.training
+    assert not any(p.requires_grad for p in model.seg_encoder.parameters())
+    assert not any(
+        module.training for module in model.seg_encoder.modules() if isinstance(module, torch.nn.BatchNorm2d)
+    )
+
+
+def test_trainer_optimizer_re_freezes_oracle_after_ultralytics_setup():
+    """The trainer must undo Ultralytics' blanket re-enable before training begins."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tcfg = {
+            **DETR_TCFG,
+            'detr_backbone': 'two_stream',
+            'nulite_variant': 'fastvit_t8',
+            'det_variant': 'fastvit_t8',
+            'detr_nq': 16,
+            'detr_ndl': 2,
+            'detr_hd': 32,
+            'detr_d_ffn': 64,
+            'detr_grid_size': 0.25,
+        }
+        trainer = _make_trainer(tmp_dir, tcfg)
+        model = _setup_model(trainer)
+
+        # This reproduces BaseTrainer._setup_train's blanket requires_grad=True
+        # path when args.freeze is empty.
+        model.requires_grad_(True)
+        assert any(p.requires_grad for p in model.seg_encoder.parameters())
+
+        trainer.build_optimizer(model, name='SGD', lr=1e-3, momentum=0.9, decay=0.0, iterations=1)
+        assert not any(p.requires_grad for p in model.seg_encoder.parameters())
+        model.train()
+        assert not model.seg_encoder.training
+
+
+def test_no_object_winners_have_zero_compact_confidence():
+    """Compact detector output must not turn an argmax-no-object query into a detection."""
+    scores = torch.tensor([[[0.1, 0.2, 0.3, 0.4, 0.5, 0.9]]])
+    conf, cls = NuLiteRayCastDETRModel._compact_no_object_scores(scores)
+    assert conf.item() == 0.0
+    assert cls.item() == 4
+
+
 def test_detr_loss_backward():
     """Train loss backward is finite (s12, full seed path)."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -169,6 +236,125 @@ def test_detr_loss_backward():
         n_tot = sum(1 for p in model.parameters())
         assert n_grad > 0.8 * n_tot, f'grad coverage {n_grad}/{n_tot}'
         print(f'PASS: loss backward finite ({total.item():.1f}), grads {n_grad}/{n_tot}')
+
+
+def test_dense_aux_supervision_is_training_only():
+    """Dense auxiliary losses backpropagate through the pyramid and are bypassed in eval."""
+    model = NuLiteRayCastDETRModel(
+        nc=5,
+        n_rays=64,
+        variant='fastvit_t8',
+        pretrained=False,
+        nq=100,
+        ndl=1,
+        hd=64,
+        d_ffn=128,
+        grid_size=0.1,
+        aux_dense_weight=0.2,
+        verbose=False,
+    )
+    batch = _synthetic_batch(bs=1, anns=4, h=128)
+    model.train()
+    total, items = model.loss(batch)
+    total.backward()
+    assert torch.isfinite(total).item()
+    assert items.shape == (7,)
+    assert all(p.grad is not None for p in model.aux_dense_head.parameters())
+
+    model.eval()
+    with torch.no_grad():
+        output, _ = model(batch['img'])
+    assert output.shape == (1, 100, 68)
+    assert model._last_aux_dense is None
+
+
+def test_segmentation_guided_foreground_margin_backward():
+    """Matched-query segmentation evidence adds a finite foreground-margin loss."""
+    model = NuLiteRayCastDETRModel(
+        nc=5,
+        n_rays=64,
+        variant='fastvit_t8',
+        pretrained=False,
+        nq=100,
+        ndl=1,
+        hd=64,
+        d_ffn=128,
+        grid_size=0.1,
+        seg_fg_margin_weight=0.5,
+        seg_fg_margin=1.0,
+        seg_fg_radius_px=4.0,
+        verbose=False,
+    )
+    model.train()
+    total, items = model.loss(_synthetic_batch(bs=1, anns=4, h=128))
+    total.backward()
+    assert torch.isfinite(total).item()
+    assert items.shape == (6,)
+    assert items[-1] >= 0
+    assert any(p.grad is not None for p in model.detr.dec_score_head.parameters())
+
+
+def test_layerwise_segmentation_margin_uses_post_recast_layers_and_independent_matching():
+    """Layer weights select decoder 4-6 and match each selected layer independently."""
+    model = object.__new__(NuLiteRayCastDETRModel)
+    torch.nn.Module.__init__(model)
+    model.seg_fg_margin_layer_weights = (0.0, 0.0, 0.0, 0.25, 0.5, 1.0)
+    model.seg_fg_radius_px = 4.0
+    model.seg_fg_margin = 1.0
+
+    calls = []
+
+    def matcher(polygons, scores, gt_polygons, gt_cls, gt_groups):
+        calls.append(int(polygons[0, 0, 2].item()))
+        return [(torch.tensor([0]), torch.tensor([0]))]
+
+    model.criterion = SimpleNamespace(matcher=matcher)
+    polygons = torch.full((7, 1, 2, 66), 0.5)
+    for layer_idx in range(7):
+        polygons[layer_idx, :, :, 2] = layer_idx
+    scores = torch.zeros(7, 1, 2, 6, requires_grad=True)
+    targets = {
+        'bboxes': torch.zeros(1, 66),
+        'cls': torch.tensor([0]),
+    }
+    seed = torch.full((1, 1, 32, 32), 20.0)
+
+    margin = model._segmentation_foreground_margin(polygons, scores, targets, [1], seed)
+    margin.backward()
+
+    assert calls == [4, 5, 6]
+    assert torch.isclose(margin, torch.tensor(1.75), atol=1e-5)
+    assert scores.grad[:4].abs().sum() == 0
+    assert scores.grad[4:].abs().sum() > 0
+
+
+def test_layerwise_segmentation_margin_accepts_final_layer_only_validation_output():
+    """Eval exposes one decoder layer and uses the configured final-layer multiplier."""
+    model = object.__new__(NuLiteRayCastDETRModel)
+    torch.nn.Module.__init__(model)
+    model.seg_fg_margin_layer_weights = (0.0, 0.0, 0.0, 0.25, 0.5, 1.0)
+    model.seg_fg_radius_px = 4.0
+    model.seg_fg_margin = 1.0
+
+    calls = []
+
+    def matcher(polygons, scores, gt_polygons, gt_cls, gt_groups):
+        calls.append(1)
+        return [(torch.tensor([0]), torch.tensor([0]))]
+
+    model.criterion = SimpleNamespace(matcher=matcher)
+    polygons = torch.full((2, 1, 2, 66), 0.5)
+    scores = torch.zeros(2, 1, 2, 6, requires_grad=True)
+    targets = {'bboxes': torch.zeros(1, 66), 'cls': torch.tensor([0])}
+    seed = torch.full((1, 1, 32, 32), 20.0)
+
+    margin = model._segmentation_foreground_margin(polygons, scores, targets, [1], seed)
+    margin.backward()
+
+    assert calls == [1]
+    assert torch.isclose(margin, torch.tensor(1.0), atol=1e-5)
+    assert scores.grad[0].abs().sum() == 0
+    assert scores.grad[1].abs().sum() > 0
 
 
 def test_fastvit_t8_variant():

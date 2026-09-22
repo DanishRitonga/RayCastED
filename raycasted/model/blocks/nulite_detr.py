@@ -56,7 +56,11 @@ class SegmentationQueryRecast(nn.Module):
         descriptor = (local * fg).sum(-1) / fg.sum(-1).clamp_min(1e-6)
         descriptor = descriptor.transpose(1, 2)
         evidence = fg.mean(-1).transpose(1, 2)
-        bg = scores.detach().softmax(-1)[..., -1:]
+        # The score heads are trained with independent sigmoid/focal targets,
+        # including the explicit no-object column.  Keep routing semantics
+        # aligned with matching and inference; a softmax here would make the
+        # gate depend on the number and relative scale of real-class logits.
+        bg = scores.detach()[..., -1:].sigmoid()
         gate = torch.sigmoid(self.gate(torch.cat((queries, bg, evidence), -1)))
         gate = gate * bg * evidence
         return queries + gate * self.projection(descriptor)
@@ -411,9 +415,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
                         vals = patches.topk(k, dim=1).values.mean(dim=1)  # (B, n_cells)
                         resized = vals.reshape(seed_prob.shape[0], 1, th, tw)
                     else:
-                        resized = F.interpolate(
-                            seed_prob, size=size, mode='bilinear', align_corners=False
-                        )
+                        resized = F.interpolate(seed_prob, size=size, mode='bilinear', align_corners=False)
                 else:
                     resized = F.interpolate(seed_prob, size=size, mode='bilinear', align_corners=False)
                 seed_feats.append(torch.cat([feat, resized], dim=1))
@@ -474,8 +476,8 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             # centroid) and freezes xy/l1/piou; the residual logit chain then
             # cannot recover. Peak slots already start on the nucleus, so
             # confinement is unnecessary (train26 trained fine without it).
-            embed, refer_centroids, refer_polygon_logits, enc_polygons, enc_scores, seed_pts = (
-                self._seed_decoder_input(feats, proj2d, seed_map, dn_embed, dn_bbox)
+            embed, refer_centroids, refer_polygon_logits, enc_polygons, enc_scores, seed_pts = self._seed_decoder_input(
+                feats, proj2d, seed_map, dn_embed, dn_bbox
             )
             p0 = None
             confine_s = None
@@ -484,16 +486,24 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         else:
             # Learned selection across all tokens; no grid-cell confinement.
             embed, refer_centroids, refer_polygon_logits, enc_polygons, enc_scores, seed_pts = (
-                self._learned_decoder_input(
-                    feats, shapes, seed_map=seed_map, dn_embed=dn_embed, dn_bbox=dn_bbox
-                )
+                self._learned_decoder_input(feats, shapes, seed_map=seed_map, dn_embed=dn_embed, dn_bbox=dn_bbox)
             )
             if self.seed_in_content and seed_map is not None:
                 seed_q = self._sample_seed_at(seed_map, seed_pts)
 
         dec_polygons, dec_scores = self._raycast_decoder(
-            embed, refer_centroids, refer_polygon_logits, feats, shapes, attn_mask, p0=p0, confine_s=confine_s,
-            seed_q=seed_q, enc_scores=enc_scores, recast_features=proj2d[0], recast_seed=seed_map
+            embed,
+            refer_centroids,
+            refer_polygon_logits,
+            feats,
+            shapes,
+            attn_mask,
+            p0=p0,
+            confine_s=confine_s,
+            seed_q=seed_q,
+            enc_scores=enc_scores,
+            recast_features=proj2d[0],
+            recast_seed=seed_map,
         )
 
         if self.respawn and seed_map is not None:
@@ -538,7 +548,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             )
             grid_xy = torch.stack([grid_x, grid_y], -1)  # (h, w, 2)
             grid_xy = (grid_xy + 0.5) / torch.tensor([w, h], device=device, dtype=dtype)
-            base_radius = self.grid_size * 2 ** i
+            base_radius = self.grid_size * 2**i
             rays = torch.full((h, w, self.n_rays), base_radius, device=device, dtype=dtype)
             anchor = torch.cat([grid_xy, rays], -1)  # (h, w, 2+n_rays)
             anchors.append(anchor.view(1, -1, self.raycast_dim))
@@ -759,7 +769,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             npool, ninds = F.max_pool2d(
                 -seed_prob, kernel_size=kernel, stride=1, padding=self.peak_distance, return_indices=True
             )
-            is_min = (ninds == inds)  # (B,1,s_h,s_w)
+            is_min = ninds == inds  # (B,1,s_h,s_w)
             bg_vals = flat.masked_fill(~is_min.flatten(2).squeeze(1), float('inf'))
             _, bg_idx = torch.topk(bg_vals, k_sel, dim=1, largest=False)
             bg_pos = idx_to_pos(bg_idx)
@@ -824,9 +834,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         features = self.enc_output(valid_mask * feats)
         all_positions = decode_polygon(anchors)[..., :2].expand(bs, -1, -1)  # (B, N, 2) normalized xy
         seed_all = (
-            self._sample_seed_at(seed_map, all_positions)
-            if self.seed_in_content and seed_map is not None
-            else None
+            self._sample_seed_at(seed_map, all_positions) if self.seed_in_content and seed_map is not None else None
         )
         enc_outputs_scores = self._score(self.enc_score_head, features, seed_all)  # (B, N, nc+1)
         # Rank by the best REAL class score: with no_object=True the head emits
@@ -843,9 +851,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         enc_polygons = decode_polygon(refer_polygon_logits)
         refer_centroids = enc_polygons[..., :2]
         enc_scores = enc_outputs_scores[batch_ind, topk_ind].view(bs, self.num_queries, -1)
-        embeddings = (
-            self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1) if self.learnt_init_query else top_k_features
-        )
+        embeddings = self.tgt_embed.weight.unsqueeze(0).repeat(bs, 1, 1) if self.learnt_init_query else top_k_features
 
         if self.training:
             refer_polygon_logits = refer_polygon_logits.detach()
@@ -947,11 +953,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         # a seed maximum, so this is a strong foreground cue) and concat to the
         # score-head input exactly like the grid branch. Without this the head is
         # fed width hd while seed_in_content built it for hd+1 -> crash.
-        seed_q = (
-            self._sample_seed_at(seed_map, centroids)
-            if self.seed_in_content and seed_map is not None
-            else None
-        )
+        seed_q = self._sample_seed_at(seed_map, centroids) if self.seed_in_content and seed_map is not None else None
         enc_scores = self._score(self.enc_score_head, content, seed_q)
         embeddings = content
 
@@ -1029,8 +1031,8 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         nl = dec_polygons.shape[0]
         nb, nq = dec_scores.shape[1], dec_scores.shape[2]
         device = dec_polygons.device
-        final_polys = dec_polygons[-1]           # (B, nq, 2+R) normalized
-        final_logits = dec_scores[-1]            # (B, nq, nc+1) raw logits
+        final_polys = dec_polygons[-1]  # (B, nq, 2+R) normalized
+        final_logits = dec_scores[-1]  # (B, nq, nc+1) raw logits
         fired = (
             final_logits.argmax(-1) != self.nc
             if self.no_object
@@ -1038,11 +1040,11 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         )
         empty_conf = final_logits[..., -1] if self.no_object else -final_logits.max(-1).values
 
-        seed_prob = seed_map.sigmoid()           # (B, 1, H, W); for EDT maps this is normalized distance
+        seed_prob = seed_map.sigmoid()  # (B, 1, H, W); for EDT maps this is normalized distance
         k = 2 * self.peak_distance + 1
         pooled_idx = F.max_pool2d(seed_prob, k, 1, k // 2, return_indices=True)[1]
-        own_idx = torch.arange(pooled_idx.flatten(2).shape[-1], device=device).view(1, 1, -1).expand_as(
-            pooled_idx.flatten(2)
+        own_idx = (
+            torch.arange(pooled_idx.flatten(2).shape[-1], device=device).view(1, 1, -1).expand_as(pooled_idx.flatten(2))
         )
         is_peak = (pooled_idx.flatten(2) == own_idx) & (seed_prob.flatten(2) > self.respawn_min_seed)
         is_peak = is_peak.view(nb, seed_prob.shape[-2], seed_prob.shape[-1])  # (B, H, W)
@@ -1052,9 +1054,9 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         # (the old `_raycast_decoder(feats[b:b+1])` serialized 16 forwards and
         # caused the ~2.3x epoch slowdown). Non-victims keep stage-1 content and
         # anchors; victims are re-anchored onto uncovered peaks.
-        p2_embed = embed.clone()                                   # (B, nq, hd)
+        p2_embed = embed.clone()  # (B, nq, hd)
         p2_refer_logits = encode_polygon(final_polys.clamp(1e-4, 1 - 1e-4))  # (B, nq, raycast_dim)
-        p2_pos = final_polys[:, :, :2].clone()                     # seed_q2 sampling positions
+        p2_pos = final_polys[:, :, :2].clone()  # seed_q2 sampling positions
         victim_mask = torch.zeros(nb, nq, dtype=torch.bool, device=device)
 
         for b in range(nb):
@@ -1101,10 +1103,17 @@ class NuLiteDETRDecoder(RTDETRDecoder):
 
             # content: sample the projected finest level at the peak positions
             src = proj2d[0][b]  # (hd, h, w)
-            content = F.grid_sample(
-                src.unsqueeze(0), cand_xy[:kk].view(1, 1, -1, 2) * 2 - 1, mode='bilinear',
-                align_corners=False, padding_mode='border'
-            ).flatten(2).permute(0, 2, 1)  # (1, K, hd)
+            content = (
+                F.grid_sample(
+                    src.unsqueeze(0),
+                    cand_xy[:kk].view(1, 1, -1, 2) * 2 - 1,
+                    mode='bilinear',
+                    align_corners=False,
+                    padding_mode='border',
+                )
+                .flatten(2)
+                .permute(0, 2, 1)
+            )  # (1, K, hd)
             content = self.enc_output(content)
 
             p2_embed[b, victim_idx] = content[0]
@@ -1118,9 +1127,17 @@ class NuLiteDETRDecoder(RTDETRDecoder):
 
         # 4. single batched second pass through the shared layers.
         polys2, logits2 = self._raycast_decoder(
-            p2_embed, p2_refer_logits[:, :, :2].clone(), p2_refer_logits.clone(),
-            feats, shapes, attn_mask,
-            p0=None, confine_s=None, seed_q=seed_q2, enc_scores=None
+            p2_embed,
+            p2_refer_logits[:, :, :2].clone(),
+            p2_refer_logits.clone(),
+            feats,
+            shapes,
+            attn_mask,
+            p0=None,
+            confine_s=None,
+            seed_q=seed_q2,
+            enc_scores=None,
+            recast_seed=seed_map,
         )
 
         # stage-2 final output: victims get their respawned refinement;
@@ -1137,8 +1154,19 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         return out_polygons, out_scores
 
     def _raycast_decoder(
-        self, embed, refer_centroids, refer_polygon_logits, feats, shapes, attn_mask, p0=None, confine_s=None,
-        seed_q=None, enc_scores=None, recast_features=None, recast_seed=None
+        self,
+        embed,
+        refer_centroids,
+        refer_polygon_logits,
+        feats,
+        shapes,
+        attn_mask,
+        p0=None,
+        confine_s=None,
+        seed_q=None,
+        enc_scores=None,
+        recast_features=None,
+        recast_seed=None,
     ):
         """Iterative-refinement decoder over the deformable transformer layers.
 
@@ -1199,7 +1227,15 @@ class NuLiteDETRDecoder(RTDETRDecoder):
                 refined = refined.clone()
                 refined[..., :2] = p0 + confine_s * torch.tanh((refined[..., :2] - p0) / confine_s)
 
-            scores_i = self._score(self.dec_score_head[i], output, seed_q)
+            # Classification describes the polygon predicted by this layer.
+            # Resample the direct seed cue at its current centroid rather than
+            # reusing the query's initial grid/peak location.  Detaching the
+            # centroid preserves the seed cue as routing evidence, not a path
+            # for the classification loss to move the regression output.
+            layer_seed_q = seed_q
+            if self.seed_in_content and recast_seed is not None:
+                layer_seed_q = self._sample_seed_at(recast_seed, refined[..., :2].detach())
+            scores_i = self._score(self.dec_score_head[i], output, layer_seed_q)
             if self.training:
                 dec_cls.append(scores_i)
                 dec_polygons.append(refined)

@@ -16,6 +16,32 @@ from raycasted.model.blocks.nulite_detr import NuLiteDETRDecoder
 from raycasted.model.nulite_detr_loss import NuLiteDETRLoss
 
 
+class DenseAuxHead(nn.Module):
+    """Training-only semantic supervision for the trainable detection pyramid."""
+
+    def __init__(self, channels: tuple[int, int, int], nc: int, hidden: int = 32):
+        super().__init__()
+        self.projections = nn.ModuleList([nn.Conv2d(c, hidden, 1) for c in channels])
+        self.fuse = nn.Sequential(
+            nn.Conv2d(hidden * 3, hidden, 3, padding=1, bias=False),
+            nn.BatchNorm2d(hidden),
+            nn.ReLU(inplace=True),
+        )
+        self.objectness = nn.Conv2d(hidden, 1, 1)
+        self.types = nn.Conv2d(hidden, nc, 1)
+
+    def forward(self, features: tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
+        """Fuse the three pyramid levels and return objectness and type logits."""
+        size = features[0].shape[-2:]
+        projected = [self.projections[0](features[0])]
+        projected.extend(
+            F.interpolate(proj(feat), size=size, mode='bilinear', align_corners=False)
+            for proj, feat in zip(self.projections[1:], features[1:])
+        )
+        fused = self.fuse(torch.cat(projected, dim=1))
+        return self.objectness(fused), self.types(fused)
+
+
 class NuLiteRayCastDETRModel(DetectionModel):
     """Single-head DETR detector on the NuLite seg backbone.
 
@@ -84,6 +110,12 @@ class NuLiteRayCastDETRModel(DetectionModel):
         respawn: bool = False,
         respawn_peaks: int = 64,
         respawn_min_seed: float = 0.5,
+        aux_dense_weight: float = 0.0,
+        aux_dense_type_weight: float = 1.0,
+        seg_fg_margin_weight: float = 0.0,
+        seg_fg_margin: float = 1.0,
+        seg_fg_radius_px: float = 4.0,
+        seg_fg_margin_layer_weights: list[float] | tuple[float, ...] | None = None,
         verbose: bool = True,
     ):
         super(DetectionModel, self).__init__()
@@ -110,6 +142,14 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.seed_resize = seed_resize
         self.seed_resize_frac = seed_resize_frac
         self.seed_map_target = seed_map_target
+        self.aux_dense_weight = aux_dense_weight
+        self.aux_dense_type_weight = aux_dense_type_weight
+        self.seg_fg_margin_weight = seg_fg_margin_weight
+        self.seg_fg_margin = seg_fg_margin
+        self.seg_fg_radius_px = seg_fg_radius_px
+        self.seg_fg_margin_layer_weights = tuple(float(w) for w in (seg_fg_margin_layer_weights or ()))
+        if any(w < 0 for w in self.seg_fg_margin_layer_weights):
+            raise ValueError('seg_fg_margin_layer_weights must be non-negative')
         self.use_decoder = use_decoder
         self.backbone = backbone
         self.separable_decoder = separable_decoder
@@ -177,6 +217,11 @@ class NuLiteRayCastDETRModel(DetectionModel):
             self.np_head = None
             self.lambda_seg = 0.0  # seg loss is inert (frozen prior stream)
             self.seg_encoder.requires_grad_(False)  # frozen FG/BG prior
+            # ``requires_grad_(False)`` does not freeze BatchNorm running
+            # statistics. Keep the oracle in eval mode from construction; the
+            # overridden ``train`` method below also restores this after the
+            # parent model changes modes.
+            self.seg_encoder.eval()
         else:
             self.encoder_decoder = NuLiteEncoderDecoder(
                 variant=variant,
@@ -236,6 +281,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             respawn_peaks=respawn_peaks,
             respawn_min_seed=respawn_min_seed,
         )
+        self.aux_dense_head = DenseAuxHead((dims[0], dims[1], dims[2]), nc) if self.aux_dense_weight > 0 else None
 
         # The decoder already stores the right stride vector (3 or 4 entries when
         # the seed map is attended as an extra level); fall back to the default.
@@ -271,6 +317,26 @@ class NuLiteRayCastDETRModel(DetectionModel):
             print(f'NuLiteRayCastDETRModel: {n_params / 1e6:.2f}M params')
 
     # -- inference path -----------------------------------------------------
+
+    def train(self, mode: bool = True):
+        """Set train/eval mode while keeping the two-stream oracle immutable."""
+        super().train(mode)
+        if getattr(self, 'backbone', None) == 'two_stream':
+            # Ultralytics' setup loop can re-enable every floating parameter
+            # before it builds the optimizer.  Keeping this here as well makes
+            # every later train-mode transition restore the oracle contract.
+            self.seg_encoder.requires_grad_(False)
+            self.seg_encoder.eval()
+        return self
+
+    @staticmethod
+    def _compact_no_object_scores(scores: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Convert sigmoid DETR scores to compact confidence and real-class id."""
+        p_no_obj = scores[..., -1:]
+        is_bg = scores.argmax(-1, keepdim=True) == scores.shape[-1] - 1
+        conf = (1.0 - p_no_obj).clamp(min=0.0).masked_fill(is_bg, 0.0)
+        cls = scores[..., :-1].argmax(-1, keepdim=True)
+        return conf, cls
 
     def predict(self, x, profile=False, visualize=False, batch=None, augment=False, embed=None, *args, **kwargs):
         """Run encoder -> decoder -> seed head -> DETR decoder.
@@ -317,6 +383,9 @@ class NuLiteRayCastDETRModel(DetectionModel):
         else:
             seed = None
         self._last_seed = seed
+        self._last_aux_dense = None
+        if self.training and self.aux_dense_head is not None:
+            self._last_aux_dense = self.aux_dense_head((d['b3'], d['b4'], d['b5']))
 
         top_feat = d.get('top') if getattr(self.detr, 'content_top', False) else None
         out = self.detr([d['b3'], d['b4'], d['b5']], batch, seed_map=seed, top_feat=top_feat)
@@ -328,10 +397,11 @@ class NuLiteRayCastDETRModel(DetectionModel):
         scores = y[..., self.detr.raycast_dim :]  # already sigmoid prob (nc or nc+1)
         if self.no_object:
             # LSP-DETR: last column is the explicit "no object" prob.
-            # conf = 1 - P(no-object); cls = argmax over the nc real classes.
-            p_no_obj = scores[..., -1:]
-            conf = (1.0 - p_no_obj).clamp(min=0.0)
-            cls = scores[..., :-1].argmax(-1, keepdim=True)
+            # A compact [polygon, conf, class] output cannot carry an explicit
+            # background label, so zero its confidence whenever no-object wins
+            # the all-class argmax. This matches eval_lsp and prevents the
+            # generic validator from treating a background query as foreground.
+            conf, cls = self._compact_no_object_scores(scores)
         else:
             conf = scores.max(-1, keepdim=True).values
             cls = scores.argmax(-1, keepdim=True)
@@ -396,6 +466,73 @@ class NuLiteRayCastDETRModel(DetectionModel):
             matcher_lsp=getattr(self, 'detr_matcher_lsp', False),
         )
 
+    def _segmentation_foreground_margin(self, dec_polygons, dec_scores, targets, gt_groups, seed):
+        """Apply segmentation-guided true-class margins at selected decoder layers.
+
+        ``dec_polygons`` and ``dec_scores`` include the encoder proposal stage
+        at index zero. Configured weights correspond only to decoder layers
+        1..N. An empty weight list preserves the train35/36 final-layer-only
+        behavior. Every selected layer receives its own Hungarian assignment.
+        """
+        zero = dec_scores.sum() * 0.0
+        n_decoder_layers = len(dec_scores) - 1
+        configured = getattr(self, 'seg_fg_margin_layer_weights', ())
+        if configured:
+            if len(configured) == n_decoder_layers:
+                selected = [(layer_idx, weight) for layer_idx, weight in enumerate(configured, start=1) if weight > 0]
+            elif n_decoder_layers == 1:
+                # Evaluation returns only decoder.eval_idx (the final layer),
+                # so retain its configured multiplier for loss telemetry.
+                selected = [(1, configured[-1])] if configured[-1] > 0 else []
+            else:
+                raise ValueError(
+                    'seg_fg_margin_layer_weights must contain one value per decoder layer '
+                    f'({len(configured)} configured, {n_decoder_layers} decoder layers)'
+                )
+        else:
+            selected = [(len(dec_scores) - 1, 1.0)]
+
+        seed_prob = seed.detach().sigmoid()
+        seed_h, seed_w = seed_prob.shape[-2:]
+        offsets = dec_polygons.new_tensor([(dx, dy) for dy in (-1, 0, 1) for dx in (-1, 0, 1)])
+        scale = dec_polygons.new_tensor([seed_w, seed_h])
+        weighted_margin = zero
+
+        for layer_idx, layer_weight in selected:
+            layer_polygons = dec_polygons[layer_idx]
+            layer_scores = dec_scores[layer_idx]
+            match_indices = self.criterion.matcher(
+                layer_polygons, layer_scores, targets['bboxes'], targets['cls'], gt_groups
+            )
+            margin_terms = []
+            for batch_i, (query_idx, target_idx) in enumerate(match_indices):
+                if len(query_idx) == 0:
+                    continue
+                query_idx = query_idx.to(layer_polygons.device)
+                target_idx = target_idx.to(layer_polygons.device)
+                positions = layer_polygons[batch_i, query_idx, :2].detach()
+                grid = positions[:, None, :] + offsets[None] * self.seg_fg_radius_px / scale
+                evidence = (
+                    F.grid_sample(
+                        seed_prob[batch_i : batch_i + 1],
+                        (grid * 2 - 1).unsqueeze(0),
+                        mode='bilinear',
+                        align_corners=False,
+                        padding_mode='border',
+                    )
+                    .squeeze(0)
+                    .squeeze(0)
+                    .mean(-1)
+                )
+                true_cls = targets['cls'][target_idx]
+                logits = layer_scores[batch_i, query_idx]
+                hinge = F.relu(self.seg_fg_margin + logits[:, -1] - logits.gather(1, true_cls[:, None]).squeeze(1))
+                margin_terms.append(evidence * hinge)
+            if margin_terms:
+                weighted_margin = weighted_margin + layer_weight * torch.cat(margin_terms).mean()
+
+        return weighted_margin
+
     def loss(self, batch, preds=None):
         """DETR loss + seed-map seg loss.
 
@@ -420,7 +557,8 @@ class NuLiteRayCastDETRModel(DetectionModel):
             'imgsz': img.shape[-1],
         }
 
-        if preds is None:
+        computed_here = preds is None
+        if computed_here:
             preds = self.predict(img, batch=targets)
         else:
             preds = preds[1] if isinstance(preds, tuple) and len(preds) == 2 else preds
@@ -464,16 +602,47 @@ class NuLiteRayCastDETRModel(DetectionModel):
             if seg is not None:
                 total = total + self.lambda_seg * seg
 
+        aux_obj = torch.zeros((), device=device)
+        aux_type = torch.zeros((), device=device)
+        aux_dense = getattr(self, '_last_aux_dense', None) if computed_here else None
+        if aux_dense is not None and self.aux_dense_weight > 0:
+            obj_logits, type_logits = aux_dense
+            obj_gt = batch['np_mask'].to(device)
+            semantic_gt = batch['semantic_mask'].to(device, torch.long)
+            obj_gt = F.interpolate(obj_gt, size=obj_logits.shape[-2:], mode='nearest')
+            semantic_gt = (
+                F.interpolate(semantic_gt.unsqueeze(1).float(), size=type_logits.shape[-2:], mode='nearest')
+                .squeeze(1)
+                .long()
+            )
+            aux_obj = F.binary_cross_entropy_with_logits(obj_logits, obj_gt)
+            fg = semantic_gt > 0
+            if fg.any():
+                aux_type = F.cross_entropy(type_logits.permute(0, 2, 3, 1)[fg], semantic_gt[fg] - 1)
+            else:
+                aux_type = type_logits.sum() * 0.0
+            total = total + self.aux_dense_weight * (aux_obj + self.aux_dense_type_weight * aux_type)
+
+        seg_fg_margin = torch.zeros((), device=device)
+        seed = getattr(self, '_last_seed', None)
+        if seed is not None and self.seg_fg_margin_weight > 0 and self.no_object:
+            seg_fg_margin = self._segmentation_foreground_margin(dec_polygons, dec_scores, targets, gt_groups, seed)
+            total = total + self.seg_fg_margin_weight * seg_fg_margin
+
         loss_items = torch.as_tensor(
             [
-                loss['loss_class'].detach(),
-                loss['loss_xy'].detach(),
-                loss['loss_l1'].detach(),
-                loss['loss_piou'].detach(),
-                loss['loss_smooth'].detach(),
+                (loss['loss_class'] + loss.get('loss_class_aux', 0.0)).detach(),
+                (loss['loss_xy'] + loss.get('loss_xy_aux', 0.0)).detach(),
+                (loss['loss_l1'] + loss.get('loss_l1_aux', 0.0)).detach(),
+                (loss['loss_piou'] + loss.get('loss_piou_aux', 0.0)).detach(),
+                (loss['loss_smooth'] + loss.get('loss_smooth_aux', 0.0)).detach(),
             ],
             device=device,
         )
+        if self.aux_dense_weight > 0:
+            loss_items = torch.cat([loss_items, torch.stack([aux_obj.detach(), aux_type.detach()])])
+        if self.seg_fg_margin_weight > 0:
+            loss_items = torch.cat([loss_items, seg_fg_margin.detach().reshape(1)])
         return total, loss_items
 
     # -- helpers ------------------------------------------------------------
@@ -527,5 +696,8 @@ class NuLiteRayCastDETRModel(DetectionModel):
             self.np_head.requires_grad_(False)
 
     def unfreeze_all(self):
-        """Unfreeze every parameter."""
+        """Unfreeze trainable detector parameters while preserving the frozen oracle."""
         self.requires_grad_(True)
+        if getattr(self, 'backbone', None) == 'two_stream':
+            self.seg_encoder.requires_grad_(False)
+            self.seg_encoder.eval()

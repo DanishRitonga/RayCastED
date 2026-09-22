@@ -151,11 +151,14 @@ def _raycast_collate_fn(batch: list) -> dict:
     # (background negative, center positive). Matches InstanSeg exactly so the
     # NP head can be queried by local-maxima for DETR query selection.
     np_masks = []
+    semantic_masks = []
     seed_maps = []
     for labels in labels_list:
         h = w = images.shape[-1]
         mask = np.zeros((h, w), dtype=np.float32)
         inst = np.zeros((h, w), dtype=np.int32)
+        semantic = np.zeros((h, w), dtype=np.int64)
+        occupied = np.zeros((h, w), dtype=np.uint8)
         if labels.shape[0] > 0:
             n_rays = labels.shape[1] - 3
             angles = np.linspace(0, 2 * np.pi, n_rays, endpoint=False)
@@ -168,9 +171,16 @@ def _raycast_collate_fn(batch: list) -> dict:
                 xs = cx + rays * cos_a
                 ys = cy + rays * sin_a
                 polygon = np.stack([xs, ys], axis=1).astype(np.int32)
+                instance_mask = np.zeros((h, w), dtype=np.uint8)
+                cv2.fillPoly(instance_mask, [polygon], 1)
+                overlap = (occupied > 0) & (instance_mask > 0)
                 cv2.fillPoly(mask, [polygon], 1.0)
                 cv2.fillPoly(inst, [polygon], idx + 1)
+                semantic[instance_mask > 0] = int(ann[0]) + 1
+                semantic[overlap] = -1  # ambiguous pixels are ignored by the type loss
+                occupied |= instance_mask
         np_masks.append(torch.from_numpy(mask[None]))  # (1, H, W)
+        semantic_masks.append(torch.from_numpy(semantic))  # (H, W), 0=background, 1..nc=nucleus type
         # Per-instance normalized EDT: center=1 regardless of nucleus size.
         dist = cv2.distanceTransform((mask * 255).astype(np.uint8), cv2.DIST_L2, 3)
         seed = np.zeros_like(dist)
@@ -191,6 +201,7 @@ def _raycast_collate_fn(batch: list) -> dict:
         'cls': targets[:, 1],
         'bboxes': targets[:, 2:],  # [N, 2+n_rays] = cx, cy, d_1..d_n
         'np_mask': torch.stack(np_masks),  # (B, 1, H, W)
+        'semantic_mask': torch.stack(semantic_masks),  # (B, H, W), -1=ignore
         'seed_map': torch.stack(seed_maps),  # (B, 1, H, W) normalized distance-to-boundary
         'ori_shape': torch.stack(ori_shapes),
         'ratio_pad': ratio_pads,
@@ -791,6 +802,12 @@ class RayCastTrainer(DetectionTrainer):
             respawn=bool(tcfg.get('detr_respawn', False)),
             respawn_peaks=int(tcfg.get('detr_respawn_peaks', 64)),
             respawn_min_seed=float(tcfg.get('detr_respawn_min_seed', 0.5)),
+            aux_dense_weight=float(tcfg.get('detr_aux_dense_weight', 0.0)),
+            aux_dense_type_weight=float(tcfg.get('detr_aux_dense_type_weight', 1.0)),
+            seg_fg_margin_weight=float(tcfg.get('detr_seg_fg_margin_weight', 0.0)),
+            seg_fg_margin=float(tcfg.get('detr_seg_fg_margin', 1.0)),
+            seg_fg_radius_px=float(tcfg.get('detr_seg_fg_radius_px', 4.0)),
+            seg_fg_margin_layer_weights=tcfg.get('detr_seg_fg_margin_layer_weights'),
             mds=bool(tcfg.get('detr_mds', True)),
             cost_inside=float(tcfg.get('detr_cost_inside', 10.0)),
             per_layer_match=bool(tcfg.get('detr_per_layer_match', False)),
@@ -1113,6 +1130,10 @@ class RayCastTrainer(DetectionTrainer):
         """Return RayCastValidator for Shapely polygon mAP evaluation."""
         if (self.training_config or {}).get('architecture') == 'nulite_detr':
             self.loss_names = ('cls_loss', 'xy_loss', 'l1_loss', 'piou_loss', 'smooth_loss')
+            if float((self.training_config or {}).get('detr_aux_dense_weight', 0.0)) > 0:
+                self.loss_names += ('aux_obj_loss', 'aux_type_loss')
+            if float((self.training_config or {}).get('detr_seg_fg_margin_weight', 0.0)) > 0:
+                self.loss_names += ('seg_fg_margin_loss',)
         else:
             self.loss_names = (
                 'xy_loss',

@@ -90,6 +90,14 @@ class TrainingSettings(BaseModel):
     detr_respawn: bool = False  # recall-repair 2nd decoder pass: re-anchor emptiest queries on uncovered seed peaks
     detr_respawn_peaks: int = 64  # max respawned queries per image
     detr_respawn_min_seed: float = 0.5  # min seed value for a candidate respawn peak
+    detr_aux_dense_weight: float = 0.0  # training-only dense supervision on trainable b3/b4/b5 (0=off)
+    detr_aux_dense_type_weight: float = 1.0  # nucleus-type term relative to dense objectness
+    detr_seg_fg_margin_weight: float = 0.0  # matched-positive segmentation-guided true-class vs empty margin
+    detr_seg_fg_margin: float = 1.0  # required z_true - z_empty margin when segmentation supports foreground
+    detr_seg_fg_radius_px: float = 4.0  # local 3x3 segmentation evidence radius around matched query centroid
+    detr_seg_fg_margin_layer_weights: list[float] = Field(
+        default_factory=list
+    )  # per-decoder-layer multipliers; [] = final layer only
     backbone_freeze_epochs: int = 0  # freeze FastViT encoder for N initial epochs (LSP-DETR: 30); 0 = end-to-end
     backbone_lr_scale: float = 0.1  # encoder LR multiplier after unfreeze (LSP-DETR: backbone at 10% base LR)
     decoder_freeze_epochs: int = 0  # freeze the NuLite upsampling decoder (encoder_decoder.* minus encoder) for N initial epochs (curriculum stage-2 warm-up); 0 = train decoder from ep0
