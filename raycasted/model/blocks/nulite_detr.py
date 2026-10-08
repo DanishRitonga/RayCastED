@@ -29,6 +29,38 @@ from ultralytics.nn.modules.transformer import MLP, MSDeformAttn, multi_scale_de
 from raycasted.data.etl.utils import constants as _const
 
 
+class CayleySTRING2D(nn.Module):
+    """Learnable 2D rotary encoding used by LSP-DETR's STRING attention."""
+
+    def __init__(self, dim: int, theta: float = 100.0):
+        super().__init__()
+        if dim % 2:
+            raise ValueError('Cayley-STRING head dimension must be even')
+        if theta <= 0:
+            raise ValueError('Cayley-STRING theta must be positive')
+        frequencies = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+        self.frequencies = nn.Parameter(frequencies.repeat(2, 1))
+        self.cayley_parameter = nn.Parameter(torch.empty(dim, dim))
+        nn.init.normal_(self.cayley_parameter, std=0.02)
+
+    def orthogonal_projection(self) -> torch.Tensor:
+        """Return the differentiable orthogonal matrix defined by the generator."""
+        generator = self.cayley_parameter - self.cayley_parameter.transpose(0, 1)
+        identity = torch.eye(generator.shape[0], dtype=generator.dtype, device=generator.device)
+        return torch.linalg.solve(identity - generator, identity + generator)
+
+    @torch.autocast('cuda', enabled=False)
+    def forward(self, inputs: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        """Rotate ``[batch, heads, queries, head_dim]`` using 2D positions."""
+        projection = self.orthogonal_projection().float()
+        projected = F.linear(inputs.float(), projection)
+        angles = positions.float() @ self.frequencies
+        phase = torch.polar(torch.ones_like(angles), angles).unsqueeze(1)
+        paired = torch.view_as_complex(projected.reshape(*projected.shape[:-1], -1, 2))
+        rotated = torch.view_as_real(paired * phase).flatten(-2)
+        return rotated.to(dtype=inputs.dtype)
+
+
 class SegmentationQueryRecast(nn.Module):
     """Local content correction; nine samples per query, no dense query/pixel map."""
 
@@ -66,8 +98,41 @@ class SegmentationQueryRecast(nn.Module):
         return queries + gate * self.projection(descriptor)
 
 
+class QueryAppearanceFusion(nn.Module):
+    """Inject polygon-conditioned high-resolution appearance into query content."""
+
+    def __init__(self, appearance_channels: int, query_channels: int, n_rays: int):
+        super().__init__()
+        self.n_rays = n_rays
+        self.norm = nn.LayerNorm(appearance_channels * 3)
+        self.projection = nn.Linear(appearance_channels * 3, query_channels, bias=False)
+        nn.init.zeros_(self.projection.weight)
+
+    def forward(self, queries, polygons, appearance_map):
+        """Sample center, eight interior, and eight exterior polygon points."""
+        ray_idx = torch.arange(0, self.n_rays, max(1, self.n_rays // 8), device=polygons.device)[:8]
+        angles = ray_idx.to(polygons.dtype) * (2.0 * math.pi / self.n_rays)
+        directions = torch.stack((angles.cos(), angles.sin()), -1)
+        centers = polygons[..., :2].detach()
+        rays = polygons[..., 2:].detach().index_select(-1, ray_idx)
+        interior = centers.unsqueeze(-2) + 0.5 * rays.unsqueeze(-1) * directions
+        exterior = centers.unsqueeze(-2) + 1.15 * rays.unsqueeze(-1) * directions
+        points = torch.cat((centers.unsqueeze(-2), interior, exterior), -2).clamp(0.0, 1.0)
+        sampled = F.grid_sample(
+            appearance_map,
+            points * 2.0 - 1.0,
+            mode='bilinear',
+            align_corners=False,
+            padding_mode='border',
+        ).permute(0, 2, 3, 1)
+        descriptor = self.norm(torch.cat(
+            (sampled[:, :, 0], sampled[:, :, 1:9].mean(2), sampled[:, :, 9:].mean(2)), -1
+        ))
+        return queries + self.projection(descriptor), descriptor
+
+
 class _ScheduledMSDeformAttn(MSDeformAttn):
-    """MSDeformAttn with an optional per-layer soft attention-level mask.
+    """MSDeformAttn with optional feature-level and query-polygon masks.
 
     When ``level_mask`` is a length-``n_levels`` boolean tensor, the attention
     logits of disabled levels are set to ``-inf`` before the softmax, so a
@@ -79,6 +144,57 @@ class _ScheduledMSDeformAttn(MSDeformAttn):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.level_mask = None
+        self.query_polygon = None
+        self.oracle_mask = None
+        self.polygon_mask_floor = 0.1
+        self.polygon_mask_temperature = 0.1
+
+    def _oracle_membership(self, sampling_locations: torch.Tensor) -> torch.Tensor:
+        """Sample detached oracle foreground probability at deformable-attention points."""
+        if self.oracle_mask is None:
+            return sampling_locations.new_ones(sampling_locations.shape[:-1])
+        flat_grid = sampling_locations.flatten(1, 4).unsqueeze(2) * 2 - 1
+        sampled = F.grid_sample(
+            self.oracle_mask.detach().sigmoid(),
+            flat_grid,
+            mode='bilinear',
+            padding_mode='zeros',
+            align_corners=False,
+        )
+        return sampled[:, 0, :, 0].view(sampling_locations.shape[:-1])
+
+    def _polygon_attention_bias(self, sampling_locations: torch.Tensor) -> torch.Tensor:
+        """Return a soft log-bias for samples outside each query's polygon.
+
+        The previous decoder layer supplies a detached radial polygon. Samples
+        inside it retain unit weight; samples outside decay smoothly toward the
+        configured floor. This is the sparse deformable-attention equivalent of
+        Mask2Former's predicted-mask feedback, without materializing QxHxW maps.
+        """
+        polygon = self.query_polygon
+        if polygon is None:
+            return sampling_locations.new_zeros(sampling_locations.shape[:-1])
+
+        center = polygon[..., :2].unsqueeze(2)
+        rays = polygon[..., 2:]
+        flat_locations = sampling_locations.flatten(2, 4)
+        delta = flat_locations - center
+        distance = delta.square().sum(-1).sqrt()
+        angle = torch.remainder(torch.atan2(delta[..., 1], delta[..., 0]), 2 * math.pi)
+        ray_position = angle * (rays.shape[-1] / (2 * math.pi))
+        lower = ray_position.floor().long() % rays.shape[-1]
+        upper = (lower + 1) % rays.shape[-1]
+        fraction = ray_position - ray_position.floor()
+        boundary = rays.gather(-1, lower) * (1 - fraction) + rays.gather(-1, upper) * fraction
+        ratio = distance / boundary.clamp_min(1e-6)
+
+        # Unit weight throughout the interior, continuous decay outside, and a
+        # nonzero floor so a poor early polygon cannot permanently hide evidence.
+        membership = (2 * torch.sigmoid((1 - ratio) / self.polygon_mask_temperature)).clamp_max(1.0)
+        membership = membership.view(sampling_locations.shape[:-1])
+        membership = membership * self._oracle_membership(sampling_locations)
+        weight = self.polygon_mask_floor + (1 - self.polygon_mask_floor) * membership
+        return weight.clamp_min(1e-6).log()
 
     def forward(self, query, refer_bbox, value, value_shapes, value_mask=None):
         """Forward with an optional soft mask over attention levels."""
@@ -91,14 +207,13 @@ class _ScheduledMSDeformAttn(MSDeformAttn):
             value = value.masked_fill(value_mask[..., None], float(0))
         value = value.view(bs, len_v, self.n_heads, self.d_model // self.n_heads)
         sampling_offsets = self.sampling_offsets(query).view(bs, len_q, self.n_heads, self.n_levels, self.n_points, 2)
-        attention_weights = self.attention_weights(query).view(bs, len_q, self.n_heads, self.n_levels * self.n_points)
+        attention_weights = self.attention_weights(query).view(
+            bs, len_q, self.n_heads, self.n_levels, self.n_points
+        )
         if self.level_mask is not None:
             lm = self.level_mask.to(device=attention_weights.device, dtype=torch.bool)
             lm = lm.view(1, 1, 1, self.n_levels, 1).expand(bs, len_q, self.n_heads, self.n_levels, self.n_points)
-            attention_weights = attention_weights.view(bs, len_q, self.n_heads, self.n_levels, self.n_points)
             attention_weights = attention_weights.masked_fill(~lm, float('-inf'))
-            attention_weights = attention_weights.reshape(bs, len_q, self.n_heads, self.n_levels * self.n_points)
-        attention_weights = F.softmax(attention_weights, -1).view(bs, len_q, self.n_heads, self.n_levels, self.n_points)
         num_points = refer_bbox.shape[-1]
         if num_points == 2:
             offset_normalizer = torch.as_tensor(value_shapes, dtype=query.dtype, device=query.device).flip(-1)
@@ -109,6 +224,11 @@ class _ScheduledMSDeformAttn(MSDeformAttn):
             sampling_locations = refer_bbox[:, :, None, :, None, :2] + add
         else:
             raise ValueError(f'Last dim of reference_points must be 2 or 4, but got {num_points}.')
+        if self.query_polygon is not None:
+            attention_weights = attention_weights + self._polygon_attention_bias(sampling_locations)
+        attention_weights = F.softmax(attention_weights.flatten(-2), -1).view(
+            bs, len_q, self.n_heads, self.n_levels, self.n_points
+        )
         output = multi_scale_deformable_attn_pytorch(value, value_shapes, sampling_locations, attention_weights)
         return self.output_proj(output)
 
@@ -194,6 +314,16 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         respawn: bool = False,
         respawn_peaks: int = 64,
         respawn_min_seed: float = 0.5,
+        self_attention_rope: bool = False,
+        rope_theta: float = 100.0,
+        rope_position_scale: float | None = None,
+        polygon_masked_attention: bool = False,
+        polygon_oracle_mask: bool = False,
+        polygon_mask_floor: float = 0.1,
+        polygon_mask_temperature: float = 0.1,
+        appearance_channels: int = 0,
+        appearance_after_layer: int = 3,
+        presence_head: bool = False,
     ):
         self.n_rays = n_rays or _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays
@@ -213,6 +343,22 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         self.respawn = respawn
         self.respawn_peaks = int(respawn_peaks)
         self.respawn_min_seed = float(respawn_min_seed)
+        self.self_attention_rope = bool(self_attention_rope)
+        self.polygon_masked_attention = bool(polygon_masked_attention)
+        self.polygon_oracle_mask = bool(polygon_oracle_mask)
+        if self.polygon_oracle_mask and not self.polygon_masked_attention:
+            raise ValueError('polygon_oracle_mask requires polygon_masked_attention')
+        self.polygon_mask_floor = float(polygon_mask_floor)
+        self.polygon_mask_temperature = float(polygon_mask_temperature)
+        if not 0 < self.polygon_mask_floor <= 1:
+            raise ValueError('polygon_mask_floor must be in (0, 1]')
+        if self.polygon_mask_temperature <= 0:
+            raise ValueError('polygon_mask_temperature must be positive')
+        self.rope_position_scale = float(grid_size if rope_position_scale is None else rope_position_scale)
+        if self.self_attention_rope and self.rope_position_scale <= 0:
+            raise ValueError('rope_position_scale must be positive')
+        if self.self_attention_rope and (hd % nh or (hd // nh) % 2):
+            raise ValueError('RoPE requires an even attention head dimension')
         base_ch = tuple(ch)
         super_ch = base_ch + (1,) if seed_level else base_ch
         super().__init__(
@@ -238,6 +384,16 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             raise ValueError('recast must precede the evaluation output layer')
         self.recast_after_layer = recast_after_layer
         self.recast_module = SegmentationQueryRecast(hd, recast_radius_px) if recast else None
+        self.appearance_after_layer = int(appearance_after_layer)
+        if appearance_channels and not 1 <= self.appearance_after_layer < ndl:
+            raise ValueError('appearance fusion must be inserted before the final decoder layer')
+        self.appearance_fusion = (
+            QueryAppearanceFusion(appearance_channels, hd, self.n_rays) if appearance_channels else None
+        )
+        self.presence_head = nn.Linear(hd, 1) if presence_head else None
+        self._last_presence_logits = None
+        self._last_presence_polygons = None
+        self._last_appearance_embeddings = None
         self.seed_threshold = seed_threshold
         self.peak_distance = peak_distance
         self.grid_size = grid_size
@@ -273,6 +429,11 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             # dec_bbox_head/dec_score_head stay distinct so iterative refinement still varies.
             self.decoder.layers = nn.ModuleList([self.decoder.layers[0]] * self.decoder.num_layers)
         self.shared_layers = shared_layers
+        self.self_attention_rope_layers = (
+            nn.ModuleList([CayleySTRING2D(hd // nh, theta=rope_theta) for _ in range(ndl)])
+            if self.self_attention_rope
+            else None
+        )
 
         # Per-layer cross-attention scale schedule (LSP-DETR-style round-robin).
         # ``layer_schedule`` is a comma-separated list of feature-level indices
@@ -287,6 +448,8 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             for v in sched:
                 if not 0 <= v < n_levels:
                     raise ValueError(f'layer_schedule entry {v} out of range [0, {n_levels})')
+        if sched or self.polygon_masked_attention:
+            n_levels = self.decoder.layers[0].cross_attn.n_levels
             # Swap in the maskable cross-attn module (weights preserved) for every
             # distinct layer; shared layers alias ONE module across all steps.
             swapped = {}
@@ -295,8 +458,11 @@ class NuLiteDETRDecoder(RTDETRDecoder):
                 if id(ca) not in swapped:
                     new_ca = _ScheduledMSDeformAttn(ca.d_model, ca.n_levels, ca.n_heads, ca.n_points)
                     new_ca.load_state_dict(ca.state_dict())
+                    new_ca.polygon_mask_floor = self.polygon_mask_floor
+                    new_ca.polygon_mask_temperature = self.polygon_mask_temperature
                     swapped[id(ca)] = new_ca
                 layer.cross_attn = swapped[id(ca)]
+        if sched:
             self.layer_schedule = sched
             self._level_masks = []
             for i in range(len(self.decoder.layers)):
@@ -378,15 +544,18 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         feats = torch.cat([f.flatten(2).transpose(1, 2) for f in proj], 1)
         return feats, shapes, proj
 
-    def forward(self, x, batch=None, seed_map=None, top_feat=None):
+    def forward(self, x, batch=None, seed_map=None, seed_level_map=None, top_feat=None, appearance_map=None):
         """Run encoder + query selection + decoder forward.
 
         Args:
             x: list of multi-scale features [b3, b4, b5] at strides 4/8/16.
             batch: optional targets dict (denoising is disabled, nd=0).
             seed_map: (B, 1, H, W) raw NP seed logits at full resolution.
+            seed_level_map: optional independent (B, 1, H, W) spatial map
+                projected as the attended seed level. Defaults to seed_map.
             top_feat: optional top-level (stride-32) backbone feature for
                 LSP FeatureSampling query content (``content_top``).
+            appearance_map: optional supervised stride-2 appearance features.
         """
         from ultralytics.models.utils.ops import get_cdn_group
 
@@ -421,7 +590,8 @@ class NuLiteDETRDecoder(RTDETRDecoder):
                 seed_feats.append(torch.cat([feat, resized], dim=1))
             x = seed_feats
 
-        feats, shapes, proj2d = self._get_encoder_input(x, seed_map=seed_map)
+        attended_seed = seed_map if seed_level_map is None else seed_level_map
+        feats, shapes, proj2d = self._get_encoder_input(x, seed_map=attended_seed)
         dn_embed, dn_bbox, attn_mask, dn_meta = get_cdn_group(
             batch,
             self.nc,
@@ -504,6 +674,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             enc_scores=enc_scores,
             recast_features=proj2d[0],
             recast_seed=seed_map,
+            appearance_map=appearance_map,
         )
 
         if self.respawn and seed_map is not None:
@@ -1167,6 +1338,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         enc_scores=None,
         recast_features=None,
         recast_seed=None,
+        appearance_map=None,
     ):
         """Iterative-refinement decoder over the deformable transformer layers.
 
@@ -1190,6 +1362,9 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         recast_module = getattr(self, 'recast_module', None)
         if recast_module is not None and (recast_seed is None or recast_features is None):
             raise ValueError('recast requires segmentation logits and projected local features')
+        polygon_oracle_mask = getattr(self, 'polygon_oracle_mask', False)
+        if polygon_oracle_mask and recast_seed is None:
+            raise ValueError('polygon_oracle_mask requires oracle foreground logits')
         output = embed
         dec_polygons = []
         dec_cls = []
@@ -1197,23 +1372,50 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         refer_centroids_2d = refer_centroids
         prev_scores = enc_scores
         level_masks = getattr(self, '_level_masks', None)
+        previous_polygon = None
+        self._last_presence_logits = None
+        self._last_presence_polygons = None
+        self._last_appearance_embeddings = None
 
         for i, layer in enumerate(self.decoder.layers):
             if level_masks is not None and hasattr(layer.cross_attn, 'level_mask'):
                 layer.cross_attn.level_mask = level_masks[i]
+            if hasattr(layer.cross_attn, 'query_polygon'):
+                layer.cross_attn.query_polygon = (
+                    previous_polygon.detach()
+                    if getattr(self, 'polygon_masked_attention', False) and i > 0
+                    else None
+                )
+                layer.cross_attn.oracle_mask = (
+                    recast_seed.detach() if polygon_oracle_mask and i > 0 else None
+                )
             query_pos = self.query_pos_head(refer_centroids_2d)
             layer_attn_mask = attn_mask
             if self.mds and i == self.decoder.eval_idx and prev_scores is not None:
                 layer_attn_mask = self._rank_causal_mask(prev_scores)
-            output = layer(
-                output,
-                refer_centroids_2d,
-                feats,
-                shapes,
-                None,
-                layer_attn_mask,
-                query_pos,
-            )
+            rope_layers = getattr(self, 'self_attention_rope_layers', None)
+            if rope_layers is None:
+                output = layer(
+                    output,
+                    refer_centroids_2d,
+                    feats,
+                    shapes,
+                    None,
+                    layer_attn_mask,
+                    query_pos,
+                )
+            else:
+                output = self._decoder_layer_with_rope(
+                    layer,
+                    output,
+                    refer_centroids_2d,
+                    feats,
+                    shapes,
+                    layer_attn_mask,
+                    query_pos,
+                    rope_layers[i],
+                    refer_centroids_2d / self.rope_position_scale,
+                )
 
             polygon_logits = self.dec_bbox_head[i](output)
             if last_refined_logits is not None:
@@ -1246,8 +1448,18 @@ class NuLiteDETRDecoder(RTDETRDecoder):
 
             if recast_module is not None and i + 1 == self.recast_after_layer:
                 output = recast_module(output, refined[..., :2], scores_i, recast_features, recast_seed)
+            appearance_fusion = getattr(self, 'appearance_fusion', None)
+            if appearance_fusion is not None and i + 1 == self.appearance_after_layer:
+                if appearance_map is None:
+                    raise ValueError('appearance fusion requires a stride-2 appearance map')
+                output, appearance_embeddings = appearance_fusion(output, refined, appearance_map)
+                self._last_appearance_embeddings = appearance_embeddings
+                self._last_presence_polygons = refined.detach()
+                if self.training and self.presence_head is not None:
+                    self._last_presence_logits = self.presence_head(output).squeeze(-1)
 
             prev_scores = scores_i
+            previous_polygon = refined
             last_refined_logits = refined_logits
             if self.training:
                 refer_polygon_logits = refined_logits.detach()
@@ -1257,3 +1469,73 @@ class NuLiteDETRDecoder(RTDETRDecoder):
                 refer_centroids_2d = refined[..., :2]
 
         return torch.stack(dec_polygons), torch.stack(dec_cls)
+
+    @staticmethod
+    def _self_attention_with_rope(layer, embed, query_pos, attn_mask, rope, rope_positions):
+        """Run stock MHA projections while rotating projected Q/K in 2D."""
+        attention = layer.self_attn
+        if attention.bias_k is not None or attention.bias_v is not None or attention.add_zero_attn:
+            raise ValueError('Cayley-STRING does not support augmented MultiheadAttention keys')
+        qk = layer.with_pos_embed(embed, query_pos)
+        q_weight, k_weight, v_weight = attention.in_proj_weight.chunk(3)
+        if attention.in_proj_bias is None:
+            q_bias = k_bias = v_bias = None
+        else:
+            q_bias, k_bias, v_bias = attention.in_proj_bias.chunk(3)
+        query = F.linear(qk, q_weight, q_bias)
+        key = F.linear(qk, k_weight, k_bias)
+        value = F.linear(embed, v_weight, v_bias)
+        batch, queries, channels = query.shape
+        heads = attention.num_heads
+        head_dim = channels // heads
+        query = query.view(batch, queries, heads, head_dim).transpose(1, 2)
+        key = key.view(batch, queries, heads, head_dim).transpose(1, 2)
+        value = value.view(batch, queries, heads, head_dim).transpose(1, 2)
+        query = rope(query, rope_positions)
+        key = rope(key, rope_positions)
+
+        sdpa_mask = None
+        if attn_mask is not None:
+            if attn_mask.ndim == 2:
+                attn_mask = attn_mask[None, None]
+            elif attn_mask.ndim == 3:
+                if attn_mask.shape[0] == batch * heads:
+                    attn_mask = attn_mask.view(batch, heads, queries, queries)
+                elif attn_mask.shape[0] == batch:
+                    attn_mask = attn_mask[:, None]
+                else:
+                    raise ValueError('unsupported decoder attention-mask batch dimension')
+            if attn_mask.dtype == torch.bool:
+                sdpa_mask = torch.zeros_like(attn_mask, dtype=query.dtype).masked_fill(attn_mask, float('-inf'))
+            else:
+                sdpa_mask = attn_mask.to(dtype=query.dtype)
+        dropout = float(attention.dropout) if layer.training else 0.0
+        update = F.scaled_dot_product_attention(query, key, value, attn_mask=sdpa_mask, dropout_p=dropout)
+        update = update.transpose(1, 2).reshape(batch, queries, channels)
+        return attention.out_proj(update)
+
+    @classmethod
+    def _decoder_layer_with_rope(
+        cls,
+        layer,
+        embed,
+        refer_centroids,
+        feats,
+        shapes,
+        attn_mask,
+        query_pos,
+        rope,
+        rope_positions,
+    ):
+        """Run a stock decoder layer with RoPE applied only to self-attention Q/K."""
+        update = cls._self_attention_with_rope(layer, embed, query_pos, attn_mask, rope, rope_positions)
+        embed = layer.norm1(embed + layer.dropout1(update))
+        update = layer.cross_attn(
+            layer.with_pos_embed(embed, query_pos),
+            refer_centroids.unsqueeze(2),
+            feats,
+            shapes,
+            None,
+        )
+        embed = layer.norm2(embed + layer.dropout2(update))
+        return layer.forward_ffn(embed)

@@ -16,7 +16,9 @@ import numpy as np
 import torch
 import yaml
 
-from raycasted.model.blocks.nulite_detr import NuLiteDETRDecoder
+from raycasted.evals.polygon_nms import polygon_nms_indices
+from raycasted.model.blocks.nulite_detr import CayleySTRING2D, NuLiteDETRDecoder, _ScheduledMSDeformAttn
+from raycasted.model.nulite_detr_loss import RayCastDuplicateMatcher
 from raycasted.model.nulite_detr_model import NuLiteRayCastDETRModel
 from raycasted.model.train import RayCastTrainer
 
@@ -43,6 +45,224 @@ DETR_TCFG = {
     'detr_use_seed': True,
     'yolo11_scale': 'n',
 }
+
+
+def test_cayley_string_preserves_norm_and_relative_position_logits():
+    """RoPE is norm preserving and depends on relative, not absolute, 2D position."""
+    torch.manual_seed(7)
+    rope = CayleySTRING2D(dim=8, theta=100.0)
+    query = torch.randn(2, 3, 5, 8)
+    key = torch.randn(2, 3, 5, 8)
+    positions = torch.rand(2, 5, 2) * 20
+    translation = torch.tensor([7.0, -4.0])
+
+    rotated_query = rope(query, positions)
+    rotated_key = rope(key, positions)
+    translated_query = rope(query, positions + translation)
+    translated_key = rope(key, positions + translation)
+    projection = rope.orthogonal_projection()
+
+    assert torch.allclose(projection.T @ projection, torch.eye(8), atol=1e-5)
+    assert torch.allclose(rotated_query.norm(dim=-1), query.norm(dim=-1), atol=1e-5)
+    logits = rotated_query @ rotated_key.transpose(-2, -1)
+    translated_logits = translated_query @ translated_key.transpose(-2, -1)
+    assert torch.allclose(logits, translated_logits, atol=2e-5)
+
+
+def test_rope_decoder_backward_reaches_learned_rotation():
+    """The enabled model uses one learned RoPE module per decoder layer."""
+    model = NuLiteRayCastDETRModel(
+        nc=5,
+        n_rays=64,
+        variant='fastvit_t8',
+        pretrained=False,
+        nq=16,
+        ndl=2,
+        hd=32,
+        d_ffn=64,
+        grid_size=0.25,
+        self_attention_rope=True,
+        rope_position_scale=0.25,
+        verbose=False,
+    )
+    model.train()
+    total, _ = model.loss(_synthetic_batch(bs=1))
+    total.backward()
+
+    assert torch.isfinite(total)
+    assert model.detr.self_attention_rope_layers is not None
+    assert len(model.detr.self_attention_rope_layers) == 2
+    assert all(
+        layer.frequencies.grad is not None and layer.cayley_parameter.grad is not None
+        for layer in model.detr.self_attention_rope_layers
+    )
+
+
+def test_polygon_attention_mask_preserves_interior_and_suppresses_exterior():
+    """The sparse Mask2Former adaptation only penalizes samples outside the prior polygon."""
+    attention = _ScheduledMSDeformAttn(32, 1, 4, 2)
+    attention.polygon_mask_floor = 0.1
+    attention.polygon_mask_temperature = 0.1
+    polygon = torch.zeros(1, 1, 66)
+    polygon[..., :2] = 0.5
+    polygon[..., 2:] = 0.2
+    attention.query_polygon = polygon
+    locations = torch.empty(1, 1, 4, 1, 2, 2)
+    locations[..., 0, :] = torch.tensor([0.5, 0.5])
+    locations[..., 1, :] = torch.tensor([0.9, 0.5])
+
+    bias = attention._polygon_attention_bias(locations)
+
+    assert torch.allclose(bias[..., 0], torch.zeros_like(bias[..., 0]), atol=1e-6)
+    assert (bias[..., 1] < -1.5).all()
+
+
+def test_polygon_oracle_mask_suppresses_oracle_background_inside_polygon():
+    """Oracle FG refines the query polygon without replacing its instance-specific support."""
+    attention = _ScheduledMSDeformAttn(32, 1, 4, 2)
+    attention.polygon_mask_floor = 0.1
+    polygon = torch.zeros(1, 1, 66)
+    polygon[..., :2] = 0.5
+    polygon[..., 2:] = 0.4
+    attention.query_polygon = polygon
+    oracle = torch.full((1, 1, 16, 16), -10.0)
+    oracle[..., :, :8] = 10.0
+    attention.oracle_mask = oracle
+    locations = torch.empty(1, 1, 4, 1, 2, 2)
+    locations[..., 0, :] = torch.tensor([0.35, 0.5])
+    locations[..., 1, :] = torch.tensor([0.65, 0.5])
+
+    bias = attention._polygon_attention_bias(locations)
+
+    assert torch.allclose(bias[..., 0], torch.zeros_like(bias[..., 0]), atol=1e-3)
+    assert (bias[..., 1] < -2.0).all()
+
+
+def test_polygon_masked_decoder_backward_and_config_wiring():
+    """The prior-layer polygon reaches every later cross-attention layer without dense masks."""
+    model = NuLiteRayCastDETRModel(
+        nc=5,
+        n_rays=64,
+        variant='fastvit_t8',
+        pretrained=False,
+        nq=16,
+        ndl=2,
+        hd=32,
+        d_ffn=64,
+        grid_size=0.25,
+        polygon_masked_attention=True,
+        polygon_oracle_mask=True,
+        polygon_mask_floor=0.2,
+        polygon_mask_temperature=0.15,
+        verbose=False,
+    )
+    model.train()
+    total, _ = model.loss(_synthetic_batch(bs=1))
+    total.backward()
+
+    cross_attn = [layer.cross_attn for layer in model.detr.decoder.layers]
+    assert torch.isfinite(total)
+    assert all(isinstance(module, _ScheduledMSDeformAttn) for module in cross_attn)
+    assert cross_attn[0].query_polygon is None
+    assert cross_attn[0].oracle_mask is None
+    assert cross_attn[1].query_polygon is not None
+    assert cross_attn[1].oracle_mask is not None
+    assert not cross_attn[1].query_polygon.requires_grad
+    assert not cross_attn[1].oracle_mask.requires_grad
+    assert cross_attn[1].polygon_mask_floor == 0.2
+    assert cross_attn[1].polygon_mask_temperature == 0.15
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        wired = _setup_model(
+            _make_trainer(
+                tmp_dir,
+                {
+                    **DETR_TCFG,
+                    'detr_polygon_masked_attention': True,
+                    'detr_polygon_oracle_mask': True,
+                    'detr_polygon_mask_floor': 0.2,
+                    'detr_polygon_mask_temperature': 0.15,
+                },
+            )
+        )
+        assert wired.detr.polygon_masked_attention
+        assert wired.detr.polygon_oracle_mask
+        assert wired.detr.polygon_mask_floor == 0.2
+        assert wired.detr.polygon_mask_temperature == 0.15
+
+
+def test_duplicate_matcher_keeps_owner_and_bounded_unique_extras():
+    """Top-k duplicate assignment keeps 1:1 owners and never gives a query two GTs."""
+
+    class _OwnerMatcher:
+        n_rays = 64
+
+        def __call__(self, pred_polygons, pred_scores, gt_polygons, gt_cls, gt_groups):
+            return [(torch.tensor([0]), torch.tensor([0]))]
+
+    matcher = RayCastDuplicateMatcher(_OwnerMatcher(), topk=3, no_object=True)
+    pred_polygons = torch.zeros(1, 4, 66)
+    pred_polygons[..., :2] = 0.5
+    pred_polygons[..., 2:] = 0.15
+    pred_polygons[0, 3, :2] = 0.95
+    pred_scores = torch.full((1, 4, 6), -4.0)
+    pred_scores[0, :3, 0] = torch.tensor([4.0, 3.0, 2.0])
+    gt_polygons = torch.zeros(1, 66)
+    gt_polygons[:, :2] = 0.5
+    gt_polygons[:, 2:] = 0.2
+
+    query_idx, target_idx = matcher(
+        pred_polygons,
+        pred_scores,
+        gt_polygons,
+        torch.tensor([0]),
+        [1],
+    )[0]
+
+    assert query_idx.tolist() == [0, 1, 2]
+    assert target_idx.tolist() == [0, 0, 0]
+    assert len(query_idx.unique()) == len(query_idx)
+
+
+def test_trainer_wires_duplicate_training_topk():
+    """The duplicate count reaches both the model and its detection criterion."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        model = _setup_model(_make_trainer(tmp_dir, {**DETR_TCFG, 'detr_duplicate_train_topk': 3}))
+        criterion = model.init_criterion()
+        assert model.duplicate_train_topk == 3
+        assert model.training_args['detr_duplicate_train_topk'] == 3
+        assert model.training_args['detr_duplicate_nms_iou'] == 0.5
+        assert criterion.duplicate_train_topk == 3
+        assert isinstance(criterion.duplicate_matcher, RayCastDuplicateMatcher)
+        duplicate_trainer = _make_trainer(
+            tmp_dir,
+            {**DETR_TCFG, 'detr_duplicate_train_topk': 3, 'detr_duplicate_nms_iou': 0.45},
+        )
+        duplicate_trainer.test_loader = None
+        validator = duplicate_trainer.get_validator()
+        assert validator.duplicate_eval
+        assert validator.polygon_nms_iou == 0.45
+        model.train()
+        total, _ = model.loss(_synthetic_batch(bs=1))
+        total.backward()
+        assert torch.isfinite(total)
+
+
+def test_duplicate_polygon_nms_is_class_agnostic_and_score_ordered():
+    """Duplicate polygons compete even when their predicted types disagree."""
+    polygons = np.zeros((3, 66), dtype=np.float32)
+    polygons[:, :2] = np.array([[50.0, 50.0], [50.0, 50.0], [90.0, 90.0]])
+    polygons[:, 2:] = 10.0
+
+    keep = polygon_nms_indices(
+        polygons,
+        np.array([0.8, 0.9, 0.7]),
+        iou_threshold=0.5,
+        class_ids=np.array([0, 4, 0]),
+        class_agnostic=True,
+    )
+
+    assert keep.tolist() == [1, 2]
 
 
 def _make_data_yaml(tmp_dir, nc=5, imgsz=256):
@@ -187,6 +407,86 @@ def test_two_stream_oracle_stays_in_eval_mode():
     )
 
 
+def test_center_potential_oracle_uses_one_output_channel():
+    """The Train36 centroid ablation must consume the one-channel oracle directly."""
+    model = NuLiteRayCastDETRModel(
+        nc=5,
+        n_rays=64,
+        variant='fastvit_t8',
+        det_variant='fastvit_t8',
+        backbone='two_stream',
+        oracle_kind='center_potential',
+        pretrained=False,
+        nq=16,
+        ndl=2,
+        hd=32,
+        d_ffn=64,
+        grid_size=0.25,
+        verbose=False,
+    )
+    assert model.oracle_kind == 'center_potential'
+    assert model.seg_encoder.output_channels == 1
+    assert model.seg_encoder.np_head[-1].out_channels == 1
+
+
+def test_dual_oracle_routes_fg_and_centroid_maps_separately():
+    """Dual channel 0 drives FG paths while channel 1 is the attended level."""
+    model = NuLiteRayCastDETRModel(
+        nc=5,
+        n_rays=64,
+        variant='fastvit_t8',
+        det_variant='fastvit_t8',
+        backbone='two_stream',
+        oracle_kind='fg_centroid',
+        pretrained=False,
+        nq=16,
+        ndl=2,
+        hd=32,
+        d_ffn=64,
+        grid_size=0.25,
+        seed_level=True,
+        verbose=False,
+    )
+
+    class _SegOracle(torch.nn.Module):
+        def forward(self, image):
+            foreground = image.new_full((len(image), 1, 256, 256), 2.0)
+            centroid = image.new_full((len(image), 1, 256, 256), -3.0)
+            return torch.cat((foreground, centroid), dim=1)
+
+    class _Backbone(torch.nn.Module):
+        def forward(self, image):
+            batch = len(image)
+            return {
+                'b3': image.new_zeros((batch, 48, 64, 64)),
+                'b4': image.new_zeros((batch, 96, 32, 32)),
+                'b5': image.new_zeros((batch, 192, 16, 16)),
+            }
+
+    class _CaptureDecoder(torch.nn.Module):
+        content_top = False
+
+        def forward(
+            self, features, batch=None, seed_map=None, seed_level_map=None, top_feat=None, appearance_map=None
+        ):
+            self.seed_map = seed_map
+            self.seed_level_map = seed_level_map
+            return 'captured'
+
+    model.seg_encoder = _SegOracle()
+    model.encoder_decoder = _Backbone()
+    model.detr = _CaptureDecoder()
+    model.train()
+
+    output = model.predict(torch.zeros(1, 3, 256, 256))
+
+    assert output == 'captured'
+    assert torch.all(model.detr.seed_map == 2.0)
+    assert torch.all(model.detr.seed_level_map == -3.0)
+    assert model._last_seed.data_ptr() == model.detr.seed_map.data_ptr()
+    assert model._last_centroid_seed.data_ptr() == model.detr.seed_level_map.data_ptr()
+
+
 def test_trainer_optimizer_re_freezes_oracle_after_ultralytics_setup():
     """The trainer must undo Ultralytics' blanket re-enable before training begins."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -266,6 +566,130 @@ def test_dense_aux_supervision_is_training_only():
         output, _ = model(batch['img'])
     assert output.shape == (1, 100, 68)
     assert model._last_aux_dense is None
+
+
+def test_supervised_query_appearance_is_stride2_identity_initialized_and_trainable():
+    """Appearance BCE+Dice reaches b1 while zero-init query fusion preserves the control initially."""
+    model = NuLiteRayCastDETRModel(
+        nc=5,
+        n_rays=64,
+        variant='fastvit_t8',
+        pretrained=False,
+        nq=16,
+        ndl=4,
+        hd=32,
+        d_ffn=64,
+        grid_size=0.25,
+        recast=True,
+        recast_after_layer=3,
+        appearance_weight=0.25,
+        appearance_channels=16,
+        verbose=False,
+    )
+    assert torch.count_nonzero(model.detr.appearance_fusion.projection.weight) == 0
+    model.train()
+    batch = _synthetic_batch(bs=1, anns=4, h=64)
+    total, items = model.loss(batch)
+    total.backward()
+    assert torch.isfinite(total)
+    assert items.shape == (6,)
+    assert model._last_appearance_logits.shape[-2:] == (32, 32)
+    assert model.appearance_head.b1[0].weight.grad is not None
+    assert model.detr.appearance_fusion.projection.weight.grad is not None
+
+
+def test_query_presence_labels_ignore_ambiguous_queries_and_handle_empty_images():
+    """Presence supervision accepts multiple valid positives and safe negatives only."""
+    model = object.__new__(NuLiteRayCastDETRModel)
+    torch.nn.Module.__init__(model)
+    model.presence_negative_margin_px = 4.0
+    rays = torch.full((1, 8), 0.1)
+    gt = torch.cat((torch.tensor([[0.5, 0.5]]), rays), -1)
+    predictions = torch.cat(
+        (
+            torch.tensor([[[0.5, 0.5], [0.52, 0.5], [0.8, 0.8]]]),
+            torch.full((1, 3, 8), 0.1),
+        ),
+        -1,
+    )
+    logits = torch.zeros(1, 3, requires_grad=True)
+    targets = {'bboxes': gt, 'imgsz': 256}
+    loss = model._query_presence_loss(logits, predictions, targets, [1])
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert logits.grad is not None
+
+    empty_loss = model._query_presence_loss(logits.detach(), predictions, {'bboxes': gt[:0], 'imgsz': 256}, [0])
+    assert torch.isfinite(empty_loss)
+
+
+def test_query_presence_supervision_is_training_only_and_reaches_post_fusion_queries():
+    """The appearance+presence variant adds one loss item and trains its auxiliary head."""
+    model = NuLiteRayCastDETRModel(
+        nc=5,
+        n_rays=64,
+        variant='fastvit_t8',
+        pretrained=False,
+        nq=16,
+        ndl=4,
+        hd=32,
+        d_ffn=64,
+        grid_size=0.25,
+        recast=True,
+        recast_after_layer=3,
+        appearance_weight=0.25,
+        presence_weight=0.1,
+        appearance_channels=16,
+        verbose=False,
+    )
+    model.train()
+    total, items = model.loss(_synthetic_batch(bs=1, anns=4, h=64))
+    total.backward()
+
+    assert torch.isfinite(total)
+    assert items.shape == (7,)
+    assert model.detr.presence_head.weight.grad is not None
+    assert model.detr._last_presence_polygons is not None
+    assert not model.detr._last_presence_polygons.requires_grad
+
+    model.eval()
+    with torch.no_grad():
+        model(_synthetic_batch(bs=1, anns=0, h=64)['img'])
+    assert model.detr._last_presence_logits is None
+
+
+def test_appearance_imitation_trains_small_owner_against_exemplar_and_duplicate():
+    """Small owners imitate a reliable same-type owner while duplicates remain negatives."""
+    model = object.__new__(NuLiteRayCastDETRModel)
+    torch.nn.Module.__init__(model)
+    model.nc = 2
+    model.n_rays = 8
+    model.appearance_channels = 4
+    model.appearance_imitation_temperature = 0.1
+    model.appearance_imitation_small_area = 200.0
+    model.appearance_imitation_projection = torch.nn.Sequential(
+        torch.nn.Linear(12, 4, bias=False), torch.nn.LayerNorm(4)
+    )
+    model.criterion = SimpleNamespace(
+        matcher=lambda *args: [(torch.tensor([0, 1]), torch.tensor([0, 1]))]
+    )
+    embeddings = torch.randn(1, 4, 12, requires_grad=True)
+    # q0 owns the small GT, q1 owns the large GT, q2 is a mutual-center duplicate.
+    polygons = torch.zeros(1, 4, 10)
+    polygons[0, :, :2] = torch.tensor([[0.3, 0.3], [0.7, 0.7], [0.3, 0.3], [0.9, 0.1]])
+    polygons[0, :, 2:] = torch.tensor([0.03, 0.08, 0.03, 0.02]).unsqueeze(1)
+    scores = torch.full((1, 4, 3), -4.0)
+    scores[0, 1, 0] = 4.0
+    gt = torch.zeros(2, 10)
+    gt[:, :2] = torch.tensor([[0.3, 0.3], [0.7, 0.7]])
+    gt[:, 2:] = torch.tensor([0.03, 0.08]).unsqueeze(1)
+    targets = {'bboxes': gt, 'cls': torch.tensor([0, 0]), 'imgsz': 256}
+
+    loss = model._appearance_imitation_loss(embeddings, polygons, scores, targets, [2])
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert loss > 0
+    assert embeddings.grad is not None
 
 
 def test_segmentation_guided_foreground_margin_backward():

@@ -51,6 +51,7 @@ class TrainingSettings(BaseModel):
     architecture: str = 'yolo26'  # 'yolo26' = classic YAML-built FCN; 'nulite' = NuLiteRayCastModel
     nulite_variant: str = 'fastvit_s12'  # FastViT encoder variant (timm create_model name)
     nulite_ckpt: str | None = None  # NuLite-pretrained encoder/decoder ckpt (V2 upper bound); null = from-scratch
+    nulite_oracle_kind: str = 'binary'  # binary, center_potential, or fg_centroid
     pretrained: bool = True  # ImageNet-pretrained encoder via timm (V1/V2); false = full scratch
     lambda_seg: float = 1.0  # NP seg loss weight (0.0 = V3 no-seg baseline)
     seed_map_target: bool = False  # InstanSeg-style center-weighted distance-to-boundary seg target (vs hard binary NP)
@@ -90,6 +91,20 @@ class TrainingSettings(BaseModel):
     detr_respawn: bool = False  # recall-repair 2nd decoder pass: re-anchor emptiest queries on uncovered seed peaks
     detr_respawn_peaks: int = 64  # max respawned queries per image
     detr_respawn_min_seed: float = 0.5  # min seed value for a candidate respawn peak
+    detr_self_attention_rope: bool = False  # rotate decoder self-attention Q/K at current query centroids
+    detr_rope_theta: float = 100.0  # STRING frequency base used by LSP-DETR
+    detr_rope_position_scale: float = 0.05  # normalized spatial unit (one 20x20 grid cell)
+    detr_polygon_masked_attention: bool = False  # prior polygon softly masks next layer's cross-attention samples
+    detr_polygon_oracle_mask: bool = False  # multiply the query polygon mask by frozen oracle FG probability
+    detr_polygon_mask_floor: float = 0.1  # minimum outside-polygon attention multiplier
+    detr_polygon_mask_temperature: float = 0.1  # outside-boundary decay width in radius-ratio units
+    detr_appearance_weight: float = 0.0  # stride-2 union-mask BCE+Dice and query appearance injection
+    detr_appearance_channels: int = 32  # supervised high-resolution appearance width
+    detr_presence_weight: float = 0.0  # training-only post-fusion query presence BCE
+    detr_appearance_imitation_weight: float = 0.0  # owner-only small-query exemplar loss
+    detr_appearance_imitation_temperature: float = 0.1
+    detr_appearance_imitation_small_area: float = 200.0
+    detr_presence_negative_margin_px: float = 4.0  # unambiguous negative center clearance
     detr_aux_dense_weight: float = 0.0  # training-only dense supervision on trainable b3/b4/b5 (0=off)
     detr_aux_dense_type_weight: float = 1.0  # nucleus-type term relative to dense objectness
     detr_seg_fg_margin_weight: float = 0.0  # matched-positive segmentation-guided true-class vs empty margin
@@ -105,6 +120,8 @@ class TrainingSettings(BaseModel):
     detr_mds: bool = True  # MDS-DETR rank-causal self-attn mask (local winner-take-all, duplicate suppression)
     detr_cost_inside: float = 10.0  # LSP-DETR inner-mask cost Wm: lambda for matching a centroid outside its GT (0=off)
     detr_per_layer_match: bool = False  # LSP-DETR 'look forward twice': run the Hungarian matcher per decoder layer (vs reuse last-layer match)
+    detr_duplicate_train_topk: int = 1  # positives per GT; 1=Hungarian owner only, 3=owner plus <=2 duplicates
+    detr_duplicate_nms_iou: float = 0.5  # polygon NMS IoU used only when duplicate_train_topk > 1
     detr_use_decoder: bool = True  # False = bypass NuLite decoder+NP head, DETR reads raw FastViT stage features (~12.2M)
     detr_shared_layers: bool = False  # weight-share the transformer decoder layer across all ndl steps (params-only saving)
     detr_separable_decoder: bool = False  # depthwise-separable NuLite decoder convs (sub-10M model)

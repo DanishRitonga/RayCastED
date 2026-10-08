@@ -189,19 +189,32 @@ class NuLiteEncoderDecoder(nn.Module):
 
 
 class NuLiteSegOracle(nn.Module):
-    """Frozen NuLite-T foreground oracle (segmentation prior stream).
+    """Frozen NuLite-T binary, centroid, or dual-output oracle.
 
     Replicates the trained NuLite-T U-Net EXACTLY (encoder + decoder0 + full
-    upsample decoder + 2-channel np_head) so a fold1-only oracle checkpoint
+    upsample decoder + configurable np_head) so a fold1-only oracle checkpoint
     saved by ``train_nulite_seg.py`` loads wholesale (state_dict key-for-key,
-    622 keys for the separable-decoder variant). Used as the frozen seg stream
-    in the two-stream baseline: it produces a 2-class CE logit map whose
-    foreground logit (``ch1 - ch0``) is the per-query foreground cue fed to the
-    DETR score head / feature conditioning.
+    622 keys for the separable-decoder variant). Binary checkpoints produce
+    two CE logits; centroid-potential checkpoints produce one direct logit.
     """
 
-    def __init__(self, variant: str = 'fastvit_s12', separable_decoder: bool = True):
+    def __init__(
+        self,
+        variant: str = 'fastvit_s12',
+        separable_decoder: bool = True,
+        output_channels: int = 2,
+        oracle_kind: str = 'binary',
+    ):
         super().__init__()
+        if output_channels not in (1, 2):
+            raise ValueError('NuLiteSegOracle output_channels must be 1 or 2')
+        if oracle_kind not in {'binary', 'center_potential', 'fg_centroid'}:
+            raise ValueError("oracle_kind must be 'binary', 'center_potential', or 'fg_centroid'")
+        expected_channels = 1 if oracle_kind == 'center_potential' else 2
+        if output_channels != expected_channels:
+            raise ValueError(f'oracle kind {oracle_kind!r} requires {expected_channels} output channels')
+        self.output_channels = int(output_channels)
+        self.oracle_kind = oracle_kind
         self.encoder_decoder = NuLiteEncoderDecoder(
             variant=variant, pretrained=False, use_decoder=True, separable_decoder=separable_decoder
         )
@@ -209,11 +222,11 @@ class NuLiteSegOracle(nn.Module):
         self.decoder0 = _ConvBlock(3, emb0, 3, separable=False)
         self.np_head = nn.Sequential(
             _ConvBlock(2 * emb0, emb0),
-            nn.Conv2d(emb0, 2, 1),
+            nn.Conv2d(emb0, self.output_channels, 1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run the full U-Net and return the 2-channel CE logits (B, 2, H, W)."""
+        """Run the full U-Net and return binary or centroid-potential logits."""
         d = self.encoder_decoder(x)
         x0 = self.decoder0(x)
         xt = torch.cat([x0, d['b1']], dim=1)
@@ -229,6 +242,11 @@ class NuLiteSegOracle(nn.Module):
         exactly and needs no remap.
         """
         ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        config = ckpt.get('config', {}) if isinstance(ckpt, dict) else {}
+        checkpoint_kind = config.get('oracle_kind')
+        expected_kind = self.oracle_kind
+        if checkpoint_kind is not None and checkpoint_kind != expected_kind:
+            raise ValueError(f'oracle checkpoint kind is {checkpoint_kind!r}, but model expects {expected_kind!r}')
         state = ckpt.get('model_state_dict', ckpt.get('state_dict', ckpt))
         own = self.state_dict()
         remapped = {}
@@ -247,6 +265,11 @@ class NuLiteSegOracle(nn.Module):
             f'NuLite seg-oracle load: {len(remapped)}/{len(own)} keys matched'
             + (f' (missing {len(missing)}, e.g. {missing[:4]})' if missing else '')
         )
+        if missing:
+            raise ValueError(
+                f'oracle checkpoint is incompatible: {len(missing)} parameters were not loaded; '
+                f'first keys: {missing[:4]}'
+            )
         self.load_state_dict(remapped, strict=False)
 
 
@@ -271,9 +294,7 @@ class _DeformConv2d(nn.Module):
         from torchvision.ops import DeformConv2d
 
         super().__init__()
-        self.deform = DeformConv2d(
-            in_channels, out_channels, kernel_size, stride, padding, bias=bias
-        )
+        self.deform = DeformConv2d(in_channels, out_channels, kernel_size, stride, padding, bias=bias)
         offset_channels = 2 * deform_groups * kernel_size * kernel_size
         self.conv_offset = nn.Conv2d(in_channels, offset_channels, kernel_size, stride, padding)
         nn.init.zeros_(self.conv_offset.weight)

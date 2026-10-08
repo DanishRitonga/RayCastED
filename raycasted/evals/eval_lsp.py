@@ -16,7 +16,9 @@ metrics/panoptic_quality.py + metrics/f1_score.py + det_meta_arch.py):
         are zeroed before counting (masked_preds = preds & ~union(gt)).
   - F1 : centroid distance Hungarian, radius 12 px, GLOBAL tp/fp/fn sums.
   - Labels: logits.argmax over nc+1, dropping the no-object (last) column.
-        NO confidence threshold is applied at evaluation.
+        NO confidence threshold is applied at evaluation. Duplicate-trained
+        checkpoints additionally use class-agnostic polygon NMS by default;
+        pass --raw-duplicates for the unsuppressed diagnostic.
   - 'Average' row = macro mean over per-tissue means; STD across the 3 CV
         folds (computed across runs by the caller, not here).
 
@@ -42,6 +44,7 @@ from torch.utils.data import DataLoader
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.evals.eval_pannuke import load_model
+from raycasted.evals.polygon_nms import polygon_nms_indices
 from raycasted.model.register import register_raycast_head
 
 TISSUE_NAMES = [
@@ -202,7 +205,8 @@ def roi_id_from_path(path: str) -> int:
 def run_inference_raw(model, dataloader, device):
     """Run model and emit per-image LSP-style decoded detections.
 
-    Each element: dict(polys=(N, 66) pixel coords, labels=(N,) int in [0, nc))
+    Each element: dict(polys=(N, 66) pixel coords, labels=(N,) int in [0, nc),
+    scores=(N,) foreground confidence)
     from logits.argmax over nc+1 with the no-object (last) column dropped.
     """
     results = []
@@ -230,14 +234,18 @@ def run_inference_raw(model, dataloader, device):
             for si in range(bs):
                 poly_n = dec_polys[si].cpu().numpy()  # normalized [0,1]
                 logits = dec_logits[si].cpu().numpy()
-                keep = (
-                    logits.argmax(-1) != (logits.shape[-1] - 1) if no_object else np.ones(logits.shape[0], dtype=bool)
-                )
+                if no_object:
+                    keep = logits.argmax(-1) != (logits.shape[-1] - 1)
+                    scores = 1.0 - torch.sigmoid(torch.from_numpy(logits[:, -1])).numpy()
+                else:
+                    keep = np.ones(logits.shape[0], dtype=bool)
+                    scores = torch.sigmoid(torch.from_numpy(logits)).max(dim=-1).values.numpy()
                 poly_n = poly_n[keep]
                 labels = logits[keep].argmax(-1)
+                scores = scores[keep]
                 # normalized -> pixel (square crop == imgsz)
                 poly_px = poly_n * crop
-                results.append({'polys': poly_px, 'labels': labels.astype(int)})
+                results.append({'polys': poly_px, 'labels': labels.astype(int), 'scores': scores})
     return results
 
 
@@ -466,6 +474,17 @@ def main():
     ap.add_argument('--device', default='0')
     ap.add_argument('--workers', type=int, default=4)
     ap.add_argument(
+        '--polygon-nms-iou',
+        type=float,
+        default=None,
+        help='class-agnostic polygon NMS IoU; auto-enables from checkpoint for duplicate-trained models',
+    )
+    ap.add_argument(
+        '--raw-duplicates',
+        action='store_true',
+        help='disable checkpoint-inferred polygon NMS and evaluate raw duplicate predictions',
+    )
+    ap.add_argument(
         '--watershed',
         action='store_true',
         help='also resolve pred overlaps via LSP distance-transform '
@@ -482,6 +501,11 @@ def main():
     model = load_model(args.weights, device)
     tr = getattr(model, 'training_args', {})
     crop = int(tr.get('crop_size', 256))
+    nms_iou = args.polygon_nms_iou
+    if nms_iou is None and not args.raw_duplicates and int(tr.get('detr_duplicate_train_topk', 1)) > 1:
+        nms_iou = float(tr.get('detr_duplicate_nms_iou', 0.5))
+    if nms_iou is not None and not 0.0 <= nms_iou <= 1.0:
+        raise ValueError('--polygon-nms-iou must be in [0, 1]')
 
     # map tile path -> roi id
     tile_paths = sorted(Path(args.data_dir).glob('*.npz'))
@@ -497,13 +521,25 @@ def main():
     total = TissueStats()
     per_tissue_ws = {} if args.watershed else None
     total_ws = TissueStats() if args.watershed else None
-    n_pred_total = n_gt_total = 0
+    n_pred_total = n_pred_raw_total = n_gt_total = 0
     n_pred_total_ws = 0
     for path, res in zip(tile_paths, preds):
         roi = roi_id_from_path(path)
         gt_masks, gt_labels, tissue = gt.get(roi)
         pred_polys = res['polys']
         pred_labels = res['labels']
+        pred_scores = res['scores']
+        n_pred_raw_total += len(pred_polys)
+        if nms_iou is not None:
+            keep = polygon_nms_indices(
+                pred_polys,
+                pred_scores,
+                iou_threshold=nms_iou,
+                class_ids=pred_labels,
+                class_agnostic=True,
+            )
+            pred_polys = pred_polys[keep]
+            pred_labels = pred_labels[keep]
         if len(pred_polys) == 0:
             pm, pl = [], np.zeros((0,), dtype=int)
             ws_pm, ws_pl = [], np.zeros((0,), dtype=int)
@@ -528,7 +564,14 @@ def main():
             total_ws.update(ws_pm, ws_pl, gt_masks, gt_labels)
             total_ws.update_f1(ws_pm, gt_masks)
 
-    print(f'GT instances: {n_gt_total}   Pred instances (all non-∅): {n_pred_total}')
+    print(f'GT instances: {n_gt_total}   Raw pred instances (all non-∅): {n_pred_raw_total}')
+    if nms_iou is not None:
+        print(
+            f'Class-agnostic polygon NMS IoU={nms_iou:g}: {n_pred_total} instances '
+            f'(keep {n_pred_total / max(n_pred_raw_total, 1):.3f})'
+        )
+    else:
+        print(f'Evaluated pred instances: {n_pred_total} (raw; polygon NMS disabled)')
     print(f'Per-image-mean bPQ (whole fold): {total.summary()["bPQ"]:.4f}')
     print(f'Per-image-mean mPQ (whole fold): {total.summary()["mPQ"]:.4f}')
     print()

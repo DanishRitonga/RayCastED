@@ -223,6 +223,135 @@ class RayCastHungarianMatcher(nn.Module):
         return indices
 
 
+class RayCastTaskAlignedMatcher(nn.Module):
+    """Select bounded, geometrically valid one-to-many positives for training."""
+
+    def __init__(self, topk=3, alpha=1.0, beta=6.0, n_rays=None, no_object=True):
+        super().__init__()
+        if topk < 1:
+            raise ValueError('topk must be at least 1')
+        if alpha <= 0 or beta <= 0:
+            raise ValueError('alpha and beta must be positive')
+        self.topk = int(topk)
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        self.n_rays = n_rays or _const.N_RAYS
+        self.no_object = bool(no_object)
+
+    @torch.no_grad()
+    def forward(self, pred_polygons, pred_scores, gt_polygons, gt_cls, gt_groups):
+        """Return per-image query/global-target pairs, with one target per query."""
+        bs, nq = pred_scores.shape[:2]
+        if sum(gt_groups) == 0:
+            empty = torch.empty(0, dtype=torch.long)
+            return [(empty.clone(), empty.clone()) for _ in range(bs)]
+
+        probabilities = pred_scores.detach().sigmoid()
+        polygons = pred_polygons.detach()
+        gt_poly_split = gt_polygons.split(gt_groups)
+        gt_cls_split = gt_cls.split(gt_groups)
+        indices = []
+        gt_offset = 0
+
+        for bi in range(bs):
+            p_scores = probabilities[bi]
+            p_poly = polygons[bi]
+            g_poly = gt_poly_split[bi]
+            g_cls = gt_cls_split[bi]
+            n_gt = g_poly.shape[0]
+            if n_gt == 0:
+                empty = torch.empty(0, dtype=torch.long)
+                indices.append((empty.clone(), empty.clone()))
+                continue
+
+            pred_xy, pred_rays = p_poly[:, :2], p_poly[:, 2:]
+            gt_xy, gt_rays = g_poly[:, :2], g_poly[:, 2:]
+            inside = _points_inside_star(pred_xy, gt_xy, gt_rays, self.n_rays)
+            class_prob = p_scores[:, g_cls]
+            if self.no_object:
+                class_prob = class_prob * (1.0 - p_scores[:, -1:])
+
+            alignment = p_poly.new_full((nq, n_gt), float('-inf'))
+            query_idx, gt_idx = inside.nonzero(as_tuple=True)
+            if len(query_idx) > 0:
+                cost_xy = (pred_xy[query_idx] - gt_xy[gt_idx]).abs().sum(-1)
+                ray_cos, ray_sin = build_ray_directions(
+                    self.n_rays, device=p_poly.device, dtype=p_poly.dtype
+                )
+                gt_vertices = _normed_rays_to_vertices(gt_xy, gt_rays, 1.0, ray_cos, ray_sin)
+                target_rays = _analytical_ray_distances_paired(
+                    pred_xy[query_idx], gt_vertices[gt_idx], ray_cos, ray_sin
+                )
+                cost_radial = (
+                    pred_rays[query_idx].clamp_min(1e-4).log()
+                    - target_rays.clamp_min(1e-4).log()
+                ).abs().mean(-1)
+                geometry = torch.exp(-self.beta * (cost_xy + cost_radial))
+                alignment[query_idx, gt_idx] = (
+                    class_prob[query_idx, gt_idx].clamp_min(1e-8).pow(self.alpha) * geometry
+                )
+
+            k = min(self.topk, nq)
+            top_values, top_queries = alignment.topk(k, dim=0)
+            valid = torch.isfinite(top_values)
+            selected = torch.zeros_like(inside)
+            if valid.any():
+                target_grid = torch.arange(n_gt, device=p_poly.device).view(1, -1).expand(k, -1)
+                selected[top_queries[valid], target_grid[valid]] = True
+
+            has_target = selected.any(dim=1)
+            src_idx = has_target.nonzero(as_tuple=False).squeeze(1)
+            if len(src_idx) > 0:
+                selected_scores = alignment[src_idx].masked_fill(~selected[src_idx], float('-inf'))
+                dst_local = selected_scores.argmax(dim=1)
+            else:
+                dst_local = torch.empty(0, dtype=torch.long, device=p_poly.device)
+            indices.append((src_idx.cpu(), (dst_local + gt_offset).cpu()))
+            gt_offset += n_gt
+
+        return indices
+
+
+class RayCastDuplicateMatcher:
+    """Keep each Hungarian owner and add bounded task-aligned duplicates."""
+
+    def __init__(self, matcher, topk=3, no_object=True):
+        if topk < 2:
+            raise ValueError('duplicate matcher topk must be at least 2')
+        self.matcher = matcher
+        self.topk = int(topk)
+        self.extra_matcher = RayCastTaskAlignedMatcher(
+            topk=self.topk,
+            n_rays=matcher.n_rays,
+            no_object=no_object,
+        )
+
+    @torch.no_grad()
+    def __call__(self, pred_polygons, pred_scores, gt_polygons, gt_cls, gt_groups):
+        """Return Hungarian owners plus non-conflicting task-aligned duplicates."""
+        owners = self.matcher(pred_polygons, pred_scores, gt_polygons, gt_cls, gt_groups)
+        extras = self.extra_matcher(pred_polygons, pred_scores, gt_polygons, gt_cls, gt_groups)
+        combined = []
+        for (owner_q, owner_gt), (extra_q, extra_gt) in zip(owners, extras):
+            query_to_gt = {int(q): int(g) for q, g in zip(owner_q.tolist(), owner_gt.tolist())}
+            per_gt = {}
+            for gt_idx in query_to_gt.values():
+                per_gt[gt_idx] = per_gt.get(gt_idx, 0) + 1
+            for query_idx, gt_idx in zip(extra_q.tolist(), extra_gt.tolist()):
+                if query_idx in query_to_gt or per_gt.get(gt_idx, 0) >= self.topk:
+                    continue
+                query_to_gt[query_idx] = gt_idx
+                per_gt[gt_idx] = per_gt.get(gt_idx, 0) + 1
+            ordered_queries = sorted(query_to_gt)
+            combined.append(
+                (
+                    torch.tensor(ordered_queries, dtype=torch.long),
+                    torch.tensor([query_to_gt[q] for q in ordered_queries], dtype=torch.long),
+                )
+            )
+        return combined
+
+
 class NuLiteDETRLoss(nn.Module):
     """Detection loss for the NuLite DETR head: focal/VFL cls + ray L1 + polar IoU.
 
@@ -243,6 +372,7 @@ class NuLiteDETRLoss(nn.Module):
         per_layer_match=False,
         lsp_mode=False,
         matcher_lsp=False,
+        duplicate_train_topk=1,
     ):
         super().__init__()
         if loss_gain is None:
@@ -255,6 +385,9 @@ class NuLiteDETRLoss(nn.Module):
         self.aux_loss = aux_loss
         self.no_object = no_object
         self.per_layer_match = per_layer_match
+        self.duplicate_train_topk = int(duplicate_train_topk)
+        if self.duplicate_train_topk < 1:
+            raise ValueError('duplicate_train_topk must be at least 1')
         self.n_rays = n_rays or _const.N_RAYS
         # LSP-DETR-exact: drop polar-IoU/smooth regression terms, keep our
         # calibrated xy/l1 gains, equal ∅/class columns, matcher gate ~9999.
@@ -263,6 +396,11 @@ class NuLiteDETRLoss(nn.Module):
             cost_gain={'class': 2, 'ray': 5, 'piou': 2, 'inside': cost_inside},
             n_rays=self.n_rays,
             lsp_mode=(lsp_mode or matcher_lsp),
+        )
+        self.duplicate_matcher = (
+            RayCastDuplicateMatcher(self.matcher, self.duplicate_train_topk, no_object=self.no_object)
+            if self.duplicate_train_topk > 1
+            else self.matcher
         )
         from ultralytics.utils.loss import FocalLoss, VarifocalLoss
 
@@ -391,7 +529,9 @@ class NuLiteDETRLoss(nn.Module):
         num_gts = sum(gt_groups)
 
         if match_indices is None:
-            match_indices = self.matcher(pred_polygons, pred_scores, gt_polygons, gt_cls, gt_groups)
+            match_indices = self.duplicate_matcher(
+                pred_polygons, pred_scores, gt_polygons, gt_cls, gt_groups
+            )
 
         (batch_idx, src_idx), dst_idx = self._get_index(match_indices)
 
@@ -445,7 +585,9 @@ class NuLiteDETRLoss(nn.Module):
         loss = torch.zeros(5, device=pred_polygons.device)
         if not self.per_layer_match and match_indices is None:
             # Legacy: match once on the last layer, reuse indices for all aux layers.
-            match_indices = self.matcher(pred_polygons[-1], pred_scores[-1], gt_polygons, gt_cls, gt_groups)
+            match_indices = self.duplicate_matcher(
+                pred_polygons[-1], pred_scores[-1], gt_polygons, gt_cls, gt_groups
+            )
         for aux_polygons, aux_scores in zip(pred_polygons, pred_scores):
             loss_ = self._get_loss(
                 aux_polygons,

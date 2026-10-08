@@ -18,6 +18,7 @@ from ultralytics.utils.metrics import DetMetrics, Metric, ap_per_class
 from raycasted.data.etl.ops.iou import polar_iou_pairwise_flat_torch
 from raycasted.data.etl.utils import constants as _val_const
 from raycasted.data.etl.utils.constants import configure_rays
+from raycasted.evals.polygon_nms import polygon_nms_indices
 from raycasted.model.blocks.head import RayCastDetect
 from raycasted.model.metrics import compute_bpq_from_iou
 
@@ -147,16 +148,32 @@ class RayCastValidator(DetectionValidator):
     Subclasses DetectionValidator, replacing bounding-box IoU with GPU-accelerated
     Polar IoU (same metric used in training loss). Reports polar mAP and bPQ.
 
-    No NMS — the end-to-end model already does top-k selection via
-    Hungarian matching. Distance-based dedup is handled by RayCastPredictor.
+    The standard one-to-one path is NMS-free.  When the explicit duplicate
+    training experiment is enabled, class-agnostic polygon NMS metrics become
+    the primary validation track and raw metrics are retained as telemetry.
     """
 
-    def __init__(self, dataloader=None, save_dir=None, args=None, _callbacks=None):
+    def __init__(
+        self,
+        dataloader=None,
+        save_dir=None,
+        args=None,
+        _callbacks=None,
+        duplicate_eval=False,
+        polygon_nms_iou=0.5,
+    ):
         super().__init__(dataloader, save_dir, args, _callbacks)
         self.args.task = 'detect'
         self.iouv = torch.linspace(0.5, 0.95, 10)
         self.niou = self.iouv.numel()
         self.metrics = RayCastDetMetrics()
+        self.duplicate_eval = bool(duplicate_eval)
+        self.polygon_nms_iou = float(polygon_nms_iou)
+        if not 0.0 <= self.polygon_nms_iou <= 1.0:
+            raise ValueError('polygon_nms_iou must be in [0, 1]')
+        self.raw_metrics = RayCastDetMetrics() if self.duplicate_eval else None
+        self.raw_prediction_count = 0
+        self.nms_prediction_count = 0
         self.raycast_dim = 2 + _val_const.N_RAYS  # default; overwritten in init_metrics from model head
 
     def get_desc(self):
@@ -195,6 +212,9 @@ class RayCastValidator(DetectionValidator):
         self.seen = 0
         self.jdict = []
         self.metrics = RayCastDetMetrics(names=model.names)
+        self.raw_metrics = RayCastDetMetrics(names=model.names) if self.duplicate_eval else None
+        self.raw_prediction_count = 0
+        self.nms_prediction_count = 0
         self.confusion_matrix = None  # skip — incompatible with polygon format
         # Derive raycast_dim from model head — traverse nested model structure
         # During training: model is DetectionModel, model.model is nn.Sequential
@@ -308,6 +328,20 @@ class RayCastValidator(DetectionValidator):
             pred['cls'] *= 0
         return pred
 
+    def _polygon_nms_pred(self, pred):
+        """Apply class-agnostic exact polygon-IoU NMS to one image."""
+        if pred['bboxes'].shape[0] == 0:
+            return pred
+        keep = polygon_nms_indices(
+            pred['bboxes'].detach().cpu().numpy(),
+            pred['conf'].detach().cpu().numpy(),
+            iou_threshold=self.polygon_nms_iou,
+            class_ids=pred['cls'].detach().cpu().numpy(),
+            class_agnostic=True,
+        )
+        keep = torch.as_tensor(keep, device=pred['bboxes'].device, dtype=torch.long)
+        return {key: value[keep] for key, value in pred.items()}
+
     def _process_batch(self, preds, batch):
         """Compute GPU Polar IoU true-positive matrix and return IoU matrix.
 
@@ -345,6 +379,23 @@ class RayCastValidator(DetectionValidator):
 
         return {'tp_shapely': tp_shapely, 'iou_matrix': iou_matrix.cpu().numpy()}
 
+    def _update_metric_track(self, metrics, predn, pbatch):
+        """Update one raw or NMS metric track for a single image."""
+        cls = pbatch['cls'].cpu().numpy()
+        no_pred = predn['cls'].shape[0] == 0
+        batch_result = self._process_batch(predn, pbatch)
+        metrics.update_stats(
+            {
+                **{k: v for k, v in batch_result.items() if k != 'iou_matrix'},
+                'target_cls': cls,
+                'target_img': np.unique(cls),
+                'conf': np.zeros(0) if no_pred else predn['conf'].cpu().numpy(),
+                'pred_cls': np.zeros(0) if no_pred else predn['cls'].cpu().numpy(),
+            }
+        )
+        bpq, bsq, bdq = compute_bpq_from_iou(batch_result['iou_matrix'])
+        metrics.update_bpq(bpq, bsq, bdq)
+
     def update_metrics(self, preds, batch):
         """Update metrics with polygon predictions and ground truth.
 
@@ -355,29 +406,36 @@ class RayCastValidator(DetectionValidator):
             pbatch = self._prepare_batch(si, batch)
             predn = self._prepare_pred(pred)
 
-            cls = pbatch['cls'].cpu().numpy()
-            no_pred = predn['cls'].shape[0] == 0
-            batch_result = self._process_batch(predn, pbatch)
-            self.metrics.update_stats(
-                {
-                    **{k: v for k, v in batch_result.items() if k != 'iou_matrix'},
-                    'target_cls': cls,
-                    'target_img': np.unique(cls),
-                    'conf': np.zeros(0) if no_pred else predn['conf'].cpu().numpy(),
-                    'pred_cls': np.zeros(0) if no_pred else predn['cls'].cpu().numpy(),
-                }
-            )
-
-            # bPQ via polar IoU matrix (same metric as training, no rasterization)
-            iou_matrix = batch_result['iou_matrix']
-            bpq, bsq, bdq = compute_bpq_from_iou(iou_matrix)
-            self.metrics.update_bpq(bpq, bsq, bdq)
+            if self.duplicate_eval:
+                self.raw_prediction_count += int(predn['cls'].shape[0])
+                self._update_metric_track(self.raw_metrics, predn, pbatch)
+                predn = self._polygon_nms_pred(predn)
+                self.nms_prediction_count += int(predn['cls'].shape[0])
+            self._update_metric_track(self.metrics, predn, pbatch)
 
     def get_stats(self):
         """Compute and return validation metrics."""
         self.metrics.process(save_dir=self.save_dir, plot=self.args.plots, on_plot=self.on_plot)
+        results = self.metrics.results_dict
         self.metrics.clear_stats()
-        return self.metrics.results_dict
+        if self.duplicate_eval:
+            self.raw_metrics.process(save_dir=self.save_dir, plot=False, on_plot=None)
+            raw_results = self.raw_metrics.results_dict
+            self.raw_metrics.clear_stats()
+            raw_names = {
+                'metrics/precision(P)': 'metrics/raw_precision(P)',
+                'metrics/recall(P)': 'metrics/raw_recall(P)',
+                'metrics/mAP50(P)': 'metrics/raw_mAP50(P)',
+                'metrics/mAP50-95(P)': 'metrics/raw_mAP50-95(P)',
+                'metrics/bPQ': 'metrics/raw_bPQ',
+                'metrics/bSQ': 'metrics/raw_bSQ',
+                'metrics/bDQ': 'metrics/raw_bDQ',
+            }
+            results.update({raw_names[key]: value for key, value in raw_results.items() if key in raw_names})
+            results['metrics/raw_predictions'] = self.raw_prediction_count
+            results['metrics/nms_predictions'] = self.nms_prediction_count
+            results['metrics/nms_keep_ratio'] = self.nms_prediction_count / max(self.raw_prediction_count, 1)
+        return results
 
     def plot_predictions(self, batch, preds, ni):
         """Skip standard bbox prediction plotting — incompatible with 34-dim polygon data."""

@@ -366,6 +366,17 @@ def _lr_log_callback(trainer):
     LOGGER.info(f'Epoch {trainer.epoch + 1} LR: {lr_str}')
 
 
+def _end_epoch_callback(trainer):
+    """Stop cleanly after a requested 1-based epoch without changing the LR schedule."""
+    end_epoch = getattr(trainer, 'end_epoch', None)
+    if end_epoch is not None and trainer.epoch + 1 >= end_epoch:
+        LOGGER.info(
+            f'Reached requested end epoch {end_epoch}; stopping after validation and checkpoint save '
+            f'(scheduler remains configured for {trainer.args.epochs} epochs).'
+        )
+        trainer.stop = True
+
+
 class RayCastTrainer(DetectionTrainer):
     """Training pipeline for RayCastED polygon detection model.
 
@@ -381,7 +392,7 @@ class RayCastTrainer(DetectionTrainer):
         set_model_attributes — Training metadata for inference/export
     """
 
-    def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None, training_config=None):
+    def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None, training_config=None, end_epoch=None):
         """Initialise RayCastTrainer with mosaic/mixup forced off.
 
         Args:
@@ -389,6 +400,7 @@ class RayCastTrainer(DetectionTrainer):
             overrides: Dict of parameter overrides.
             _callbacks: Callback functions.
             training_config: Dict of training settings from YAML (or None for legacy defaults).
+            end_epoch: Optional 1-based epoch to stop after, without changing ``args.epochs``.
         """
         overrides = overrides or {}
         super().__init__(cfg, overrides, _callbacks)
@@ -396,11 +408,20 @@ class RayCastTrainer(DetectionTrainer):
         self.args.mosaic = 0.0
         self.args.mixup = 0.0
         self.training_config = training_config  # dict or None
+        self.end_epoch = int(end_epoch) if end_epoch is not None else None
+        if self.end_epoch is not None:
+            if self.end_epoch < 1:
+                raise ValueError('end_epoch must be at least 1')
+            if self.end_epoch > int(self.args.epochs):
+                raise ValueError(f'end_epoch ({self.end_epoch}) cannot exceed epochs ({self.args.epochs})')
+            # Keep the custom control outside Ultralytics' args namespace so
+            # checkpoints remain resumable by its strict config validator.
 
         # Register best-epoch logger — prints after each validation epoch
         self.add_callback('on_fit_epoch_end', _best_epoch_callback)
         # Register per-epoch LR logging — critical for MuSGD multi-group debugging
         self.add_callback('on_fit_epoch_end', _lr_log_callback)
+        self.add_callback('on_train_epoch_end', _end_epoch_callback)
         # Staged backbone unfreeze (no-op unless backbone_freeze_epochs > 0)
         self.add_callback('on_train_epoch_start', self._staged_backbone_unfreeze)
         self.add_callback('on_train_epoch_start', self._staged_decoder_unfreeze)
@@ -792,6 +813,7 @@ class RayCastTrainer(DetectionTrainer):
             content_top=bool(tcfg.get('detr_content_top', False)),
             seed_resize=str(tcfg.get('detr_seed_resize', 'bilinear')),
             seed_resize_frac=float(tcfg.get('detr_seed_resize_frac', 0.25)),
+            oracle_kind=str(tcfg.get('nulite_oracle_kind', 'binary')),
             detr_layer_schedule=str(tcfg.get('detr_layer_schedule', '')),
             hybrid_peaks=int(tcfg.get('detr_hybrid_peaks', 100)),
             seed_level=bool(tcfg.get('detr_seed_level', False)),
@@ -802,6 +824,20 @@ class RayCastTrainer(DetectionTrainer):
             respawn=bool(tcfg.get('detr_respawn', False)),
             respawn_peaks=int(tcfg.get('detr_respawn_peaks', 64)),
             respawn_min_seed=float(tcfg.get('detr_respawn_min_seed', 0.5)),
+            self_attention_rope=bool(tcfg.get('detr_self_attention_rope', False)),
+            rope_theta=float(tcfg.get('detr_rope_theta', 100.0)),
+            rope_position_scale=float(tcfg.get('detr_rope_position_scale', 0.05)),
+            polygon_masked_attention=bool(tcfg.get('detr_polygon_masked_attention', False)),
+            polygon_oracle_mask=bool(tcfg.get('detr_polygon_oracle_mask', False)),
+            polygon_mask_floor=float(tcfg.get('detr_polygon_mask_floor', 0.1)),
+            polygon_mask_temperature=float(tcfg.get('detr_polygon_mask_temperature', 0.1)),
+            appearance_weight=float(tcfg.get('detr_appearance_weight', 0.0)),
+            appearance_channels=int(tcfg.get('detr_appearance_channels', 32)),
+            presence_weight=float(tcfg.get('detr_presence_weight', 0.0)),
+            appearance_imitation_weight=float(tcfg.get('detr_appearance_imitation_weight', 0.0)),
+            appearance_imitation_temperature=float(tcfg.get('detr_appearance_imitation_temperature', 0.1)),
+            appearance_imitation_small_area=float(tcfg.get('detr_appearance_imitation_small_area', 200.0)),
+            presence_negative_margin_px=float(tcfg.get('detr_presence_negative_margin_px', 4.0)),
             aux_dense_weight=float(tcfg.get('detr_aux_dense_weight', 0.0)),
             aux_dense_type_weight=float(tcfg.get('detr_aux_dense_type_weight', 1.0)),
             seg_fg_margin_weight=float(tcfg.get('detr_seg_fg_margin_weight', 0.0)),
@@ -811,6 +847,7 @@ class RayCastTrainer(DetectionTrainer):
             mds=bool(tcfg.get('detr_mds', True)),
             cost_inside=float(tcfg.get('detr_cost_inside', 10.0)),
             per_layer_match=bool(tcfg.get('detr_per_layer_match', False)),
+            duplicate_train_topk=int(tcfg.get('detr_duplicate_train_topk', 1)),
             seed_map_target=bool(tcfg.get('seed_map_target', True)),
             use_decoder=bool(tcfg.get('detr_use_decoder', True)),
             shared_layers=bool(tcfg.get('detr_shared_layers', False)),
@@ -1134,6 +1171,12 @@ class RayCastTrainer(DetectionTrainer):
                 self.loss_names += ('aux_obj_loss', 'aux_type_loss')
             if float((self.training_config or {}).get('detr_seg_fg_margin_weight', 0.0)) > 0:
                 self.loss_names += ('seg_fg_margin_loss',)
+            if float((self.training_config or {}).get('detr_appearance_weight', 0.0)) > 0:
+                self.loss_names += ('appearance_loss',)
+            if float((self.training_config or {}).get('detr_presence_weight', 0.0)) > 0:
+                self.loss_names += ('presence_loss',)
+            if float((self.training_config or {}).get('detr_appearance_imitation_weight', 0.0)) > 0:
+                self.loss_names += ('appearance_imitation_loss',)
         else:
             self.loss_names = (
                 'xy_loss',
@@ -1147,11 +1190,14 @@ class RayCastTrainer(DetectionTrainer):
         args_copy = copy.copy(self.args)
         if self.training_config and 'inference_conf' in self.training_config:
             args_copy.conf = self.training_config['inference_conf']
+        duplicate_topk = int((self.training_config or {}).get('detr_duplicate_train_topk', 1))
         return RayCastValidator(
             self.test_loader,
             save_dir=self.save_dir,
             args=args_copy,
             _callbacks=self.callbacks,
+            duplicate_eval=duplicate_topk > 1,
+            polygon_nms_iou=float((self.training_config or {}).get('detr_duplicate_nms_iou', 0.5)),
         )
 
     def build_dataset(self, img_path, mode='train', batch=None):  # noqa: ARG002
@@ -1320,6 +1366,8 @@ class RayCastTrainer(DetectionTrainer):
             'nc': head.nc,
             'n_rays': n_rays,
             'strides': strides,
+            'detr_duplicate_train_topk': int((self.training_config or {}).get('detr_duplicate_train_topk', 1)),
+            'detr_duplicate_nms_iou': float((self.training_config or {}).get('detr_duplicate_nms_iou', 0.5)),
         }
 
         # Re-initialise biases with correct crop_size (Ultralytics calls bias_init

@@ -9,6 +9,7 @@ Run with: uv run python tests/phase_10/test_train.py
 import math
 import os
 import tempfile
+from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -20,9 +21,27 @@ from raycasted.model.loss import RayCastE2ELoss
 from raycasted.model.register import register_raycast_head
 from raycasted.model.train import (
     RayCastTrainer,
+    _end_epoch_callback,
     _extract_neck_channels,
     _raycast_collate_fn,
 )
+
+
+def test_end_epoch_stops_after_requested_epoch_without_shortening_schedule():
+    """The independent stop boundary uses 1-based epochs and preserves scheduler length."""
+    trainer = SimpleNamespace(
+        epoch=330,
+        end_epoch=332,
+        stop=False,
+        args=SimpleNamespace(epochs=600),
+    )
+    _end_epoch_callback(trainer)
+    assert not trainer.stop
+
+    trainer.epoch = 331
+    _end_epoch_callback(trainer)
+    assert trainer.stop
+    assert trainer.args.epochs == 600
 
 # ---------------------------------------------------------------------------
 # Helpers

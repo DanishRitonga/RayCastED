@@ -42,6 +42,32 @@ class DenseAuxHead(nn.Module):
         return self.objectness(fused), self.types(fused)
 
 
+class QueryAppearanceHead(nn.Module):
+    """Build a supervised stride-2 appearance map from b1 and b3."""
+
+    def __init__(self, b1_channels: int, b3_channels: int, channels: int = 32):
+        super().__init__()
+        self.b1 = nn.Sequential(
+            nn.Conv2d(b1_channels, channels, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+        )
+        self.b3 = nn.Conv2d(b3_channels, channels, 1, bias=False)
+        self.fuse = nn.Sequential(
+            nn.Conv2d(channels * 2, channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+        )
+        self.mask = nn.Conv2d(channels, 1, 1)
+
+    def forward(self, b1, b3):
+        """Return the fused appearance representation and union-mask logits."""
+        high = self.b1(b1)
+        low = F.interpolate(self.b3(b3), size=high.shape[-2:], mode='bilinear', align_corners=False)
+        appearance = self.fuse(torch.cat((high, low), 1))
+        return appearance, self.mask(appearance)
+
+
 class NuLiteRayCastDETRModel(DetectionModel):
     """Single-head DETR detector on the NuLite seg backbone.
 
@@ -86,6 +112,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         mds: bool = True,
         cost_inside: float = 10.0,
         per_layer_match: bool = False,
+        duplicate_train_topk: int = 1,
         detr_lsp: bool = False,
         detr_matcher_lsp: bool = False,
         detr_layer_schedule: str = '',
@@ -97,6 +124,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         seed_resize: str = 'bilinear',
         seed_resize_frac: float = 0.25,
         seed_map_target: bool = True,
+        oracle_kind: str = 'binary',
         use_decoder: bool = True,
         shared_layers: bool = False,
         separable_decoder: bool = False,
@@ -116,6 +144,20 @@ class NuLiteRayCastDETRModel(DetectionModel):
         seg_fg_margin: float = 1.0,
         seg_fg_radius_px: float = 4.0,
         seg_fg_margin_layer_weights: list[float] | tuple[float, ...] | None = None,
+        self_attention_rope: bool = False,
+        rope_theta: float = 100.0,
+        rope_position_scale: float | None = None,
+        polygon_masked_attention: bool = False,
+        polygon_oracle_mask: bool = False,
+        polygon_mask_floor: float = 0.1,
+        polygon_mask_temperature: float = 0.1,
+        appearance_weight: float = 0.0,
+        presence_weight: float = 0.0,
+        appearance_imitation_weight: float = 0.0,
+        appearance_imitation_temperature: float = 0.1,
+        appearance_imitation_small_area: float = 200.0,
+        appearance_channels: int = 32,
+        presence_negative_margin_px: float = 4.0,
         verbose: bool = True,
     ):
         super(DetectionModel, self).__init__()
@@ -129,6 +171,9 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.xy_weight = xy_weight
         self.cost_inside = cost_inside
         self.per_layer_match = per_layer_match
+        self.duplicate_train_topk = int(duplicate_train_topk)
+        if self.duplicate_train_topk < 1:
+            raise ValueError('duplicate_train_topk must be at least 1')
         self.detr_lsp = detr_lsp
         self.detr_matcher_lsp = detr_matcher_lsp
         self.detr_layer_schedule = detr_layer_schedule
@@ -142,12 +187,22 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.seed_resize = seed_resize
         self.seed_resize_frac = seed_resize_frac
         self.seed_map_target = seed_map_target
+        self.oracle_kind = str(oracle_kind)
+        if self.oracle_kind not in {'binary', 'center_potential', 'fg_centroid'}:
+            raise ValueError("oracle_kind must be 'binary', 'center_potential', or 'fg_centroid'")
         self.aux_dense_weight = aux_dense_weight
         self.aux_dense_type_weight = aux_dense_type_weight
         self.seg_fg_margin_weight = seg_fg_margin_weight
         self.seg_fg_margin = seg_fg_margin
         self.seg_fg_radius_px = seg_fg_radius_px
         self.seg_fg_margin_layer_weights = tuple(float(w) for w in (seg_fg_margin_layer_weights or ()))
+        self.appearance_weight = float(appearance_weight)
+        self.presence_weight = float(presence_weight)
+        self.appearance_imitation_weight = float(appearance_imitation_weight)
+        self.appearance_imitation_temperature = float(appearance_imitation_temperature)
+        self.appearance_imitation_small_area = float(appearance_imitation_small_area)
+        self.appearance_channels = int(appearance_channels)
+        self.presence_negative_margin_px = float(presence_negative_margin_px)
         if any(w < 0 for w in self.seg_fg_margin_layer_weights):
             raise ValueError('seg_fg_margin_layer_weights must be non-negative')
         self.use_decoder = use_decoder
@@ -207,7 +262,12 @@ class NuLiteRayCastDETRModel(DetectionModel):
             # features) — the SPAR-Det FG/BG disentanglement mapped to our DETR
             # readout (vs CAHF's dense feature gating, which missed the sparse
             # per-query classifier).
-            self.seg_encoder = NuLiteSegOracle(variant=variant, separable_decoder=True)
+            self.seg_encoder = NuLiteSegOracle(
+                variant=variant,
+                separable_decoder=True,
+                output_channels=1 if self.oracle_kind == 'center_potential' else 2,
+                oracle_kind=self.oracle_kind,
+            )
             self.encoder_decoder = NuLiteEncoderDecoder(
                 variant=det_variant, pretrained=pretrained, use_decoder=True, separable_decoder=False
             )
@@ -280,8 +340,35 @@ class NuLiteRayCastDETRModel(DetectionModel):
             respawn=respawn,
             respawn_peaks=respawn_peaks,
             respawn_min_seed=respawn_min_seed,
+            self_attention_rope=self_attention_rope,
+            rope_theta=rope_theta,
+            rope_position_scale=rope_position_scale,
+            polygon_masked_attention=polygon_masked_attention,
+            polygon_oracle_mask=polygon_oracle_mask,
+            polygon_mask_floor=polygon_mask_floor,
+            polygon_mask_temperature=polygon_mask_temperature,
+            appearance_channels=(
+                self.appearance_channels
+                if (self.appearance_weight > 0 or self.presence_weight > 0 or self.appearance_imitation_weight > 0)
+                else 0
+            ),
+            appearance_after_layer=recast_after_layer,
+            presence_head=self.presence_weight > 0,
         )
         self.aux_dense_head = DenseAuxHead((dims[0], dims[1], dims[2]), nc) if self.aux_dense_weight > 0 else None
+        self.appearance_head = (
+            QueryAppearanceHead(dims[0], dims[0], self.appearance_channels)
+            if (self.appearance_weight > 0 or self.presence_weight > 0 or self.appearance_imitation_weight > 0)
+            else None
+        )
+        self.appearance_imitation_projection = (
+            nn.Sequential(
+                nn.Linear(self.appearance_channels * 3, self.appearance_channels, bias=False),
+                nn.LayerNorm(self.appearance_channels),
+            )
+            if self.appearance_imitation_weight > 0
+            else None
+        )
 
         # The decoder already stores the right stride vector (3 or 4 entries when
         # the seed map is attended as an extra level); fall back to the default.
@@ -371,24 +458,52 @@ class NuLiteRayCastDETRModel(DetectionModel):
         elif getattr(self, 'backbone', 'nulite') == 'two_stream':
             # Frozen NuLite-T oracle seg stream was trained on [-1, 1] input
             # (0.5/0.5 normalization); the det stream expects raw [0, 1]. The
-            # 2-channel CE logits collapse to a foreground logit (sigmoid ==
-            # P(nucleus)) for the DETR seed cue.
+            # Binary CE logits collapse to a foreground logit. A centroid-
+            # potential oracle already emits the single seed logit directly.
             seg_x = (x - 0.5) / 0.5
             seg_logits = self.seg_encoder(seg_x)
-            seed = seg_logits[:, 1:2] - seg_logits[:, 0:1]
+            if self.oracle_kind == 'center_potential':
+                seed = seg_logits
+                centroid_seed = seg_logits
+            elif self.oracle_kind == 'fg_centroid':
+                # Preserve the Train36 foreground contract for score content,
+                # recasting, and the matched-FG margin. Keep the independently
+                # trained centroid potential as the attended spatial level.
+                seed = seg_logits[:, 0:1]
+                centroid_seed = seg_logits[:, 1:2]
+            else:
+                seed = seg_logits[:, 1:2] - seg_logits[:, 0:1]
+                centroid_seed = seed
         elif getattr(self, 'use_decoder', True):
             x0 = self.decoder0(x)
             xt = torch.cat([x0, d['b1']], dim=1)
             seed = self.np_head(xt)
         else:
             seed = None
+            centroid_seed = None
+        if getattr(self, 'backbone', 'nulite') != 'two_stream':
+            centroid_seed = seed
         self._last_seed = seed
+        self._last_centroid_seed = centroid_seed
         self._last_aux_dense = None
+        self._last_appearance_logits = None
+        appearance_map = None
+        if self.appearance_head is not None:
+            if 'b1' not in d:
+                raise ValueError('query appearance supervision requires the NuLite decoder b1 feature')
+            appearance_map, self._last_appearance_logits = self.appearance_head(d['b1'], d['b3'])
         if self.training and self.aux_dense_head is not None:
             self._last_aux_dense = self.aux_dense_head((d['b3'], d['b4'], d['b5']))
 
         top_feat = d.get('top') if getattr(self.detr, 'content_top', False) else None
-        out = self.detr([d['b3'], d['b4'], d['b5']], batch, seed_map=seed, top_feat=top_feat)
+        out = self.detr(
+            [d['b3'], d['b4'], d['b5']],
+            batch,
+            seed_map=seed,
+            seed_level_map=centroid_seed,
+            top_feat=top_feat,
+            appearance_map=appearance_map,
+        )
         if self.training:
             return out
 
@@ -446,6 +561,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
                 n_rays=self.n_rays,
                 cost_inside=9999.0,
                 per_layer_match=self.per_layer_match,
+                duplicate_train_topk=self.duplicate_train_topk,
                 lsp_mode=True,
             )
         return NuLiteDETRLoss(
@@ -463,6 +579,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             n_rays=self.n_rays,
             cost_inside=self.cost_inside,
             per_layer_match=self.per_layer_match,
+            duplicate_train_topk=self.duplicate_train_topk,
             matcher_lsp=getattr(self, 'detr_matcher_lsp', False),
         )
 
@@ -532,6 +649,136 @@ class NuLiteRayCastDETRModel(DetectionModel):
                 weighted_margin = weighted_margin + layer_weight * torch.cat(margin_terms).mean()
 
         return weighted_margin
+
+    @staticmethod
+    def _point_radial_margin(points, polygons):
+        """Signed radial margin for every point/polygon pair; positive is inside."""
+        delta = points[:, None, :] - polygons[None, :, :2]
+        distance = delta.square().sum(-1).sqrt()
+        rays = polygons[:, 2:]
+        angle = torch.remainder(torch.atan2(delta[..., 1], delta[..., 0]), 2 * torch.pi)
+        position = angle * (rays.shape[-1] / (2 * torch.pi))
+        lower = position.floor().long() % rays.shape[-1]
+        upper = (lower + 1) % rays.shape[-1]
+        fraction = position - position.floor()
+        boundary = rays.T.gather(0, lower) * (1 - fraction) + rays.T.gather(0, upper) * fraction
+        return boundary - distance
+
+    def _query_presence_loss(self, logits, polygons, targets, gt_groups):
+        """Balanced presence BCE with strict positive/negative geometric labels."""
+        positive_logits, negative_logits = [], []
+        start = 0
+        margin = self.presence_negative_margin_px / float(targets['imgsz'])
+        for batch_i, count in enumerate(gt_groups):
+            gt = targets['bboxes'][start : start + count]
+            start += count
+            pred = polygons[batch_i]
+            if count == 0:
+                negative_logits.append(logits[batch_i])
+                continue
+            pred_center_in_gt = self._point_radial_margin(pred[:, :2], gt) >= 0
+            gt_center_in_pred = self._point_radial_margin(gt[:, :2], pred).T >= 0
+            positive = (pred_center_in_gt & gt_center_in_pred).any(1)
+            safely_outside = (self._point_radial_margin(pred[:, :2], gt) <= -margin).all(1)
+            contains_no_centroid = ~gt_center_in_pred.any(1)
+            negative = safely_outside & contains_no_centroid & ~positive
+            positive_logits.append(logits[batch_i][positive])
+            negative_logits.append(logits[batch_i][negative])
+        terms = []
+        positives = (
+            torch.cat([x for x in positive_logits if x.numel()])
+            if any(x.numel() for x in positive_logits)
+            else None
+        )
+        negatives = (
+            torch.cat([x for x in negative_logits if x.numel()])
+            if any(x.numel() for x in negative_logits)
+            else None
+        )
+        if positives is not None:
+            terms.append(F.binary_cross_entropy_with_logits(positives, torch.ones_like(positives)))
+        if negatives is not None:
+            terms.append(F.binary_cross_entropy_with_logits(negatives, torch.zeros_like(negatives)))
+        return torch.stack(terms).mean() if terms else logits.sum() * 0.0
+
+    def _appearance_imitation_loss(self, embeddings, polygons, scores, targets, gt_groups):
+        """Pull small Hungarian owners toward reliable same-type exemplars.
+
+        Teachers and unmatched nucleus-like competitors are detached.  The loss
+        therefore shapes the small owner's appearance representation without
+        redefining one-to-one ownership or changing inference.
+        """
+        projected = F.normalize(self.appearance_imitation_projection(embeddings), dim=-1)
+        with torch.no_grad():
+            owners = self.criterion.matcher(
+                polygons.detach(), scores.detach(), targets['bboxes'], targets['cls'], gt_groups
+            )
+
+        students, student_types = [], []
+        teacher_by_type = [[] for _ in range(self.nc)]
+        duplicate_negatives = []
+        start = 0
+        angle_sine = torch.sin(polygons.new_tensor(2.0 * torch.pi / self.n_rays))
+        for batch_i, ((query_idx, target_idx), count) in enumerate(zip(owners, gt_groups)):
+            gt_offset = start
+            gt = targets['bboxes'][start : start + count]
+            gt_cls = targets['cls'][start : start + count]
+            start += count
+            if count == 0:
+                continue
+            # Star-convex polygon area from consecutive radial triangles.
+            rays = gt[:, 2:]
+            area = 0.5 * angle_sine * (rays * rays.roll(-1, dims=-1)).sum(-1)
+            area = area * float(targets['imgsz']) ** 2
+            query_idx = query_idx.to(polygons.device)
+            owner_gt = target_idx.to(polygons.device) - gt_offset
+            owner_types = gt_cls[owner_gt]
+            owner_area = area[owner_gt]
+            fired_type = scores[batch_i, query_idx].argmax(-1)
+            small = owner_area <= self.appearance_imitation_small_area
+            reliable = (~small) & (fired_type == owner_types)
+            if small.any():
+                students.append(projected[batch_i, query_idx[small]])
+                student_types.append(owner_types[small])
+            for class_id in range(self.nc):
+                chosen = reliable & (owner_types == class_id)
+                if chosen.any():
+                    teacher_by_type[class_id].append(projected[batch_i, query_idx[chosen]].detach())
+
+            matched = torch.zeros(polygons.shape[1], dtype=torch.bool, device=polygons.device)
+            matched[query_idx] = True
+            pred = polygons[batch_i]
+            pred_center_in_gt = self._point_radial_margin(pred[:, :2], gt) >= 0
+            gt_center_in_pred = self._point_radial_margin(gt[:, :2], pred).T >= 0
+            duplicate = (~matched) & (pred_center_in_gt & gt_center_in_pred).any(1)
+            if duplicate.any():
+                duplicate_negatives.append(projected[batch_i, duplicate].detach())
+
+        if not students:
+            return projected.sum() * 0.0
+        prototypes, prototype_types = [], []
+        for class_id, chunks in enumerate(teacher_by_type):
+            if chunks:
+                prototypes.append(F.normalize(torch.cat(chunks).mean(0), dim=0))
+                prototype_types.append(class_id)
+        if not prototypes:
+            return projected.sum() * 0.0
+        prototypes = torch.stack(prototypes)
+        if duplicate_negatives:
+            duplicate_proto = F.normalize(torch.cat(duplicate_negatives).mean(0), dim=0)
+            prototypes = torch.cat((prototypes, duplicate_proto[None]), 0)
+        student = torch.cat(students)
+        types = torch.cat(student_types)
+        valid = torch.zeros_like(types, dtype=torch.bool)
+        labels = torch.zeros_like(types)
+        for index, class_id in enumerate(prototype_types):
+            select = types == class_id
+            valid |= select
+            labels[select] = index
+        if not valid.any():
+            return projected.sum() * 0.0
+        logits = student[valid] @ prototypes.T / self.appearance_imitation_temperature
+        return F.cross_entropy(logits, labels[valid])
 
     def loss(self, batch, preds=None):
         """DETR loss + seed-map seg loss.
@@ -629,6 +876,39 @@ class NuLiteRayCastDETRModel(DetectionModel):
             seg_fg_margin = self._segmentation_foreground_margin(dec_polygons, dec_scores, targets, gt_groups, seed)
             total = total + self.seg_fg_margin_weight * seg_fg_margin
 
+        appearance_loss = torch.zeros((), device=device)
+        # The validator first calls predict() and then passes those predictions
+        # back into loss(); the caches therefore belong to this same batch and
+        # should contribute validation telemetry as well as training loss.
+        appearance_logits = getattr(self, '_last_appearance_logits', None)
+        if appearance_logits is not None and self.appearance_weight > 0:
+            appearance_gt = F.interpolate(
+                batch['np_mask'].to(device), size=appearance_logits.shape[-2:], mode='nearest'
+            )
+            probability = appearance_logits.sigmoid()
+            bce = F.binary_cross_entropy_with_logits(appearance_logits, appearance_gt)
+            overlap = (probability * appearance_gt).flatten(1).sum(1)
+            dice = 1.0 - ((2.0 * overlap + 1.0) / (
+                probability.flatten(1).sum(1) + appearance_gt.flatten(1).sum(1) + 1.0
+            )).mean()
+            appearance_loss = bce + dice
+            total = total + self.appearance_weight * appearance_loss
+
+        presence_loss = torch.zeros((), device=device)
+        presence_logits = getattr(self.detr, '_last_presence_logits', None)
+        presence_polygons = getattr(self.detr, '_last_presence_polygons', None)
+        if presence_logits is not None and presence_polygons is not None and self.presence_weight > 0:
+            presence_loss = self._query_presence_loss(presence_logits, presence_polygons, targets, gt_groups)
+            total = total + self.presence_weight * presence_loss
+
+        imitation_loss = torch.zeros((), device=device)
+        appearance_embeddings = getattr(self.detr, '_last_appearance_embeddings', None)
+        if appearance_embeddings is not None and self.appearance_imitation_weight > 0:
+            imitation_loss = self._appearance_imitation_loss(
+                appearance_embeddings, dec_polygons[-1], dec_scores[-1], targets, gt_groups
+            )
+            total = total + self.appearance_imitation_weight * imitation_loss
+
         loss_items = torch.as_tensor(
             [
                 (loss['loss_class'] + loss.get('loss_class_aux', 0.0)).detach(),
@@ -643,6 +923,12 @@ class NuLiteRayCastDETRModel(DetectionModel):
             loss_items = torch.cat([loss_items, torch.stack([aux_obj.detach(), aux_type.detach()])])
         if self.seg_fg_margin_weight > 0:
             loss_items = torch.cat([loss_items, seg_fg_margin.detach().reshape(1)])
+        if self.appearance_weight > 0:
+            loss_items = torch.cat([loss_items, appearance_loss.detach().reshape(1)])
+        if self.presence_weight > 0:
+            loss_items = torch.cat([loss_items, presence_loss.detach().reshape(1)])
+        if self.appearance_imitation_weight > 0:
+            loss_items = torch.cat([loss_items, imitation_loss.detach().reshape(1)])
         return total, loss_items
 
     # -- helpers ------------------------------------------------------------

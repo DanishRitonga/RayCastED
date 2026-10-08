@@ -90,11 +90,22 @@ training:
   detr_recast: true             # local embedding correction; same queries and decoder passes
   detr_recast_after_layer: 3    # correct after layer 3, refine through layers 4-6
   detr_recast_radius_px: 4.0    # 3x3 sampling stencil in a +/-4px neighbourhood
+  detr_polygon_masked_attention: false # isolated appearance experiment: prior masked-attention path disabled
+  detr_polygon_oracle_mask: false # isolated appearance experiment: oracle polygon mask disabled
+  detr_polygon_mask_floor: 0.1  # recovery path for evidence outside an immature polygon
+  detr_polygon_mask_temperature: 0.1 # soft decay beyond the predicted radial boundary
   detr_respawn: false            # recall-repair: 2nd decoder pass re-anchoring emptiest queries on uncovered seed peaks
   detr_respawn_peaks: 64        # max respawned queries per image
   detr_respawn_min_seed: 0.5    # min seed value for a candidate respawn peak
   detr_aux_dense_weight: 0.0    # dense auxiliary experiment disabled after train34 (no held-out gain)
   detr_aux_dense_type_weight: 1.0 # five-type CE relative to dense nucleus/background BCE
+  detr_appearance_weight: 0.0 # matched control: disables appearance map, supervision, and query injection
+  detr_appearance_channels: 32 # compact high-resolution b1+b3 appearance representation
+  detr_presence_weight: 0.0 # presence ablation (train31) was a held-out wash
+  detr_presence_negative_margin_px: 4.0 # required clearance for an unambiguous negative query
+  detr_appearance_imitation_weight: 0.0 # outside the three-run supervised appearance protocol
+  detr_appearance_imitation_temperature: 0.1 # cosine-softmax temperature
+  detr_appearance_imitation_small_area: 200.0 # pixel-area cutoff for small owner students
   detr_seg_fg_margin_weight: 0.5 # matched positives with local seg evidence must beat the empty logit
   detr_seg_fg_margin: 1.0       # required true-class minus empty-logit margin
   detr_seg_fg_radius_px: 4.0    # 3x3 evidence stencil, aligned with query recasting
@@ -102,6 +113,8 @@ training:
   detr_mds: false               # MDS-DETR rank-causal self-attn mask (ablation: false = plain self-attn, train18 ref was true)
   detr_cost_inside: 10.0        # LSP-DETR inner-mask cost Wm: near-hard gate under detr_lsp (legacy 10.0)
   detr_per_layer_match: true    # LSP-DETR 'look forward twice': per-layer Hungarian matching in aux loss (vs reuse last-layer match)
+  detr_duplicate_train_topk: 1  # strict Train36 one-to-one ownership; duplicate experiment disabled
+  detr_duplicate_nms_iou: 0.5   # class-agnostic polygon NMS for duplicate-aware validation/inference eval
   detr_use_decoder: true        # true = NuLite decoder+NP head on (train24 no-decoder bPQ 0.636 < 0.657 → decoder NEEDED; back on for train25)
   detr_shared_layers: false     # capacity run: 3 shared → 6 distinct transformer layers (LSP-DETR parity)
   detr_separable_decoder: true  # locked recipe: separable NuLite decoder (two_stream: false, det stream standard; seg stream separable by construction)

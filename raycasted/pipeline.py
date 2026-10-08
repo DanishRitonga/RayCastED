@@ -52,6 +52,7 @@ class RayCastPipeline:
         output_dir: str,
         training_overrides: dict | None = None,
         ingest_workers: int | None = None,
+        end_epoch: int | None = None,
     ):
         self.config = ETLConfig(config_path)
         self.output_dir = Path(output_dir)
@@ -59,6 +60,7 @@ class RayCastPipeline:
         self.transformed_dir = self.output_dir / 'transformed'
         self.training_overrides = training_overrides or {}
         self.ingest_workers = ingest_workers
+        self.end_epoch = end_epoch
         self.use_gpu = self.training_overrides.get('device') is not None
 
         # n_rays comes from config YAML only (data property, not a training flag)
@@ -196,7 +198,11 @@ class RayCastPipeline:
         if self.training_config is not None and 'amp' in self.training_config:
             overrides['amp'] = bool(self.training_config['amp'])
 
-        trainer = RayCastTrainer(overrides=overrides, training_config=self.training_config)
+        trainer = RayCastTrainer(
+            overrides=overrides,
+            training_config=self.training_config,
+            end_epoch=self.end_epoch,
+        )
         trainer.train()
 
     def _generate_training_yaml(self) -> str:
@@ -277,6 +283,12 @@ def main():  # noqa: D103
         help='YOLO26 variant: n=2.6M, s=10M, m=22M, l=26M, x=59M params (default: s)',
     )
     parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs')
+    parser.add_argument(
+        '--end',
+        type=int,
+        default=None,
+        help='Stop cleanly after this 1-based epoch while preserving the --epochs learning-rate schedule',
+    )
     parser.add_argument('--batch', type=int, default=16, help='Batch size')
     parser.add_argument('--imgsz', type=int, default=None, help='Input image size (default: from config crop_size)')
     parser.add_argument('--device', default='', help='Device (cpu, 0, 0,1)')
@@ -291,6 +303,8 @@ def main():  # noqa: D103
     )
 
     args = parser.parse_args()
+    if args.end is not None and not 1 <= args.end <= args.epochs:
+        parser.error('--end must be between 1 and --epochs')
 
     # Read variant/model from config if not overridden by CLI
     variant = args.variant
@@ -338,6 +352,7 @@ def main():  # noqa: D103
         output_dir=args.output,
         training_overrides=training_overrides,
         ingest_workers=args.ingest_workers,
+        end_epoch=args.end,
     )
     pipeline.run(stage=args.stage, dataset=args.dataset)
 
