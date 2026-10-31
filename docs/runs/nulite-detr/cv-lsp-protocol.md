@@ -2,6 +2,13 @@
 
 Date: 2026-09-07. Tool: `raycasted/evals/eval_lsp.py` (new, committed with this doc).
 
+Correction (2026-10-25): the original evaluator used OpenCV polygon filling and
+largest-area-first overlap ownership, whereas LSP-DETR uses PIL filling and
+per-pixel interior-distance ownership. The evaluator now follows the latter
+and never applies polygon NMS. Numbers in this historical document were
+computed before that correction; see `docs/diag/lsp-evaluator-correction-2026-10-25.md`
+for corrected held-out results and the measured effect of the protocol change.
+
 ## Why this eval exists
 
 All historical "test-set" numbers (train18-36) were measured on fold3 tiles that were

@@ -1,4 +1,4 @@
-r"""PanNuke evaluation matching the LSP-DETR protocol EXACTLY.
+r"""PanNuke evaluation using LSP-DETR's test-time mask protocol.
 
 Metrics replicated from the LSP-DETR codebase
 (https://github.com/RationAI/lsp-detr, metrics/binary_panoptic_quality.py +
@@ -16,9 +16,10 @@ metrics/panoptic_quality.py + metrics/f1_score.py + det_meta_arch.py):
         are zeroed before counting (masked_preds = preds & ~union(gt)).
   - F1 : centroid distance Hungarian, radius 12 px, GLOBAL tp/fp/fn sums.
   - Labels: logits.argmax over nc+1, dropping the no-object (last) column.
-        NO confidence threshold is applied at evaluation. Duplicate-trained
-        checkpoints additionally use class-agnostic polygon NMS by default;
-        pass --raw-duplicates for the unsuppressed diagnostic.
+        No confidence threshold or NMS is applied.
+  - Predicted polygons are rasterized with PIL, then overlapping pixels are
+        assigned to the mask with the greatest Euclidean interior distance.
+        Predictions left empty by this assignment are removed.
   - 'Average' row = macro mean over per-tissue means; STD across the 3 CV
         folds (computed across runs by the caller, not here).
 
@@ -32,19 +33,20 @@ Usage:
 
 import argparse
 import re
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
 import polars as pl
 import torch
+from PIL import Image, ImageDraw
 from scipy.ndimage import distance_transform_edt
 from scipy.optimize import linear_sum_assignment
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from raycasted.data.etl.loader.raycast_dataset import RayCastTileDataset
 from raycasted.evals.eval_pannuke import load_model
-from raycasted.evals.polygon_nms import polygon_nms_indices
 from raycasted.model.register import register_raycast_head
 
 TISSUE_NAMES = [
@@ -202,7 +204,7 @@ def roi_id_from_path(path: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def run_inference_raw(model, dataloader, device):
+def run_inference_raw(model, dataloader, device, *, include_queries=False):
     """Run model and emit per-image LSP-style decoded detections.
 
     Each element: dict(polys=(N, 66) pixel coords, labels=(N,) int in [0, nc),
@@ -245,7 +247,11 @@ def run_inference_raw(model, dataloader, device):
                 scores = scores[keep]
                 # normalized -> pixel (square crop == imgsz)
                 poly_px = poly_n * crop
-                results.append({'polys': poly_px, 'labels': labels.astype(int), 'scores': scores})
+                result = {'polys': poly_px, 'labels': labels.astype(int), 'scores': scores}
+                if include_queries:
+                    result['all_polys'] = dec_polys[si].cpu().numpy() * crop
+                    result['all_logits'] = logits
+                results.append(result)
     return results
 
 
@@ -375,15 +381,15 @@ class TissueStats:
         }
 
 
-def rasterize_polys(polys, h, w, labels):
-    """Rasterize (N, 66) pixel polys, largest-area-first occlusion."""
+def rasterize_polys_largest_first(polys, h, w, labels):
+    """Historical largest-area overlap rule, retained for paired comparison."""
     masks = []
     kept = []
     order = np.argsort([-_poly_area(p) for p in polys]) if len(polys) else []
     occupied = np.zeros((h, w), dtype=bool)
     for i in order:
         m = np.zeros((h, w), dtype=np.uint8)
-        pts = _poly_xy(polys[i])
+        pts = _poly_xy(polys[i]).astype(np.int32)
         cv2.fillPoly(m, [pts], 1)
         m = m.astype(bool) & ~occupied
         if m.any():
@@ -393,14 +399,13 @@ def rasterize_polys(polys, h, w, labels):
     return masks, np.asarray(kept, dtype=int) if kept else np.zeros((0,), dtype=int)
 
 
-def rasterize_polys_watershed(polys, h, w, labels):
-    """LSP distance-transform watershed overlap resolution over pred polys.
+def rasterize_polys(polys, h, w, labels):
+    """Match LSP's test-time PIL rasterization and overlap ownership.
 
     Each polygon is filled independently (no occlusion merge), then every
-    pixel is assigned to the instance whose EDT of its own mask is largest
-    there (nearest center). Overlapping predictions can therefore BOTH
-    survive, each keeping the pixels closest to its center. Mirrors LSP-DETR
-    image_processing.py resolve_nuclei_overlaps used at PanNuke eval/val.
+    pixel is assigned to the instance whose Euclidean interior distance
+    is greatest there. Original prediction order breaks equal-distance ties.
+    Empty predictions are discarded, including their class labels.
     """
     n = len(polys)
     if n == 0:
@@ -408,18 +413,18 @@ def rasterize_polys_watershed(polys, h, w, labels):
 
     inst = np.zeros((n, h, w), dtype=bool)
     for i, poly in enumerate(polys):
-        m = np.zeros((h, w), dtype=np.uint8)
-        cv2.fillPoly(m, [_poly_xy(poly)], 1)
-        inst[i] = m.astype(bool)
+        image = Image.new('1', (w, h))
+        ImageDraw.Draw(image).polygon(_poly_xy(poly).flatten().tolist(), outline=1, fill=1)
+        inst[i] = np.asarray(image, dtype=bool)
 
-    dist = np.zeros((n, h, w), dtype=np.float32)
-    for i in range(n):
-        if inst[i].any():
-            dist[i] = distance_transform_edt(inst[i])
-
-    owner = dist.argmax(0)  # per-pixel nearest center (torch.max first-max)
-    owned = np.arange(n)[:, None, None] == owner[None]
-    resolved = owned & (dist > 0)
+    resolved = inst.copy()
+    overlap_y, overlap_x = np.nonzero(inst.sum(axis=0) > 1)
+    if len(overlap_y):
+        overlap_ids = np.flatnonzero(inst[:, overlap_y, overlap_x].any(axis=1))
+        distances = np.stack([distance_transform_edt(inst[i])[overlap_y, overlap_x] for i in overlap_ids])
+        owners = overlap_ids[distances.argmax(axis=0)]  # first index wins ties
+        resolved[:, overlap_y, overlap_x] = False
+        resolved[owners, overlap_y, overlap_x] = True
 
     masks = []
     kept = []
@@ -448,7 +453,7 @@ def _poly_xy(poly):
     angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
     xs = cx + rays * np.cos(angles)
     ys = cy + rays * np.sin(angles)
-    return np.stack([xs, ys], 1).astype(np.int32)
+    return np.stack([xs, ys], 1)
 
 
 # ---------------------------------------------------------------------------
@@ -473,24 +478,19 @@ def main():
     ap.add_argument('--batch', type=int, default=16)
     ap.add_argument('--device', default='0')
     ap.add_argument('--workers', type=int, default=4)
+    ap.add_argument('--max-images', type=int, help='evaluate the first N sorted images for a paired diagnostic')
+    ap.add_argument('--save-predictions', type=Path, help='save raw query predictions for paired held-out audits')
     ap.add_argument(
-        '--polygon-nms-iou',
-        type=float,
-        default=None,
-        help='class-agnostic polygon NMS IoU; auto-enables from checkpoint for duplicate-trained models',
+        '--load-predictions', type=Path, help='score a prior raw-prediction cache without rerunning inference'
     )
     ap.add_argument(
-        '--raw-duplicates',
+        '--compare-legacy-overlap',
         action='store_true',
-        help='disable checkpoint-inferred polygon NMS and evaluate raw duplicate predictions',
-    )
-    ap.add_argument(
-        '--watershed',
-        action='store_true',
-        help='also resolve pred overlaps via LSP distance-transform '
-        'watershed and print the delta vs largest-first occlusion',
+        help='also report the previous largest-first overlap metric for comparison',
     )
     args = ap.parse_args()
+    if args.save_predictions is not None and args.load_predictions is not None:
+        ap.error('--save-predictions and --load-predictions are mutually exclusive')
 
     register_raycast_head()
     from raycasted.data.etl.utils import constants as _const
@@ -499,79 +499,101 @@ def main():
 
     device = torch.device('cuda' if args.device != 'cpu' else 'cpu')
     model = load_model(args.weights, device)
+    # Older checkpoints predate these optional inference modules. Torch loads
+    # their saved object state, rather than calling the current constructor.
+    if not hasattr(model, 'oracle_kind'):
+        model.oracle_kind = 'binary'
+    if not hasattr(model, 'appearance_head'):
+        model.appearance_head = None
     tr = getattr(model, 'training_args', {})
     crop = int(tr.get('crop_size', 256))
-    nms_iou = args.polygon_nms_iou
-    if nms_iou is None and not args.raw_duplicates and int(tr.get('detr_duplicate_train_topk', 1)) > 1:
-        nms_iou = float(tr.get('detr_duplicate_nms_iou', 0.5))
-    if nms_iou is not None and not 0.0 <= nms_iou <= 1.0:
-        raise ValueError('--polygon-nms-iou must be in [0, 1]')
 
     # map tile path -> roi id
     tile_paths = sorted(Path(args.data_dir).glob('*.npz'))
     gt = ParquetGT(args.parquet)
     assert len(tile_paths) == len(gt), (len(tile_paths), len(gt))
+    if args.max_images is not None:
+        if args.max_images <= 0:
+            raise ValueError('--max-images must be positive')
+        tile_paths = tile_paths[: args.max_images]
 
     ds = RayCastTileDataset(str(args.data_dir), crop_size=crop, augment=False)
+    if args.max_images is not None:
+        ds = Subset(ds, range(len(tile_paths)))
     dl = DataLoader(ds, batch_size=args.batch, shuffle=False, num_workers=args.workers, collate_fn=collate_fn)
 
-    preds = run_inference_raw(model, dl, device)
+    if args.load_predictions is not None:
+        cache = np.load(args.load_predictions)
+        if len(cache['paths']) < len(tile_paths) or cache['paths'][: len(tile_paths)].tolist() != [
+            path.name for path in tile_paths
+        ]:
+            raise ValueError('Prediction-cache tile paths do not match the selected held-out images')
+        offsets = cache['offsets']
+        polygons = cache['polygons']
+        labels = cache['labels']
+        preds = [
+            {
+                'polys': polygons[offsets[i] : offsets[i + 1]],
+                'labels': labels[offsets[i] : offsets[i + 1]],
+            }
+            for i in range(len(tile_paths))
+        ]
+    else:
+        preds = run_inference_raw(model, dl, device, include_queries=args.save_predictions is not None)
+    if args.save_predictions is not None:
+        args.save_predictions.parent.mkdir(parents=True, exist_ok=True)
+        offsets = np.r_[0, np.cumsum([len(result['polys']) for result in preds])]
+        np.savez_compressed(
+            args.save_predictions,
+            paths=np.asarray([path.name for path in tile_paths]),
+            offsets=offsets,
+            polygons=np.concatenate([result['polys'] for result in preds], axis=0),
+            labels=np.concatenate([result['labels'] for result in preds], axis=0),
+            query_offsets=np.r_[0, np.cumsum([len(result['all_polys']) for result in preds])],
+            query_polygons=np.concatenate([result['all_polys'] for result in preds], axis=0),
+            query_logits=np.concatenate([result['all_logits'] for result in preds], axis=0),
+        )
 
     per_tissue = {}
     total = TissueStats()
-    per_tissue_ws = {} if args.watershed else None
-    total_ws = TissueStats() if args.watershed else None
+    per_tissue_legacy = {} if args.compare_legacy_overlap else None
+    total_legacy = TissueStats() if args.compare_legacy_overlap else None
     n_pred_total = n_pred_raw_total = n_gt_total = 0
-    n_pred_total_ws = 0
-    for path, res in zip(tile_paths, preds):
+    n_pred_total_legacy = 0
+    for image_index, (path, res) in enumerate(zip(tile_paths, preds), start=1):
         roi = roi_id_from_path(path)
         gt_masks, gt_labels, tissue = gt.get(roi)
         pred_polys = res['polys']
         pred_labels = res['labels']
-        pred_scores = res['scores']
         n_pred_raw_total += len(pred_polys)
-        if nms_iou is not None:
-            keep = polygon_nms_indices(
-                pred_polys,
-                pred_scores,
-                iou_threshold=nms_iou,
-                class_ids=pred_labels,
-                class_agnostic=True,
-            )
-            pred_polys = pred_polys[keep]
-            pred_labels = pred_labels[keep]
         if len(pred_polys) == 0:
             pm, pl = [], np.zeros((0,), dtype=int)
-            ws_pm, ws_pl = [], np.zeros((0,), dtype=int)
+            legacy_pm, legacy_pl = [], np.zeros((0,), dtype=int)
         else:
             pm, pl = rasterize_polys(pred_polys, crop, crop, pred_labels)
-            if args.watershed:
-                ws_pm, ws_pl = rasterize_polys_watershed(pred_polys, crop, crop, pred_labels)
+            if args.compare_legacy_overlap:
+                legacy_pm, legacy_pl = rasterize_polys_largest_first(pred_polys, crop, crop, pred_labels)
             else:
-                ws_pm, ws_pl = [], np.zeros((0,), dtype=int)
+                legacy_pm, legacy_pl = [], np.zeros((0,), dtype=int)
         n_pred_total += len(pm)
-        n_pred_total_ws += len(ws_pm)
+        n_pred_total_legacy += len(legacy_pm)
         n_gt_total += len(gt_masks)
         ts = per_tissue.setdefault(tissue, TissueStats())
         ts.update(pm, pl, gt_masks, gt_labels)
         ts.update_f1(pm, gt_masks)
         total.update(pm, pl, gt_masks, gt_labels)
         total.update_f1(pm, gt_masks)
-        if args.watershed:
-            tsw = per_tissue_ws.setdefault(tissue, TissueStats())
-            tsw.update(ws_pm, ws_pl, gt_masks, gt_labels)
-            tsw.update_f1(ws_pm, gt_masks)
-            total_ws.update(ws_pm, ws_pl, gt_masks, gt_labels)
-            total_ws.update_f1(ws_pm, gt_masks)
+        if args.compare_legacy_overlap:
+            legacy_stats = per_tissue_legacy.setdefault(tissue, TissueStats())
+            legacy_stats.update(legacy_pm, legacy_pl, gt_masks, gt_labels)
+            legacy_stats.update_f1(legacy_pm, gt_masks)
+            total_legacy.update(legacy_pm, legacy_pl, gt_masks, gt_labels)
+            total_legacy.update_f1(legacy_pm, gt_masks)
+        if image_index % 250 == 0:
+            print(f'Evaluated {image_index}/{len(tile_paths)} images', file=sys.stderr, flush=True)
 
     print(f'GT instances: {n_gt_total}   Raw pred instances (all non-∅): {n_pred_raw_total}')
-    if nms_iou is not None:
-        print(
-            f'Class-agnostic polygon NMS IoU={nms_iou:g}: {n_pred_total} instances '
-            f'(keep {n_pred_total / max(n_pred_raw_total, 1):.3f})'
-        )
-    else:
-        print(f'Evaluated pred instances: {n_pred_total} (raw; polygon NMS disabled)')
+    print(f'Evaluated pred instances: {n_pred_total} (LSP overlap resolution; no NMS)')
     print(f'Per-image-mean bPQ (whole fold): {total.summary()["bPQ"]:.4f}')
     print(f'Per-image-mean mPQ (whole fold): {total.summary()["mPQ"]:.4f}')
     print()
@@ -598,14 +620,14 @@ def main():
         print(f'  {k}: {st[k]:.4f}')
     print(f'  F1: {f1:.4f}  P: {p:.4f}  R: {r:.4f}  (centroid, r=12, global)')
 
-    if args.watershed:
+    if args.compare_legacy_overlap:
         print()
-        print('=== LSP watershed overlap resolution (resolve_nuclei_overlaps) ===')
-        print(f'Pred instances: occlusion {n_pred_total}   watershed {n_pred_total_ws}')
+        print('=== Historical largest-first overlap resolution ===')
+        print(f'Pred instances: official {n_pred_total}   historical {n_pred_total_legacy}')
         print(f'{"tissue":<15}{"bDQ":>8}{"bSQ":>8}{"bPQ":>8}{"mPQ":>8}{"F1":>8}{"P":>8}{"R":>8}')
         ws_bpq, ws_mpq = [], []
-        for t in sorted(per_tissue_ws):
-            ts = per_tissue_ws[t]
+        for t in sorted(per_tissue_legacy):
+            ts = per_tissue_legacy[t]
             s = ts.summary()
             f1_w, p_w, r_w = ts.f1()
             ws_bpq.append(s['bPQ'])
@@ -620,15 +642,15 @@ def main():
                 f'{"Average":<15}{"":>8}{"":>8}{np.mean(ws_bpq):>8.4f}'
                 f'{np.mean(ws_mpq):>8.4f}   (macro over {len(ws_bpq)} tissues)'
             )
-        st_ws = total_ws.summary()
-        f1_ws, p_ws, r_ws = total_ws.f1()
+        st_ws = total_legacy.summary()
+        f1_ws, p_ws, r_ws = total_legacy.f1()
         print()
-        print('Whole-fold totals (watershed):')
+        print('Whole-fold totals (historical):')
         for k in ['bDQ', 'bSQ', 'bPQ', 'bMPQ', 'mDQ', 'mSQ', 'mPQ', 'mMPQ']:
             print(f'  {k}: {st_ws[k]:.4f}')
         print(f'  F1: {f1_ws:.4f}  P: {p_ws:.4f}  R: {r_ws:.4f}  (centroid, r=12, global)')
         print()
-        print('delta (watershed - occlusion), per-image-mean whole fold:')
+        print('delta (historical - official), per-image-mean whole fold:')
         for k in ['bPQ', 'mPQ', 'bDQ', 'bSQ', 'mDQ', 'mSQ']:
             if k in st_ws and k in st:
                 d = st_ws[k] - st[k]

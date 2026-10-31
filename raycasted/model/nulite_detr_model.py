@@ -68,6 +68,28 @@ class QueryAppearanceHead(nn.Module):
         return appearance, self.mask(appearance)
 
 
+class FusionAdapter(nn.Module):
+    """DW 3x3 -> BN -> GELU -> PW 1x1 -> ConvT 2x2 upsampling adapter.
+
+    Sits between the frozen oracle U-Net's raw fusion concats and the DETR
+    input projections. The tapped concats sit one level below the level they
+    feed (pre-ConvTranspose), so each adapter also restores the native stride
+    of its target level. Module-level (not a local class) so ultralytics can
+    pickle the whole model object in checkpoints.
+    """
+
+    def __init__(self, in_ch: int, out_ch: int) -> None:
+        super().__init__()
+        self.dw = nn.Conv2d(in_ch, in_ch, 3, padding=1, groups=in_ch, bias=False)
+        self.bn = nn.BatchNorm2d(in_ch)
+        self.pw = nn.Conv2d(in_ch, out_ch, 1, bias=True)
+        self.up = nn.ConvTranspose2d(out_ch, out_ch, kernel_size=2, stride=2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Project a fusion concat to the target level's native channels/stride."""
+        return self.up(self.pw(F.gelu(self.bn(self.dw(x)))))
+
+
 class NuLiteRayCastDETRModel(DetectionModel):
     """Single-head DETR detector on the NuLite seg backbone.
 
@@ -127,6 +149,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         oracle_kind: str = 'binary',
         use_decoder: bool = True,
         shared_layers: bool = False,
+        shared_layer_groups: int = 0,
         separable_decoder: bool = False,
         backbone: str = 'nulite',
         use_seed: bool = True,
@@ -144,7 +167,24 @@ class NuLiteRayCastDETRModel(DetectionModel):
         seg_fg_margin: float = 1.0,
         seg_fg_radius_px: float = 4.0,
         seg_fg_margin_layer_weights: list[float] | tuple[float, ...] | None = None,
+        viable_owner_fg_weight: float = 0.0,
+        viable_owner_iou: float = 0.5,
+        viable_owner_margin: float = 1.0,
+        proposal_bal_weight: float = 0.0,
+        proposal_bal_cap: float = 5.0,
+        nucleus_cdn: int = 0,
+        nucleus_cdn_weight: float = 0.0,
+        nucleus_cdn_class_embed: bool = False,
+        nucleus_cdn_real_to_dn: bool = False,
+        frozen_adapter: bool = False,
+        seed_in_content_pooled: bool = False,
+        seed_in_content_pool_sizes: tuple = (3, 5, 9),
+        map_modulation: bool = False,
+        score_size_bias: bool = False,
+        score_size_bias_hidden: int = 32,
         self_attention_rope: bool = False,
+        self_attention_sta: bool = False,
+        sta_kernel: int = 3,
         rope_theta: float = 100.0,
         rope_position_scale: float | None = None,
         polygon_masked_attention: bool = False,
@@ -156,6 +196,10 @@ class NuLiteRayCastDETRModel(DetectionModel):
         appearance_imitation_weight: float = 0.0,
         appearance_imitation_temperature: float = 0.1,
         appearance_imitation_small_area: float = 200.0,
+        instance_alignment_weight: float = 0.0,
+        instance_alignment_temperature: float = 0.1,
+        instance_alignment_radius_px: float = 30.0,
+        instance_alignment_max_negatives: int = 8,
         appearance_channels: int = 32,
         presence_negative_margin_px: float = 4.0,
         verbose: bool = True,
@@ -196,11 +240,39 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.seg_fg_margin = seg_fg_margin
         self.seg_fg_radius_px = seg_fg_radius_px
         self.seg_fg_margin_layer_weights = tuple(float(w) for w in (seg_fg_margin_layer_weights or ()))
+        self.viable_owner_fg_weight = float(viable_owner_fg_weight)
+        self.viable_owner_iou = float(viable_owner_iou)
+        self.viable_owner_margin = float(viable_owner_margin)
+        if self.viable_owner_fg_weight < 0 or not 0 < self.viable_owner_iou < 1 or self.viable_owner_margin < 0:
+            raise ValueError('viable owner loss requires nonnegative weight/margin and IoU in (0, 1)')
+        self.proposal_bal_weight = float(proposal_bal_weight)
+        self.proposal_bal_cap = float(proposal_bal_cap)
+        if self.proposal_bal_weight < 0 or self.proposal_bal_cap < 1:
+            raise ValueError('proposal balanced loss requires nonnegative weight and cap >= 1')
+        self.nucleus_cdn = int(nucleus_cdn)
+        self.nucleus_cdn_weight = float(nucleus_cdn_weight)
+        self.nucleus_cdn_class_embed = bool(nucleus_cdn_class_embed)
+        self.nucleus_cdn_real_to_dn = bool(nucleus_cdn_real_to_dn)
+        self.seed_in_content_pooled = bool(seed_in_content_pooled)
+        self.seed_in_content_pool_sizes = tuple(int(p) for p in seed_in_content_pool_sizes)
+        self.map_modulation = bool(map_modulation)
+        self.score_size_bias = bool(score_size_bias)
+        self.score_size_bias_hidden = int(score_size_bias_hidden)
+        if self.score_size_bias and not no_object:
+            raise ValueError('score_size_bias requires no_object (empty-column targets)')
+        if self.nucleus_cdn < 0 or self.nucleus_cdn_weight < 0:
+            raise ValueError('nucleus_cdn and nucleus_cdn_weight must be nonnegative')
+        if self.nucleus_cdn > 0 and not no_object:
+            raise ValueError('nucleus_cdn requires no_object (empty-column targets)')
         self.appearance_weight = float(appearance_weight)
         self.presence_weight = float(presence_weight)
         self.appearance_imitation_weight = float(appearance_imitation_weight)
         self.appearance_imitation_temperature = float(appearance_imitation_temperature)
         self.appearance_imitation_small_area = float(appearance_imitation_small_area)
+        self.instance_alignment_weight = float(instance_alignment_weight)
+        self.instance_alignment_temperature = float(instance_alignment_temperature)
+        self.instance_alignment_radius_px = float(instance_alignment_radius_px)
+        self.instance_alignment_max_negatives = int(instance_alignment_max_negatives)
         self.appearance_channels = int(appearance_channels)
         self.presence_negative_margin_px = float(presence_negative_margin_px)
         if any(w < 0 for w in self.seg_fg_margin_layer_weights):
@@ -282,6 +354,72 @@ class NuLiteRayCastDETRModel(DetectionModel):
             # overridden ``train`` method below also restores this after the
             # parent model changes modes.
             self.seg_encoder.eval()
+        elif backbone == 'shared':
+            # Single-stream multitask: ONE FastViT encoder (frozen) + ONE NuLite
+            # upsample decoder (trainable) serving both tasks.
+            #   segmentation: b1 -> np_head (frozen NuLite-T oracle head) -> FG map
+            #   detection   : b3/b4/b5 -> DETR decoder -> rays/classes
+            # This removes the duplicated detection encoder of ``two_stream``
+            # (25.9% of the parameters and one whole encode pass) while letting
+            # the shared decoder adapt to both objectives.
+            self.encoder_decoder = NuLiteEncoderDecoder(
+                variant=det_variant, pretrained=pretrained, use_decoder=True, separable_decoder=separable_decoder
+            )
+            dims = self.encoder_decoder.embed_dims  # [64,128,256,512] t12 st4/8/16/32
+            self.use_decoder = True
+            self.decoder0 = None
+            self.np_head = None
+            # Unlike ``two_stream``, the seed map is produced by the trainable
+            # shared decoder + np_head, so it must stay anchored to the oracle
+            # target (L1 against ``batch['seed_map']``) instead of drifting.
+            self.shared_stream = True
+            # The oracle's own encoder+decoder are not instantiated: only its
+            # decoder0/np_head are needed, and those are created on the shared
+            # U-Net by ``load_nulite_ckpt`` below.
+            self.seg_encoder = None
+        elif backbone == 'frozen':
+            # Frozen-oracle thinning: the FULL NuLite-T U-Net (encoder + decoder
+            # + decoder0 + np_head) is kept intact and entirely frozen, exactly
+            # as in ``two_stream``, but the detection head reads the encoder's
+            # b3/b4/b5 directly instead of running a second detection encoder
+            # (as ``shared`` must do from the shared decoder). Nothing on the
+            # segmentation side can drift; only the DETR head is trained.
+            #   [backbone] -[b3/b4/b5]-> [DETR head]
+            #   [backbone] -> [seg decoder] -> [FG map] -> [DETR head]
+            self.seg_encoder = NuLiteSegOracle(
+                variant=variant,
+                separable_decoder=True,
+                output_channels=1 if self.oracle_kind == 'center_potential' else 2,
+                oracle_kind=self.oracle_kind,
+            )
+            self.encoder_decoder = None
+            dims = self.seg_encoder.encoder_decoder.embed_dims  # [64,128,256,512] t12 st4/8/16/32
+            self.use_decoder = True
+            self.decoder0 = None
+            self.np_head = None
+            self.lambda_seg = 0.0  # seg stream is a frozen prior; no seg loss
+            self.seg_encoder.requires_grad_(False)
+            self.seg_encoder.eval()
+            self.frozen_oracle = True
+            # Optional detection-side adapters on the raw U-Net fusion tensors
+            # (pre-ConvBlock concats; b5 has no skip so it taps z4). Pure
+            # depthwise->pointwise projections to the native level channels,
+            # so the DETR input_proj shapes stay identical to two_stream.
+            self.frozen_adapter = bool(frozen_adapter)
+            if self.frozen_adapter:
+                e3, e2, e1, e0 = dims  # e3=64(st4) e2=128(st8) e1=256(st16) e0=512(st32), cf. nulite.py
+                # fuse3 = cat[z2, b4] (128+128=256ch @ stride 8)  -> b3's 64ch  @ stride 4
+                # fuse4 = cat[z3, b5] (256+256=512ch @ stride 16) -> b4's 128ch @ stride 8
+                # fuse5 = z4          (512ch @ stride 32)         -> b5's 256ch @ stride 16
+                self.fusion_adapters = nn.ModuleList(
+                    [
+                        FusionAdapter(2 * e2, e3),
+                        FusionAdapter(2 * e1, e2),
+                        FusionAdapter(e0, e1),
+                    ]
+                )
+            else:
+                self.fusion_adapters = None
         else:
             self.encoder_decoder = NuLiteEncoderDecoder(
                 variant=variant,
@@ -307,6 +445,19 @@ class NuLiteRayCastDETRModel(DetectionModel):
         else:
             detr_seed_feature = seed_feature
             detr_seed_in_content = seed_in_content
+        if backbone == 'shared':
+            # Frozen segmentation readout on the shared features. ``np_head`` is
+            # the NuLite-T head (cat[decoder0(x), b1] -> FG logits); decoder0 is
+            # the raw-input Conv(3 -> 64) the oracle was trained with.
+            emb0 = dims[0]
+            self.decoder0 = _ConvBlock(3, emb0, 3, separable=False)
+            self.np_head = nn.Sequential(
+                _ConvBlock(2 * emb0, emb0),
+                nn.Conv2d(emb0, 1 if self.oracle_kind == 'center_potential' else 2, 1),
+            )
+            # The shared encoder is the oracle's encoder: freeze it. The shared
+            # upsample decoder stays trainable so it can serve detection too.
+            self.encoder_decoder.freeze_encoder()
         self.detr = NuLiteDETRDecoder(
             nc=nc,
             ch=(dims[0], dims[1], dims[2]),
@@ -325,6 +476,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             seed_in_content=detr_seed_in_content,
             mds=mds,
             shared_layers=shared_layers,
+            shared_layer_groups=shared_layer_groups,
             query_block_size=query_block_size,
             content_top=self.content_top,
             content_top_channels=dims[3] if (self.content_top and len(dims) > 3) else 0,
@@ -332,7 +484,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             seed_resize_frac=seed_resize_frac,
             layer_schedule=detr_layer_schedule,
             hybrid_peaks=hybrid_peaks,
-            seed_level=seed_level and backbone in ('nulite', 'two_stream'),
+            seed_level=seed_level and backbone in ('nulite', 'two_stream', 'shared', 'frozen'),
             seed_level_stride=seed_level_stride,
             recast=recast,
             recast_after_layer=recast_after_layer,
@@ -341,6 +493,8 @@ class NuLiteRayCastDETRModel(DetectionModel):
             respawn_peaks=respawn_peaks,
             respawn_min_seed=respawn_min_seed,
             self_attention_rope=self_attention_rope,
+            self_attention_sta=self_attention_sta,
+            sta_kernel=sta_kernel,
             rope_theta=rope_theta,
             rope_position_scale=rope_position_scale,
             polygon_masked_attention=polygon_masked_attention,
@@ -349,16 +503,34 @@ class NuLiteRayCastDETRModel(DetectionModel):
             polygon_mask_temperature=polygon_mask_temperature,
             appearance_channels=(
                 self.appearance_channels
-                if (self.appearance_weight > 0 or self.presence_weight > 0 or self.appearance_imitation_weight > 0)
+                if (
+                    self.appearance_weight > 0
+                    or self.presence_weight > 0
+                    or self.appearance_imitation_weight > 0
+                    or self.instance_alignment_weight > 0
+                )
                 else 0
             ),
             appearance_after_layer=recast_after_layer,
             presence_head=self.presence_weight > 0,
+            nucleus_cdn=self.nucleus_cdn,
+            nucleus_cdn_class_embed=self.nucleus_cdn_class_embed,
+            nucleus_cdn_real_to_dn=self.nucleus_cdn_real_to_dn,
+            seed_in_content_pooled=self.seed_in_content_pooled,
+            seed_in_content_pool_sizes=self.seed_in_content_pool_sizes,
+            map_modulation=self.map_modulation,
+            score_size_bias=self.score_size_bias,
+            score_size_bias_hidden=self.score_size_bias_hidden,
         )
         self.aux_dense_head = DenseAuxHead((dims[0], dims[1], dims[2]), nc) if self.aux_dense_weight > 0 else None
         self.appearance_head = (
             QueryAppearanceHead(dims[0], dims[0], self.appearance_channels)
-            if (self.appearance_weight > 0 or self.presence_weight > 0 or self.appearance_imitation_weight > 0)
+            if (
+                self.appearance_weight > 0
+                or self.presence_weight > 0
+                or self.appearance_imitation_weight > 0
+                or self.instance_alignment_weight > 0
+            )
             else None
         )
         self.appearance_imitation_projection = (
@@ -367,6 +539,14 @@ class NuLiteRayCastDETRModel(DetectionModel):
                 nn.LayerNorm(self.appearance_channels),
             )
             if self.appearance_imitation_weight > 0
+            else None
+        )
+        self.instance_alignment_projection = (
+            nn.Sequential(
+                nn.Linear(hd, self.appearance_channels, bias=False),
+                nn.LayerNorm(self.appearance_channels),
+            )
+            if self.instance_alignment_weight > 0
             else None
         )
 
@@ -388,6 +568,8 @@ class NuLiteRayCastDETRModel(DetectionModel):
             self.model = [self.encoder_decoder] + ([self.np_head] if self.np_head is not None else []) + [self.detr]
         elif backbone == 'two_stream':
             self.model = [self.seg_encoder, self.encoder_decoder, self.detr]
+        elif backbone == 'frozen':
+            self.model = [self.seg_encoder, self.detr]
         elif use_decoder:
             self.model = [self.encoder_decoder, self.decoder0, self.np_head, self.detr]
         else:
@@ -414,6 +596,36 @@ class NuLiteRayCastDETRModel(DetectionModel):
             # every later train-mode transition restore the oracle contract.
             self.seg_encoder.requires_grad_(False)
             self.seg_encoder.eval()
+        elif getattr(self, 'backbone', None) == 'shared':
+            # The shared encoder is the frozen oracle encoder; its BN statistics
+            # must not drift, or the frozen seg head silently degrades. The
+            # shared decoder stays in the parent's train/eval mode.
+            self.encoder_decoder.encoder.requires_grad_(False)
+            self.encoder_decoder.encoder.eval()
+        elif getattr(self, 'backbone', None) == 'frozen':
+            # The whole NuLite-T oracle (encoder, decoder, decoder0, np_head) is
+            # frozen; keep it in eval mode so BN statistics cannot drift. An
+            # explicit ``thaw_oracle_encoder()`` (detr_frozen_oracle_unfreeze_encoder
+            # or detr_frozen_oracle_unfreeze_decoder) opts part of the U-Net out
+            # of this contract.
+            if not getattr(self, 'oracle_encoder_thawed', False):
+                self.seg_encoder.eval()
+                self.seg_encoder.requires_grad_(False)
+            else:
+                self.seg_encoder.np_head.eval()
+                self.seg_encoder.np_head.requires_grad_(False)
+                enc = self.seg_encoder.encoder_decoder.encoder
+                enc.train(mode)
+                enc.requires_grad_(True)
+                if getattr(self, 'oracle_full_thaw', False):
+                    rest = self.seg_encoder.encoder_decoder
+                    rest.requires_grad_(True)
+                    for n, p in rest.named_parameters():
+                        if not n.startswith('encoder.'):
+                            p.requires_grad = True
+                    rest.train(mode)
+                    self.seg_encoder.decoder0.requires_grad_(True)
+                    self.seg_encoder.decoder0.train(mode)
         return self
 
     @staticmethod
@@ -439,7 +651,25 @@ class NuLiteRayCastDETRModel(DetectionModel):
             # that distribution, so feed it the same domain; decoder0 is
             # concatenated with the oracle decoder output and must match too.
             x = (x - 0.5) / 0.5
-        d = self.encoder_decoder(x)
+        if getattr(self, 'backbone', 'nulite') == 'frozen':
+            # ONE frozen oracle pass supplies both the FG/centroid map and the
+            # b3/b4/b5 features the DETR decoder attends to. With adapters on,
+            # the head consumes the raw fusion concats (pre-ConvBlock) instead
+            # of the post-fusion decoder outputs.
+            seg_x = (x - 0.5) / 0.5
+            d = self.seg_encoder.encoder_decoder(seg_x, collect_fusion=self.frozen_adapter)
+            seed_logits = self.seg_encoder(seg_x)
+            if self.frozen_adapter:
+                d = {
+                    'b3': self.fusion_adapters[0](d['fuse3']),
+                    'b4': self.fusion_adapters[1](d['fuse4']),
+                    'b5': self.fusion_adapters[2](d['fuse5']),
+                    'b1': d['b1'],
+                    'top': d['top'],
+                }
+        else:
+            d = self.encoder_decoder(x)
+            seed_logits = None
         if getattr(self, 'backbone', 'nulite') == 'dual':
             # NuLite seg stream was trained with 0.5/0.5 normalization, i.e. it
             # expects input in [-1, 1]; the det stream (yolo11) expects [0, 1].
@@ -455,6 +685,34 @@ class NuLiteRayCastDETRModel(DetectionModel):
             }
         elif getattr(self, 'backbone', 'nulite') == 'yolo11':
             seed = self.np_head(d['b3']) if getattr(self, 'np_head', None) is not None else None
+        elif getattr(self, 'backbone', 'nulite') == 'shared':
+            # One frozen-encoder + trainable-decoder pass feeds both tasks: the
+            # full-resolution b1 goes to the frozen NuLite-T seg head, the
+            # stride 4/8/16 features go to the DETR decoder below.
+            seg_x = (x - 0.5) / 0.5
+            x0 = self.decoder0(seg_x)
+            seg_logits = self.np_head(torch.cat([x0, d['b1']], dim=1))
+            if self.oracle_kind == 'center_potential':
+                seed = seg_logits
+                centroid_seed = seg_logits
+            elif self.oracle_kind == 'fg_centroid':
+                seed = seg_logits[:, 0:1]
+                centroid_seed = seg_logits[:, 1:2]
+            else:
+                seed = seg_logits[:, 1:2] - seg_logits[:, 0:1]
+                centroid_seed = seed
+        elif getattr(self, 'backbone', 'nulite') == 'frozen':
+            # The oracle map is the same as in ``two_stream``; the only change is
+            # that its encoder's b3/b4/b5 feed the DETR head directly.
+            if self.oracle_kind == 'center_potential':
+                seed = seed_logits
+                centroid_seed = seed_logits
+            elif self.oracle_kind == 'fg_centroid':
+                seed = seed_logits[:, 0:1]
+                centroid_seed = seed_logits[:, 1:2]
+            else:
+                seed = seed_logits[:, 1:2] - seed_logits[:, 0:1]
+                centroid_seed = seed
         elif getattr(self, 'backbone', 'nulite') == 'two_stream':
             # Frozen NuLite-T oracle seg stream was trained on [-1, 1] input
             # (0.5/0.5 normalization); the det stream expects raw [0, 1]. The
@@ -481,17 +739,19 @@ class NuLiteRayCastDETRModel(DetectionModel):
         else:
             seed = None
             centroid_seed = None
-        if getattr(self, 'backbone', 'nulite') != 'two_stream':
+        if getattr(self, 'backbone', 'nulite') not in ('two_stream', 'shared', 'frozen'):
             centroid_seed = seed
         self._last_seed = seed
         self._last_centroid_seed = centroid_seed
         self._last_aux_dense = None
         self._last_appearance_logits = None
+        self._last_appearance_map = None
         appearance_map = None
         if self.appearance_head is not None:
             if 'b1' not in d:
                 raise ValueError('query appearance supervision requires the NuLite decoder b1 feature')
             appearance_map, self._last_appearance_logits = self.appearance_head(d['b1'], d['b3'])
+            self._last_appearance_map = appearance_map
         if self.training and self.aux_dense_head is not None:
             self._last_aux_dense = self.aux_dense_head((d['b3'], d['b4'], d['b5']))
 
@@ -651,6 +911,131 @@ class NuLiteRayCastDETRModel(DetectionModel):
         return weighted_margin
 
     @staticmethod
+    def _paired_star_iou_sampled(pred, target, samples=20):
+        """Detached, local-grid polygon IoU for matched star polygons only."""
+        if len(pred) == 0:
+            return pred.new_zeros((0,))
+        polygons = torch.stack((pred, target), dim=1).detach().float()
+        centers, rays = polygons[..., :2], polygons[..., 2:]
+        extent = rays.amax(-1)
+        lo = (centers - extent[..., None]).amin(1).clamp(0, 1)
+        hi = (centers + extent[..., None]).amax(1).clamp(0, 1)
+        unit = (torch.arange(samples, device=pred.device, dtype=polygons.dtype) + 0.5) / samples
+        xx = lo[:, None, None, 0] + (hi[:, None, None, 0] - lo[:, None, None, 0]) * unit[None, None, :]
+        yy = lo[:, None, None, 1] + (hi[:, None, None, 1] - lo[:, None, None, 1]) * unit[None, :, None]
+        points = torch.stack(torch.broadcast_tensors(xx, yy), dim=-1)
+        delta = points[:, None] - centers[:, :, None, None]
+        distance = delta.square().sum(-1).sqrt()
+        ray_count = rays.shape[-1]
+        position = torch.remainder(torch.atan2(delta[..., 1], delta[..., 0]), 2 * torch.pi)
+        position = position * (ray_count / (2 * torch.pi))
+        lower = position.floor().long() % ray_count
+        fraction = position - position.floor()
+        expanded_rays = rays[:, :, None, None].expand(-1, -1, samples, samples, -1)
+        lower_ray = expanded_rays.gather(-1, lower[..., None]).squeeze(-1)
+        upper_ray = expanded_rays.gather(-1, ((lower + 1) % ray_count)[..., None]).squeeze(-1)
+        inside = distance <= lower_ray * (1 - fraction) + upper_ray * fraction
+        intersection = (inside[:, 0] & inside[:, 1]).sum((1, 2))
+        union = (inside[:, 0] | inside[:, 1]).sum((1, 2))
+        return intersection.float() / union.clamp_min(1)
+
+    def _viable_owner_foreground_loss(self, polygons, scores, targets, gt_groups):
+        """Reinforce only geometrically viable one-to-one owners against empty."""
+        zero = scores.sum() * 0.0
+        with torch.no_grad():
+            owners = self.criterion.matcher(polygons, scores, targets['bboxes'], targets['cls'], gt_groups)
+        terms = []
+        for batch_i, (query_idx, target_idx) in enumerate(owners):
+            if len(query_idx) == 0:
+                continue
+            query_idx = query_idx.to(polygons.device)
+            target_idx = target_idx.to(polygons.device)
+            with torch.no_grad():
+                quality = self._paired_star_iou_sampled(
+                    polygons[batch_i, query_idx], targets['bboxes'][target_idx]
+                )
+                viable = quality >= self.viable_owner_iou
+            if not viable.any():
+                continue
+            logits = scores[batch_i, query_idx[viable]]
+            true_class = targets['cls'][target_idx[viable]]
+            gap = logits[:, -1] - logits.gather(1, true_class[:, None]).squeeze(1)
+            terms.append(F.softplus(self.viable_owner_margin + gap))
+        return torch.cat(terms).mean() if terms else zero
+
+    def _nucleus_cdn_class_loss(self, layer_scores, dn_meta):
+        """Supervise canonical GT-polygon DN queries to fire on their true class.
+
+        Every DN query sits exactly on a GT polygon (geometry frozen), so the
+        only thing to learn is the classification decision it exists to fix:
+        a good polygon must beat the empty column. Applied at the encoder
+        proposal layer AND every decoder layer (``layer_scores`` is
+        (L+1, B, n_dn, nc+1)).
+
+        Padded DN rows (label == nc, no GT) are also trained to stay empty:
+        they get the same empty-column target as an unmatched real query, so
+        the model cannot satisfy the loss by always firing. Mean is over all
+        DN slots (valid + padded) so both terms share one denominator.
+        """
+        labels = dn_meta['labels']  # (B, n_dn)
+        bs, n_dn = labels.shape
+        flat_labels = labels.reshape(-1)
+        one_hot = torch.zeros(
+            (bs * n_dn, self.nc + 1), dtype=torch.int64, device=layer_scores.device
+        )
+        one_hot.scatter_(1, flat_labels.unsqueeze(-1), 1)
+        n_layers = layer_scores.shape[0]
+        logits = layer_scores.reshape(n_layers, bs * n_dn, self.nc + 1)
+        bce = F.binary_cross_entropy_with_logits(
+            logits, one_hot.float().unsqueeze(0).expand_as(logits), reduction='none'
+        )
+        pred_prob = logits.sigmoid()
+        p_t = one_hot.float().unsqueeze(0) * pred_prob + (1 - one_hot.float().unsqueeze(0)) * (1 - pred_prob)
+        bce = bce * (1.0 - p_t) ** 2.0
+        return bce.mean()
+
+    def _balanced_proposal_loss(self, polygons, scores, targets, gt_groups):
+        """Class-balanced focal classification loss at the encoder proposal layer.
+
+        The one-to-one Hungarian criterion is dominated by the majority
+        "empty" decision, so the proposal head learns an operating point that
+        is over-eager to say background (measured: recall 0.65 at tnr 0.93 on
+        features whose balanced linear probe reaches recall 0.93). This term
+        re-weights the *positive* (Hungarian-matched) queries by the current
+        background/foreground ratio, capped at ``proposal_bal_cap``, which
+        shifts that operating point without touching geometry or the
+        one-to-one assignment.
+
+        Uses the same matcher as the main criterion so the positive set is
+        exactly the one the detector is already trying to own.
+        """
+        zero = scores.sum() * 0.0
+        with torch.no_grad():
+            owners = self.criterion.matcher(
+                polygons, scores, targets['bboxes'], targets['cls'], gt_groups
+            )
+        terms = []
+        for batch_i, (query_idx, target_idx) in enumerate(owners):
+            n_q = scores.shape[1]
+            weight = torch.ones(n_q, device=scores.device)
+            if len(query_idx) > 0:
+                ratio = min(float((n_q - len(query_idx)) / max(len(query_idx), 1)), self.proposal_bal_cap)
+                weight[query_idx.to(scores.device)] = ratio
+            logits = scores[batch_i]
+            target_cls = torch.full((n_q,), self.nc, dtype=torch.long, device=scores.device)
+            if len(query_idx) > 0:
+                target_cls[query_idx.to(scores.device)] = targets['cls'][target_idx.to(scores.device)]
+            one_hot = F.one_hot(target_cls, self.nc + 1).float()
+            bce = F.binary_cross_entropy_with_logits(logits, one_hot, reduction='none')
+            p_t = one_hot * logits.sigmoid() + (1 - one_hot) * (1 - logits.sigmoid())
+            focal = bce * (1.0 - p_t) ** 2.0
+            # weight applies to the whole query row (fg and its empty column
+            # both get the foreground gain), so the positive decision is what
+            # is being re-balanced rather than one column of it.
+            terms.append((focal.mean(-1) * weight).sum() / weight.sum())
+        return torch.stack(terms).mean() if terms else zero
+
+    @staticmethod
     def _point_radial_margin(points, polygons):
         """Signed radial margin for every point/polygon pair; positive is inside."""
         delta = points[:, None, :] - polygons[None, :, :2]
@@ -780,6 +1165,75 @@ class NuLiteRayCastDETRModel(DetectionModel):
         logits = student[valid] @ prototypes.T / self.appearance_imitation_temperature
         return F.cross_entropy(logits, labels[valid])
 
+    def _instance_alignment_loss(self, embeddings, appearance_map, instance_mask, polygons, scores, targets, gt_groups):
+        """Align final Hungarian owners with their own dense instance prototype.
+
+        Nearby GT instances are the only negatives, concentrating the auxiliary
+        objective on crowded cases. This leaves one-to-one ownership and the
+        production classification/inference path unchanged.
+        """
+        query_features = F.normalize(self.instance_alignment_projection(embeddings), dim=-1)
+        masks = (
+            F.interpolate(
+                instance_mask[:, None].to(appearance_map.device, torch.float32),
+                size=appearance_map.shape[-2:],
+                mode='nearest',
+            )
+            .squeeze(1)
+            .long()
+        )
+        with torch.no_grad():
+            owners = self.criterion.matcher(
+                polygons.detach(), scores.detach(), targets['bboxes'], targets['cls'], gt_groups
+            )
+
+        terms = []
+        start = 0
+        radius = self.instance_alignment_radius_px / float(targets['imgsz'])
+        for batch_i, ((query_idx, target_idx), count) in enumerate(zip(owners, gt_groups)):
+            gt_offset = start
+            gt = targets['bboxes'][start : start + count]
+            start += count
+            if count < 2 or len(query_idx) == 0:
+                continue
+
+            feature = appearance_map[batch_i]
+            flat_feature = feature.flatten(1)
+            flat_mask = masks[batch_i].flatten()
+            # Accumulate all instance means in one pass, including a background
+            # bin. No per-instance nonzero/boolean checks synchronizing CUDA.
+            sums = flat_feature.new_zeros((count + 1, feature.shape[0])).index_add(
+                0, flat_mask, flat_feature.T
+            )
+            sizes = flat_feature.new_zeros(count + 1).index_add(
+                0, flat_mask, flat_feature.new_ones(flat_mask.shape)
+            )
+            prototype = F.normalize(sums[1:] / sizes[1:, None].clamp_min(1), dim=-1)
+            valid_gt = sizes[1:] > 0
+
+            query_idx = query_idx.to(polygons.device)
+            local_targets = target_idx.to(polygons.device) - gt_offset
+            distances = torch.cdist(gt[:, :2], gt[:, :2])
+            owner_distances = distances[local_targets]
+            neighbors = (owner_distances > 0) & (owner_distances <= radius) & valid_gt[None]
+            ranked = owner_distances.masked_fill(~neighbors, float('inf'))
+            # Stable sorting preserves the original GT-index tie break.
+            nearest = ranked.argsort(dim=-1, stable=True)[:, : self.instance_alignment_max_negatives]
+            negative_valid = neighbors.gather(1, nearest)
+            candidates = torch.cat((local_targets[:, None], nearest), dim=1)
+            logits = (
+                query_features[batch_i, query_idx, None] * prototype[candidates]
+            ).sum(-1) / self.instance_alignment_temperature
+            candidate_valid = torch.cat((torch.ones_like(local_targets[:, None], dtype=torch.bool), negative_valid), 1)
+            logits = logits.masked_fill(~candidate_valid, float('-inf'))
+            eligible = valid_gt[local_targets] & negative_valid.any(-1)
+            losses = F.cross_entropy(logits, torch.zeros_like(local_targets), reduction='none')
+            terms.append((losses.masked_fill(~eligible, 0).sum(), eligible.sum()))
+
+        if not terms:
+            return query_features.sum() * 0.0
+        return torch.stack([loss for loss, _ in terms]).sum() / torch.stack([n for _, n in terms]).sum().clamp_min(1)
+
     def loss(self, batch, preds=None):
         """DETR loss + seed-map seg loss.
 
@@ -811,14 +1265,28 @@ class NuLiteRayCastDETRModel(DetectionModel):
             preds = preds[1] if isinstance(preds, tuple) and len(preds) == 2 else preds
 
         dec_polygons, dec_scores, enc_polygons, enc_scores, dn_meta = preds
+        dn_polygons = dn_scores = dn_enc_polygons = dn_enc_scores = None
         if dn_meta is not None:
-            dn_bs, dn_num_quad, _ = dn_meta
-            dn_num_group = dn_num_quad * 2
-            split = [dn_bs * dn_num_group, bs]
-            dec_polygons = dec_polygons.split(split, dim=1)[1]
-            dec_scores = dec_scores.split(split, dim=1)[1]
-            enc_polygons = enc_polygons.split(split, dim=1)[1]
-            enc_scores = enc_scores.split(split, dim=1)[1]
+            if isinstance(dn_meta, dict):
+                # nucleus-CDN: the DN block is the leading ``n_dn`` queries of
+                # every layer; split it from the real query block.
+                n_dn = int(dn_meta['n_dn'])
+                dn_polygons, dec_polygons = dec_polygons.split(
+                    [n_dn, dec_polygons.shape[2] - n_dn], dim=2
+                )
+                dn_scores, dec_scores = dec_scores.split([n_dn, dec_scores.shape[2] - n_dn], dim=2)
+                dn_enc_polygons, enc_polygons = enc_polygons.split(
+                    [n_dn, enc_polygons.shape[1] - n_dn], dim=1
+                )
+                dn_enc_scores, enc_scores = enc_scores.split([n_dn, enc_scores.shape[1] - n_dn], dim=1)
+            else:
+                dn_bs, dn_num_quad, _ = dn_meta
+                dn_num_group = dn_num_quad * 2
+                split = [dn_bs * dn_num_group, bs]
+                dec_polygons = dec_polygons.split(split, dim=1)[1]
+                dec_scores = dec_scores.split(split, dim=1)[1]
+                enc_polygons = enc_polygons.split(split, dim=1)[1]
+                enc_scores = enc_scores.split(split, dim=1)[1]
 
         dec_polygons = torch.cat([enc_polygons.unsqueeze(0), dec_polygons], dim=0)
         dec_scores = torch.cat([enc_scores.unsqueeze(0), dec_scores], dim=0)
@@ -831,6 +1299,26 @@ class NuLiteRayCastDETRModel(DetectionModel):
 
         loss = self.criterion((dec_polygons, dec_scores), targets)
         total = sum(loss.values())
+
+        proposal_bal = torch.zeros((), device=device)
+        if getattr(self, 'proposal_bal_weight', 0.0) > 0 and self.no_object:
+            # Re-balance the encoder proposal layer only: this is where the
+            # foreground/empty decision is committed.
+            proposal_bal = self._balanced_proposal_loss(
+                dec_polygons[0], dec_scores[0], targets, gt_groups
+            )
+            total = total + self.proposal_bal_weight * proposal_bal
+
+        nucleus_cdn_loss = torch.zeros((), device=device)
+        if dn_scores is not None and getattr(self, 'nucleus_cdn_weight', 0.0) > 0:
+            # Supervise the canonical GT-polygon queries (proposal + every
+            # decoder layer) to put their TRUE GT class above the empty
+            # column. Class-only: geometry is canonical/frozen. Padded DN rows
+            # (label == nc / no-object) are trained to stay empty, so the
+            # denominator is the valid-slot mask.
+            dn_layer_scores = torch.cat([dn_enc_scores.unsqueeze(0), dn_scores], dim=0)
+            nucleus_cdn_loss = self._nucleus_cdn_class_loss(dn_layer_scores, dn_meta)
+            total = total + self.nucleus_cdn_weight * nucleus_cdn_loss
 
         seed = getattr(self, '_last_seed', None)
         if seed is not None and self.lambda_seg > 0:
@@ -876,6 +1364,13 @@ class NuLiteRayCastDETRModel(DetectionModel):
             seg_fg_margin = self._segmentation_foreground_margin(dec_polygons, dec_scores, targets, gt_groups, seed)
             total = total + self.seg_fg_margin_weight * seg_fg_margin
 
+        viable_owner_fg = torch.zeros((), device=device)
+        if getattr(self, 'viable_owner_fg_weight', 0.0) > 0 and self.no_object:
+            viable_owner_fg = self._viable_owner_foreground_loss(
+                dec_polygons[-1], dec_scores[-1], targets, gt_groups
+            )
+            total = total + self.viable_owner_fg_weight * viable_owner_fg
+
         appearance_loss = torch.zeros((), device=device)
         # The validator first calls predict() and then passes those predictions
         # back into loss(); the caches therefore belong to this same batch and
@@ -909,6 +1404,26 @@ class NuLiteRayCastDETRModel(DetectionModel):
             )
             total = total + self.appearance_imitation_weight * imitation_loss
 
+        instance_alignment_loss = torch.zeros((), device=device)
+        appearance_map = getattr(self, '_last_appearance_map', None)
+        appearance_queries = getattr(self.detr, '_last_appearance_queries', None)
+        if (
+            appearance_queries is not None
+            and appearance_map is not None
+            and self.instance_alignment_weight > 0
+            and 'instance_mask' in batch
+        ):
+            instance_alignment_loss = self._instance_alignment_loss(
+                appearance_queries,
+                appearance_map,
+                batch['instance_mask'],
+                dec_polygons[-1],
+                dec_scores[-1],
+                targets,
+                gt_groups,
+            )
+            total = total + self.instance_alignment_weight * instance_alignment_loss
+
         loss_items = torch.as_tensor(
             [
                 (loss['loss_class'] + loss.get('loss_class_aux', 0.0)).detach(),
@@ -923,12 +1438,20 @@ class NuLiteRayCastDETRModel(DetectionModel):
             loss_items = torch.cat([loss_items, torch.stack([aux_obj.detach(), aux_type.detach()])])
         if self.seg_fg_margin_weight > 0:
             loss_items = torch.cat([loss_items, seg_fg_margin.detach().reshape(1)])
+        if getattr(self, 'viable_owner_fg_weight', 0.0) > 0:
+            loss_items = torch.cat([loss_items, viable_owner_fg.detach().reshape(1)])
+        if getattr(self, 'nucleus_cdn_weight', 0.0) > 0:
+            loss_items = torch.cat([loss_items, nucleus_cdn_loss.detach().reshape(1)])
+        if getattr(self, 'proposal_bal_weight', 0.0) > 0:
+            loss_items = torch.cat([loss_items, proposal_bal.detach().reshape(1)])
         if self.appearance_weight > 0:
             loss_items = torch.cat([loss_items, appearance_loss.detach().reshape(1)])
         if self.presence_weight > 0:
             loss_items = torch.cat([loss_items, presence_loss.detach().reshape(1)])
         if self.appearance_imitation_weight > 0:
             loss_items = torch.cat([loss_items, imitation_loss.detach().reshape(1)])
+        if self.instance_alignment_weight > 0:
+            loss_items = torch.cat([loss_items, instance_alignment_loss.detach().reshape(1)])
         return total, loss_items
 
     # -- helpers ------------------------------------------------------------
@@ -951,18 +1474,74 @@ class NuLiteRayCastDETRModel(DetectionModel):
         if getattr(self, 'backbone', 'nulite') == 'two_stream':
             self.seg_encoder.load_ckpt(ckpt_path)
             return
+        if getattr(self, 'backbone', 'nulite') == 'frozen':
+            self.seg_encoder.load_ckpt(ckpt_path)
+            return
+        if getattr(self, 'backbone', 'nulite') == 'shared':
+            self._load_shared_nulite_ckpt(ckpt_path)
+            return
         target = self.seg_encoder if getattr(self, 'backbone', 'nulite') == 'dual' else self.encoder_decoder
         target.load_nulite_ckpt(ckpt_path)
         if getattr(self, 'backbone', 'nulite') == 'nulite':
             self.encoder_input_norm = '11'
 
+    def _load_shared_nulite_ckpt(self, ckpt_path):
+        """Load a NuLite-T oracle checkpoint into the shared encoder+decoder.
+
+        The oracle file stores ``encoder.fast_vit.*``, ``decoder.*``,
+        ``decoder0.0.*`` and ``np_head.*``; the shared model holds the same
+        tensors as ``encoder_decoder.encoder.*``, ``encoder_decoder.*``,
+        ``decoder0.*`` and ``np_head.*``. Every own key must find a shape-match
+        match, so a partial load cannot silently leave the oracle uninitialised.
+        """
+        ckpt = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+        config = ckpt.get('config', {}) if isinstance(ckpt, dict) else {}
+        checkpoint_kind = config.get('oracle_kind')
+        if checkpoint_kind is not None and checkpoint_kind != self.oracle_kind:
+            raise ValueError(f'oracle checkpoint kind is {checkpoint_kind!r}, but model expects {self.oracle_kind!r}')
+        state = ckpt.get('model_state_dict', ckpt.get('state_dict', ckpt))
+        own = self.state_dict()
+        remapped = {}
+        for k, v in own.items():
+            ck = k
+            if k.startswith('encoder_decoder.encoder.'):
+                ck = 'encoder.fast_vit.' + k[len('encoder_decoder.encoder.') :]
+            elif k.startswith('encoder_decoder.'):
+                ck = 'decoder.' + k[len('encoder_decoder.') :]
+            elif k.startswith('decoder0.'):
+                ck = 'decoder0.0.' + k[len('decoder0.') :]
+            if ck in state and state[ck].shape == v.shape:
+                remapped[k] = state[ck]
+        missing = [k for k in own if k not in remapped and k.startswith(('encoder_decoder.', 'decoder0.', 'np_head.'))]
+        print(
+            f'NuLite shared-stream load: {len(remapped)}/{len(own)} keys matched'
+            + (f' (missing {len(missing)}, e.g. {missing[:4]})' if missing else '')
+        )
+        if missing:
+            raise ValueError(
+                f'oracle checkpoint is incompatible with the shared stream: {len(missing)} parameters were not loaded; '
+                f'first keys: {missing[:4]}'
+            )
+        self.load_state_dict(remapped, strict=False)
+
     def freeze_encoder_decoder_np(self):
         """Freeze encoder + decoder + decoder0 + NP seed head."""
+        if getattr(self, 'backbone', 'nulite') == 'shared':
+            self.encoder_decoder.encoder.requires_grad_(False)
+            return
         if getattr(self, 'backbone', 'nulite') == 'two_stream':
             self.seg_encoder.requires_grad_(False)
             self.encoder_decoder.freeze_encoder()
             if getattr(self.encoder_decoder, 'use_decoder', True):
                 self.encoder_decoder.freeze_decoder()
+            return
+        if getattr(self, 'backbone', 'nulite') == 'frozen':
+            # Only the DETR head trains; the whole oracle stays frozen unless an
+            # experiment explicitly opted into thawing the encoder / U-Net.
+            self.seg_encoder.requires_grad_(False)
+            self.oracle_encoder_thawed = False
+            self.oracle_full_thaw = False
+            self.seg_encoder.eval()
             return
         if getattr(self, 'backbone', 'nulite') == 'dual':
             self.seg_encoder.freeze_encoder()
@@ -984,6 +1563,39 @@ class NuLiteRayCastDETRModel(DetectionModel):
     def unfreeze_all(self):
         """Unfreeze trainable detector parameters while preserving the frozen oracle."""
         self.requires_grad_(True)
-        if getattr(self, 'backbone', None) == 'two_stream':
+        if getattr(self, 'backbone', None) in ('two_stream', 'frozen'):
             self.seg_encoder.requires_grad_(False)
             self.seg_encoder.eval()
+            if getattr(self, 'oracle_encoder_thawed', False):
+                self.thaw_oracle_encoder(full_unet=getattr(self, 'oracle_full_thaw', False))
+
+    def thaw_oracle_encoder(self, full_unet: bool = False):
+        """Expose the frozen oracle U-Net to the optimiser.
+
+        Used by the ``frozen`` layout when an experiment decides the frozen
+        features are the bottleneck. With ``full_unet=False`` only the FastViT
+        encoder adapts (``detr_frozen_oracle_unfreeze_encoder``). With
+        ``full_unet=True`` (``detr_frozen_oracle_unfreeze_decoder``) the whole
+        U-Net thaws — encoder, upsample decoder and ``decoder0`` — recreating
+        the dedicated-detection-encoder specialization t34 learned, while only
+        ``np_head`` stays frozen so the foreground map head itself cannot be
+        rewritten. BN statistics across the U-Net follow training.
+        """
+        if getattr(self, 'backbone', None) != 'frozen':
+            raise ValueError('thaw_oracle_encoder() requires backbone="frozen"')
+        enc = self.seg_encoder.encoder_decoder.encoder
+        enc.requires_grad_(True)
+        enc.train(self.training)
+        if full_unet:
+            self.oracle_full_thaw = True
+            rest = self.seg_encoder.encoder_decoder
+            for n, p in rest.named_parameters():
+                if not n.startswith('encoder.'):
+                    p.requires_grad = True
+            rest.train(self.training)
+            self.seg_encoder.decoder0.requires_grad_(True)
+            self.seg_encoder.decoder0.train(self.training)
+            self.seg_encoder.np_head.requires_grad_(False)
+            self.seg_encoder.np_head.eval()
+        self.oracle_encoder_thawed = True
+        return self

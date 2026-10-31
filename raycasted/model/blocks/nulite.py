@@ -124,23 +124,36 @@ class NuLiteEncoderDecoder(nn.Module):
             nn.ConvTranspose2d(e3, e3, kernel_size=2, stride=2),
         )
 
-    def forward(self, x: torch.Tensor) -> dict:
+    def forward(self, x: torch.Tensor, collect_fusion: bool = False) -> dict:
         """Encode and (optionally) upsample, returning the multi-scale features.
 
         With ``use_decoder=False`` the raw FastViT stage features (strides
         4/8/16, channels 64/128/256 for s12) are returned directly as b3/b4/b5
         and ``b1`` is None — the upsample decoder is bypassed entirely.
+
+        With ``collect_fusion=True`` the dict additionally carries the raw
+        fusion tensors tapped for detection adapters (pre-ConvBlock, so both
+        the backbone skip and the upsampled context stay linearly separable):
+        ``fuse5`` = z4 (bottleneck input, no skip exists at this level),
+        ``fuse4`` = cat([z3, b5]) (512ch at stride 8) and
+        ``fuse3`` = cat([z2, b4]) (384ch at stride 4).
         """
         feats = list(self.encoder(x))  # [st4, st8, st16, st32]
         if not getattr(self, 'use_decoder', True):
             return {'b3': feats[0], 'b4': feats[1], 'b5': feats[2], 'b1': None, 'top': feats[3]}
         z4, z3, z2, z1 = feats[::-1]
+        fuse5 = z4
         b5 = self.bottleneck_upsampler(z4)
-        b4 = self.decoder4_upsampler(torch.cat([z3, b5], dim=1))
-        b3 = self.decoder3_upsampler(torch.cat([z2, b4], dim=1))
+        fuse4 = torch.cat([z3, b5], dim=1)
+        b4 = self.decoder4_upsampler(fuse4)
+        fuse3 = torch.cat([z2, b4], dim=1)
+        b3 = self.decoder3_upsampler(fuse3)
         b2 = self.decoder2_upsampler(torch.cat([z1, b3], dim=1))
         b1 = self.decoder1_upsampler(b2)
-        return {'b3': b3, 'b4': b4, 'b5': b5, 'b1': b1, 'top': feats[3]}
+        out = {'b3': b3, 'b4': b4, 'b5': b5, 'b1': b1, 'top': feats[3]}
+        if collect_fusion:
+            out.update({'fuse3': fuse3, 'fuse4': fuse4, 'fuse5': fuse5})
+        return out
 
     def freeze_encoder(self) -> None:
         """Freeze the FastViT encoder parameters."""

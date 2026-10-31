@@ -91,6 +91,8 @@ class TrainingSettings(BaseModel):
     detr_respawn: bool = False  # recall-repair 2nd decoder pass: re-anchor emptiest queries on uncovered seed peaks
     detr_respawn_peaks: int = 64  # max respawned queries per image
     detr_respawn_min_seed: float = 0.5  # min seed value for a candidate respawn peak
+    detr_self_attention_sta: bool = False  # LSP-DETR sliding-tile attention mask on decoder self-attention
+    detr_sta_kernel: int = 3  # STA window side in grid cells (odd; LSP-DETR uses 3)
     detr_self_attention_rope: bool = False  # rotate decoder self-attention Q/K at current query centroids
     detr_rope_theta: float = 100.0  # STRING frequency base used by LSP-DETR
     detr_rope_position_scale: float = 0.05  # normalized spatial unit (one 20x20 grid cell)
@@ -104,6 +106,10 @@ class TrainingSettings(BaseModel):
     detr_appearance_imitation_weight: float = 0.0  # owner-only small-query exemplar loss
     detr_appearance_imitation_temperature: float = 0.1
     detr_appearance_imitation_small_area: float = 200.0
+    detr_instance_alignment_weight: float = 0.0
+    detr_instance_alignment_temperature: float = 0.1
+    detr_instance_alignment_radius_px: float = 30.0
+    detr_instance_alignment_max_negatives: int = 8
     detr_presence_negative_margin_px: float = 4.0  # unambiguous negative center clearance
     detr_aux_dense_weight: float = 0.0  # training-only dense supervision on trainable b3/b4/b5 (0=off)
     detr_aux_dense_type_weight: float = 1.0  # nucleus-type term relative to dense objectness
@@ -113,6 +119,20 @@ class TrainingSettings(BaseModel):
     detr_seg_fg_margin_layer_weights: list[float] = Field(
         default_factory=list
     )  # per-decoder-layer multipliers; [] = final layer only
+    detr_viable_owner_fg_weight: float = 0.0  # extra final-layer true-class vs empty loss for viable Hungarian owners
+    detr_viable_owner_iou: float = 0.5  # sampled matched-polygon IoU required for the extra loss
+    detr_viable_owner_margin: float = 1.0  # desired true-class logit lead over empty
+    detr_nucleus_cdn: int = 0  # nucleus CDN: GT-derived denoising copies per GT (0=off)
+    detr_nucleus_cdn_weight: float = 0.0  # focal-BCE weight for nucleus-CDN class loss
+    detr_proposal_bal_weight: float = 0.0  # class-balanced focal loss at the encoder proposal layer
+    detr_proposal_bal_cap: float = 5.0  # cap on the bg/fg re-weighting ratio for the balanced proposal loss
+    detr_seed_in_content_pooled: bool = False  # append max-pooled multi-scale seed samples to the score-head input
+    detr_seed_in_content_pool_sizes: list[int] = [3, 5, 9]  # peak-preserving pooling windows
+    detr_map_modulation: bool = False  # zero-init FiLM-style additive map term on the query content
+    detr_score_size_bias: bool = False  # learned per-query, per-class score bias from predicted size
+    detr_score_size_bias_hidden: int = 32  # hidden width of the score-size-bias MLP
+    detr_nucleus_cdn_class_embed: bool = False  # private per-class DN embedding (train35 shortcut); off = token-only
+    detr_nucleus_cdn_real_to_dn: bool = False  # real queries may attend to DN anchors (DN stays isolated from real)
     backbone_freeze_epochs: int = 0  # freeze FastViT encoder for N initial epochs (LSP-DETR: 30); 0 = end-to-end
     backbone_lr_scale: float = 0.1  # encoder LR multiplier after unfreeze (LSP-DETR: backbone at 10% base LR)
     decoder_freeze_epochs: int = 0  # freeze the NuLite upsampling decoder (encoder_decoder.* minus encoder) for N initial epochs (curriculum stage-2 warm-up); 0 = train decoder from ep0
@@ -122,10 +142,15 @@ class TrainingSettings(BaseModel):
     detr_per_layer_match: bool = False  # LSP-DETR 'look forward twice': run the Hungarian matcher per decoder layer (vs reuse last-layer match)
     detr_duplicate_train_topk: int = 1  # positives per GT; 1=Hungarian owner only, 3=owner plus <=2 duplicates
     detr_duplicate_nms_iou: float = 0.5  # polygon NMS IoU used only when duplicate_train_topk > 1
-    detr_use_decoder: bool = True  # False = bypass NuLite decoder+NP head, DETR reads raw FastViT stage features (~12.2M)
-    detr_shared_layers: bool = False  # weight-share the transformer decoder layer across all ndl steps (params-only saving)
+    detr_use_decoder: bool = True  # False = bypass the NuLite decoder+NP head (DETR reads raw stage features)
+    detr_shared_layers: bool = False  # weight-share the transformer decoder layer across all ndl steps
+    detr_shared_layer_groups: int = 0  # >0: round-robin repeat of the first N distinct layers
     detr_separable_decoder: bool = False  # depthwise-separable NuLite decoder convs (sub-10M model)
     detr_backbone: str = 'nulite'  # 'nulite' (FastViT + NuLite decoder) or 'yolo11' (YOLO11n + FPN top-down)
+    detr_frozen_oracle_unfreeze_encoder: bool = False  # backbone='frozen': thaw the oracle encoder too
+    detr_frozen_oracle_unfreeze_decoder: bool = False  # backbone='frozen': thaw the whole U-Net (np_head frozen)
+    detr_frozen_thaw_warmup_epochs: int = 0  # >0: keep the oracle frozen for N epochs while the head anchors, then thaw
+    detr_frozen_adapter: bool = False  # backbone='frozen': dw->pw adapters on the raw U-Net fusion concats
     det_variant: str = 'fastvit_t12'  # detection-stream encoder variant for detr_backbone=two_stream (seg stream uses nulite_variant)
     detr_use_seed: bool = True  # add stride-4 NP seed head on P2 (yolo11 backbone only)
     yolo11_scale: str = 'n'  # yolo11 variant scale (n/s/m/l/x) for detr_backbone=yolo11

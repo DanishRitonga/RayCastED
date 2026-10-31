@@ -60,7 +60,7 @@ def test_cayley_string_preserves_norm_and_relative_position_logits():
     rotated_key = rope(key, positions)
     translated_query = rope(query, positions + translation)
     translated_key = rope(key, positions + translation)
-    projection = rope.orthogonal_projection()
+    projection = rope.P.weight
 
     assert torch.allclose(projection.T @ projection, torch.eye(8), atol=1e-5)
     assert torch.allclose(rotated_query.norm(dim=-1), query.norm(dim=-1), atol=1e-5)
@@ -93,7 +93,8 @@ def test_rope_decoder_backward_reaches_learned_rotation():
     assert model.detr.self_attention_rope_layers is not None
     assert len(model.detr.self_attention_rope_layers) == 2
     assert all(
-        layer.frequencies.grad is not None and layer.cayley_parameter.grad is not None
+        layer.freqs.grad is not None
+        and layer.P.original.grad is not None
         for layer in model.detr.self_attention_rope_layers
     )
 
@@ -338,6 +339,8 @@ def _synthetic_batch(bs=2, anns=7, h=256, nc=5, n_rays=64):
     np_mask[:, :, 40:50, 40:50] = 1.0
     semantic_mask = torch.zeros(bs, h, h, dtype=torch.long)
     semantic_mask[:, 40:50, 40:50] = 1
+    instance_mask = torch.zeros(bs, h, h, dtype=torch.long)
+    instance_mask[:, 40:50, 40:50] = 1
     return {
         'img': torch.rand(bs, 3, h, h),
         'batch_idx': torch.zeros(anns, dtype=torch.long),
@@ -345,6 +348,7 @@ def _synthetic_batch(bs=2, anns=7, h=256, nc=5, n_rays=64):
         'bboxes': bboxes,
         'seed_map': seed_map,
         'np_mask': np_mask,
+        'instance_mask': instance_mask,
         'semantic_mask': semantic_mask,
     }
 
@@ -690,6 +694,76 @@ def test_appearance_imitation_trains_small_owner_against_exemplar_and_duplicate(
     assert torch.isfinite(loss)
     assert loss > 0
     assert embeddings.grad is not None
+
+
+def test_instance_alignment_uses_own_prototype_and_nearby_negative():
+    """A crowded Hungarian owner aligns to its own dense instance prototype."""
+    model = object.__new__(NuLiteRayCastDETRModel)
+    torch.nn.Module.__init__(model)
+    model.instance_alignment_temperature = 0.1
+    model.instance_alignment_radius_px = 30.0
+    model.instance_alignment_max_negatives = 8
+    model.instance_alignment_projection = torch.nn.Sequential(torch.nn.Linear(12, 4, bias=False), torch.nn.LayerNorm(4))
+    model.criterion = SimpleNamespace(matcher=lambda *args: [(torch.tensor([0, 1]), torch.tensor([0, 1]))])
+    embeddings = torch.randn(1, 3, 12, requires_grad=True)
+    appearance_map = torch.randn(1, 4, 8, 8, requires_grad=True)
+    instance_mask = torch.zeros(1, 16, 16, dtype=torch.long)
+    instance_mask[0, 3:8, 3:8] = 1
+    instance_mask[0, 3:8, 8:13] = 2
+    polygons = torch.zeros(1, 3, 10)
+    polygons[0, :, :2] = torch.tensor([[0.3, 0.3], [0.55, 0.3], [0.9, 0.9]])
+    scores = torch.zeros(1, 3, 3)
+    gt = torch.zeros(2, 10)
+    gt[:, :2] = torch.tensor([[0.3, 0.3], [0.55, 0.3]])
+    targets = {'bboxes': gt, 'cls': torch.tensor([0, 0]), 'imgsz': 64}
+
+    loss = model._instance_alignment_loss(embeddings, appearance_map, instance_mask, polygons, scores, targets, [2])
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert loss > 0
+    assert embeddings.grad is not None
+    assert appearance_map.grad is not None
+
+
+def test_instance_alignment_is_training_only_and_adds_loss_telemetry():
+    """The identity objective reaches both query descriptors and the appearance map."""
+    model = NuLiteRayCastDETRModel(
+        nc=5,
+        n_rays=64,
+        variant='fastvit_t8',
+        pretrained=False,
+        nq=16,
+        ndl=4,
+        hd=32,
+        d_ffn=64,
+        grid_size=0.25,
+        recast=True,
+        recast_after_layer=3,
+        appearance_weight=0.25,
+        instance_alignment_weight=0.1,
+        instance_alignment_radius_px=64.0,
+        appearance_channels=16,
+        verbose=False,
+    )
+    model.train()
+    batch = _synthetic_batch(bs=1, anns=4, h=64)
+    # Give each synthetic GT an addressable dense prototype.
+    batch['instance_mask'][0, 8:16, 8:16] = 1
+    batch['instance_mask'][0, 8:16, 16:24] = 2
+    batch['instance_mask'][0, 16:24, 8:16] = 3
+    batch['instance_mask'][0, 16:24, 16:24] = 4
+    total, items = model.loss(batch)
+    total.backward()
+
+    assert torch.isfinite(total)
+    assert items.shape == (7,)
+    assert model.instance_alignment_projection[0].weight.grad is not None
+    assert model.appearance_head.fuse[0].weight.grad is not None
+
+    model.eval()
+    with torch.no_grad():
+        output, _ = model(batch['img'])
+    assert output.shape[-1] == 68
 
 
 def test_segmentation_guided_foreground_margin_backward():

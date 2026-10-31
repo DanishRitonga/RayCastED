@@ -17,19 +17,22 @@ strict one-to-one.
 
 ## Held-out LSP evaluation
 
-The fold3 dense GT was evaluated with raw, NMS-free argmax predictions.
+The fold3 dense GT was evaluated with raw, NMS-free argmax predictions. Values
+below were rescored on 2026-10-25 with PIL polygon filling and LSP-DETR's
+distance-based overlap ownership. Train36 stopped at epoch 246, so it is a
+provisional, unmatched reference for these epoch-332 runs.
 
 | Metric | Train31 | Train30 | Train36 |
 |---|---:|---:|---:|
-| Whole bPQ | 0.6266 | 0.6273 | 0.6269 |
-| Whole bDQ | 0.7670 | 0.7663 | 0.7685 |
-| Whole bSQ | 0.8009 | 0.8025 | 0.8006 |
-| Whole mPQ | 0.4432 | 0.4405 | 0.4443 |
-| Macro bPQ | 0.6442 | 0.6461 | 0.6449 |
-| Macro mPQ | 0.4454 | 0.4445 | 0.4493 |
-| Precision | 0.8582 | 0.8550 | 0.8554 |
-| Recall | 0.7439 | 0.7443 | 0.7463 |
-| Raw predictions | 57,784 | 58,021 | — |
+| Whole bPQ | 0.6269 | 0.6274 | 0.6274 |
+| Whole bDQ | 0.7678 | 0.7666 | 0.7690 |
+| Whole bSQ | 0.8006 | 0.8023 | 0.8007 |
+| Whole mPQ | 0.4434 | 0.4404 | 0.4445 |
+| Macro bPQ | 0.6446 | 0.6462 | 0.6458 |
+| Macro mPQ | 0.4458 | 0.4444 | 0.4498 |
+| Centroid precision | 0.8584 | 0.8546 | 0.8555 |
+| Centroid recall | 0.7442 | 0.7440 | 0.7463 |
+| Raw predictions | 57,784 | 58,025 | 58,149 |
 
 The changes are within run-to-run noise. Presence slightly raises precision
 and whole-fold mPQ relative to Train30, but does not improve bPQ or recall and

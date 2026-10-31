@@ -47,10 +47,11 @@ on their training fold and are therefore invalid for comparison.
 3. Class label = `argmax` over the real columns; **no confidence threshold** is
    applied — a query is kept purely by the argmax decision.
 4. Predicted polygons are normalized → pixels via `× crop_size` (256).
-5. Overlap resolution: default = **largest-area-first occlusion**
-   (`rasterize_polys`). `--watershed` additionally applies LSP's
-   distance-transform overlap resolver; measured effect is **0.000**, so the
-   default is protocol-equivalent.
+5. Fill each polygon with PIL, then assign overlapping pixels to the mask
+   with the greatest Euclidean interior distance, as in LSP-DETR. Remove
+   predictions left empty by this assignment. There is no NMS or other
+   duplicate filter. The previous largest-area-first resolver is available
+   only through `--compare-legacy-overlap` for a labeled diagnostic.
 
 ## Metrics
 
@@ -71,11 +72,11 @@ on their training fold and are therefore invalid for comparison.
 
 ```bash
 uv run python -m raycasted.evals.eval_lsp \
-  --weights output/f1-train/train<N>/weights/best.pt \
+  --weights output/f1-train/train<N>/weights/last.pt \
   --data-dir output/f1-train/transformed/test \
   --parquet raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet \
   --batch 16 --device 0
-# optional: --workers 4 ; --watershed (diagnostic, zero delta)
+# optional: --workers 4 ; --compare-legacy-overlap (historical comparison)
 ```
 
 Logs are typically written to `/tmp/opencode/eval_lsp_train<N>_fold3.log`.
@@ -112,7 +113,9 @@ uv run python -m raycasted.pipeline --config main/pannuke.yaml \
 | LKCell | 0.684 | 0.503 |
 | CellViT | 0.679 | 0.498 |
 
-Our held-out fold3 results (all trained on fold1), for orientation:
+Historical held-out fold3 results (all trained on fold1), for orientation.
+These were scored before the overlap correction, so use the corrected
+evaluator for any new comparison:
 
 | run | macro bPQ | macro mPQ | note |
 |---|---|---|---|
@@ -130,4 +133,5 @@ Our held-out fold3 results (all trained on fold1), for orientation:
   internal deltas only.
 - Empty-GT images are skipped in the PQ mean (both protocols), so the
   denominator is the number of non-empty images.
-- The `--watershed` flag exists for parity checks and changes nothing here.
+- Evaluations recorded before the 2026-10-25 overlap correction used the
+  largest-first rule; see `docs/diag/lsp-evaluator-correction-2026-10-25.md`.

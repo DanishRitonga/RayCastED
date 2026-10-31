@@ -99,13 +99,17 @@ training:
   detr_respawn_min_seed: 0.5    # min seed value for a candidate respawn peak
   detr_aux_dense_weight: 0.0    # dense auxiliary experiment disabled after train34 (no held-out gain)
   detr_aux_dense_type_weight: 1.0 # five-type CE relative to dense nucleus/background BCE
-  detr_appearance_weight: 0.0 # matched control: disables appearance map, supervision, and query injection
+  detr_appearance_weight: 0.25 # Train30 appearance baseline for the isolated instance-alignment ablation
   detr_appearance_channels: 32 # compact high-resolution b1+b3 appearance representation
   detr_presence_weight: 0.0 # presence ablation (train31) was a held-out wash
   detr_presence_negative_margin_px: 4.0 # required clearance for an unambiguous negative query
   detr_appearance_imitation_weight: 0.0 # outside the three-run supervised appearance protocol
   detr_appearance_imitation_temperature: 0.1 # cosine-softmax temperature
   detr_appearance_imitation_small_area: 200.0 # pixel-area cutoff for small owner students
+  detr_instance_alignment_weight: 0.025 # calibrated to stay below the baseline shared-feature gradient
+  detr_instance_alignment_temperature: 0.1 # cosine-softmax temperature for local identity discrimination
+  detr_instance_alignment_radius_px: 30.0 # only nearby GT instances become hard negatives
+  detr_instance_alignment_max_negatives: 8 # cap local negatives per owner
   detr_seg_fg_margin_weight: 0.5 # matched positives with local seg evidence must beat the empty logit
   detr_seg_fg_margin: 1.0       # required true-class minus empty-logit margin
   detr_seg_fg_radius_px: 4.0    # 3x3 evidence stencil, aligned with query recasting

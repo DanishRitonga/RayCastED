@@ -1,214 +1,165 @@
-# HANDOVER.md — for the next agent (2026-09-07)
+# RayCastED handover — 2026-10-26
 
-Branch: `feature/nulite-raycast-seg` — HEAD `3d582e6`. Working tree clean.
+## Current objective
 
----
+Improve RayCastED on PanNuke under the LSP-DETR evaluation protocol while
+keeping end-to-end, NMS-free inference. LSP-DETR's published 3-fold macro
+reference is bPQ 0.675 and mPQ 0.482. We do not yet have a comparable 3-fold
+result; current measurements are single-fold held-out diagnostics.
 
-## OBJECTIVE
+NuLite-DETR is the current query-based version of RayCastED. It retains the
+RayCastED radial polygon representation and replaces the earlier dense FCN
+prediction head with a Hungarian one-to-one query decoder; it is not a separate
+project or competing architecture.
 
-Match LSP-DETR's evaluation protocol and close the honest quality gap on PanNuke.
-Reference numbers (LSP-DETR paper Table 3, per-tissue macro, 3-fold CV, final ckpt):
-**LSP-DETR bPQ 0.675 / mPQ 0.482**, LKCell 0.684/0.503, CellViT 0.679/0.498.
+## Ground truth for evaluation
 
-Our current honest standing (LSP protocol, single held-out fold, best.pt):
-- Locked t12-sep recipe (rotation-1, fold1→fold3): macro **bPQ 0.6202 / mPQ 0.4293**
-- train19 s12 old-decoder (fold3→fold2): macro **bPQ 0.6148 / mPQ 0.4223**
-- Gap ≈ 5-6 bPQ pts and 5-6 mPQ pts. **Recall-limited** (P ~0.89, R ~0.69).
+Use `raycasted/evals/eval_lsp.py` only for literature-facing claims. It uses
+the original dense parquet masks, raw no-object argmax decisions, PIL polygon
+filling, and LSP-DETR's distance-based overlap ownership. It reports
+per-image mean PQ and tissue macro metrics.
 
-User directive (verbatim): *"we will use the numbers in LSP-DETR paper for reference.
-thus, we'll only need to match their protocol"* and *"our best performing model is
-actually outclassed by lsp-detr and lkcell? we'll need to somehow improve it"*.
+The evaluator was corrected on 2026-10-25. Old documents that report OpenCV
+filling, largest-polygon overlap ownership, confidence thresholds, polygon GT,
+or training-fold "test" results are not literature comparable. See
+`docs/diag/lsp-evaluator-correction-2026-10-25.md`.
 
-User instinct under investigation: *"does ∅ decision/threshold even significantly help?
-maybe we need architecturally different approach"* — see NEXT STEPS.
+## Held-out reference results
 
----
+All figures below use Fold3 dense GT, 2,722 images and 66,654 instances, and
+`eval_lsp.py` with raw `nc+1` argmax and no NMS.
 
-## CRITICAL CONTEXT: CONTAMINATION (do not regress on this)
+**The current baseline is Train50**, a thin FastViT-T8 model at 6.16M
+parameters. Full documentation is in
+`docs/runs/nulite-detr/v2-train50-thin-t8.md`.
 
-**ALL historical test-set numbers (train18–train36) in `docs/runs/nulite-detr/*.md`,
-`docs/paper/benchmark.md`, and AGENTS.md experiment log are INVALID** — they were
-measured on the *training* fold:
+| checkpoint | params | bPQ | bDQ | bSQ | mPQ | macro bPQ | macro mPQ | P / R |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| **`output/v2/train50_thin-t8-aggressive/weights/last.pt`** | **6.16M** | 0.6337 | 0.7755 | 0.8025 | 0.4546 | 0.6532 | 0.4609 | 0.8222 / 0.7717 |
+| `output/v2/train44_frozen-thaw-full/weights/last.pt` | 15.27M | 0.6374 | 0.7795 | 0.8044 | 0.4544 | 0.6578 | 0.4617 | 0.8440 / 0.7616 |
+| `output/v2/train34_viable-owner-foreground/weights/last.pt` | 24.7M | 0.6325 | 0.7759 | 0.8009 | 0.4476 | 0.6521 | 0.4578 | 0.8467 / 0.7583 |
+| `output/f1-train/train36/weights/last.pt` | 24.7M | 0.6274 | 0.7690 | 0.8007 | 0.4445 | 0.6458 | 0.4498 | 0.8555 / 0.7463 |
+| `output/v2/train30/weights/last.pt` appearance | 24.7M | 0.6274 | 0.7666 | 0.8023 | 0.4404 | 0.6462 | 0.4444 | 0.8546 / 0.7440 |
+| `output/v2/train31/weights/last.pt` appearance + presence | 24.7M | 0.6269 | 0.7678 | 0.8006 | 0.4434 | 0.6446 | 0.4458 | 0.8584 / 0.7442 |
 
-- All NuLite DETR runs trained on `output/nulite/transformed/train` = **fold3** tiles
-  (args.yaml `data=.../nulite/transformed/data.yaml`).
-- All historical test evals used `--data-dir output/pannuke_64/transformed/test` =
-  **fold3** = identical 2722 tiles as the training tree → 2722/2722 overlap.
-- Validation was unaffected (ran on fold1), so best.pt selection is legit; only the
-  final "test" reporting step was wrong.
+Train50 gives up 0.0037 bPQ against Train44, the previous best, while using 40%
+of the parameters; it still beats the full-size Train34 and Train36 controls.
+Train36 stopped at epoch 246. Train30, Train31, Train34, Train44, and Train50
+all stopped at epoch 332 under a 600-epoch learning-rate schedule, so Train36
+is a provisional rather than matched control for them.
 
-**Folds** (identical to LSP-DETR's HF `RationAI/PanNuke` splits): fold1=2656, fold2=2523,
-fold3=2722 images. Categories 0-4 (Neoplastic/Inflammatory/Connective/Dead/Epithelial),
-19 tissues. Parquets: `raycasted/data/dataset/PanNuke/data/fold{1,2,3}-00000-of-00001.parquet`
-(categories already 0-4, ROI id == row order).
+## Architecture of the Train50 baseline
 
-**Protocol that must be used for any number compared to literature:**
-- GT = dense original masks from the fold parquet (NOT 64-ray polygons).
-- No confidence threshold: keep a query iff argmax over the (nc+1) logits is a real
-  class (drop the no-object ∅ column) — this is LSP-DETR's exact decision.
-- **bPQ = per-image binary PQ then mean over images** (IoU>0.5, Hungarian match,
-  dq=tp/(0.5·P+0.5·M), sq=matched-IoU/tp, pq=dq·sq). Empty-GT images skipped.
-- **mPQ = per-image mean over GT-present classes**, then mean over images.
-- Centroid F1 radius 12, global tp/fp/fn.
-- Per-tissue accumulation; reference row = macro mean over 19 tissues. LSP uses the
-  **final (last) checkpoint**, not best-val. Best==last for rotation-1 (plateau).
-- Tool that does exactly this: **`raycasted/evals/eval_lsp.py`** (committed 3d582e6).
-  Run: `uv run python -m raycasted.evals.eval_lsp --weights <best.pt> --data-dir <test tiles dir> --parquet <fold parquet> --batch 16 --device 0`.
+Two streams, one forward pass. A frozen NuLite-T8 U-Net produces the
+foreground map, and the same U-Net supplies `b3`/`b4`/`b5` to the DETR decoder
+through small depthwise-pointwise fusion adapters. The oracle is fully thawed
+from epoch 50 onward except for `np_head`. The decoder has five layers sharing
+three distinct transformer weights, `hd` 192, `d_ffn` 512, and 400 grid
+queries. Inference remains raw `nc+1` argmax with no NMS, clustering, or
+confidence threshold.
 
-**`eval_pannuke.py` uses a DIFFERENT (older) protocol** — global-PQ accumulation +
-conf>0.20 filter + polygon GT — and `docs/*` results written before the metric fix
-(commit e2f73ea) use yet another (union-IoU) protocol. **Do not trust absolute numbers
-in docs/; trust only `eval_lsp.py` outputs on genuinely held-out folds.**
+## What the diagnosis established
 
----
+The main recall failure has two parts:
 
-## ARCHITECTURE (locked in `docs/paper/architecture.md`, commit 16f641d)
+1. **Viable polygon suppressed as empty.** Train36 has 10,626 held-out GT
+   nuclei with a raw query polygon at IoU above 0.5 but no foreground firing.
+   Their median best polygon IoU is 0.708; their median best
+   foreground-minus-empty margin is -2.325. They are concentrated in small
+   nuclei.
+2. **No viable raw polygon.** 6,764 GT nuclei have no raw query crossing IoU
+   0.5. This cohort is smaller still and is primarily a coverage/geometry
+   problem.
 
-NuLite-DETR = convert NuLite-style instance segmentation into an NMS/post-proc-free
-end-to-end star-convex-polygon detector:
-Image(256) → FastViT encoder (`timm`, `features_only`) → NuLite-parity upsample
-decoder → {b3(st4), b4(st8), b5(st16)} multi-scale feats + b1(st1); decoder0(_ConvBlock)
-on input; `xt=cat([decoder0(x), b1])` → NPHead → seed map (B,1,256,256 raw logits).
-DETR head (`NuLiteDETRDecoder`, subclass of ultralytics RTDETRDecoder): LSP-DETR fixed
-20×20=400 grid queries; query content = grid_sample of projected P2 at grid points p0;
-3 deformable decoder layers (optionally weight-shared); per-layer polygon MLP→66-dim
-(cx,cy,64 rays; iterative refinement + SAP-DETR tanh drift confinement) + class head
-5+∅ (focal no-object). conf=1-P(∅), cls=argmax over 5.
+The first cohort is not commonly caused by another GT stealing its owner. A
+256-image decoder trace found that good-polygon/background query slots are
+almost always already empty at the encoder stage and stay empty while polygon
+IoU improves. The final Hungarian owner is viable for about 88% of that cohort;
+best candidates assigned to another GT are rare.
 
-Seed map dual-use (all proven beneficial in the seed-ablation arc): **S** seg loss
-(lambda_seg·L1 vs InstanSeg per-instance-EDT target, target=(edt−0.5)·15), **F** extra
-feature channel concatenated to b3/b4/b5 before input_proj, **Q** raw seed logit
-concatenated into enc/dec score-head inputs (`_score`).
+Frozen feature tests found some identity information, but foreground-map
+weighted predicted-region pooling barely improved it. A held-out linear probe
+could add roughly 20 matches only by increasing duplicate-like outputs from 4
+to 25; constraining duplicates removed the recall gain. This does not support
+an inference-time probe or more generic foreground pooling as the next change.
 
-Loss/matching: per-image Hungarian (focal class + |Δrays|+|Δxy| + (1−pIoU) +
-cost_inside=10 for centroid-outside-GT) + per-layer "look-forward-twice" matching +
-FCN-parity regression terms (xy Huber·500, log-space ray L1·14, pIoU·3, smooth·0).
+Later probes narrowed this considerably and are recorded in
+`docs/diag/undocumented-findings-2026-10-30.md` and
+`docs/diag/query-classification-failures-2026-10-28.md`. The decisive result:
+on the exact 257-d `enc_score_head` input, a balanced linear probe reaches AUC
+0.912 (0.892 with nucleus size fully controlled), while the trained head
+operates at foreground recall 0.650 and background recall 0.926. More capacity
+does not help. The constraint is the decision rule that one-to-one Hungarian
+training over roughly 93% negative queries buys, not the representation or the
+head's capacity.
 
-Key model files (all under `raycasted/model/`): `blocks/nulite.py`
-(NuLiteEncoderDecoder/_ConvBlock/NPHead/PANBottomUp/SAMConditioner),
-`blocks/nulite_detr.py` (NuLiteDETRDecoder + encode/decode_polygon + `_rank_causal_mask`,
-+ `_grid_decoder_input`/`_learned_decoder_input`/`_seed_decoder_input` query modes),
-`nulite_detr_loss.py` (RayCastHungarianMatcher + NuLiteDETRLoss),
-`nulite_detr_model.py` (NuLiteRayCastDETRModel: encoder_decoder+decoder0+np_head+detr;
-eval→(B,400,68) pixel-scaled [cx,cy,rays,conf,cls]), `train.py` (_get_nulite_detr_model,
-get_validator loss_names, validate() warmup guard).
+## Mechanisms tried and their outcomes
 
-Full locked-recipe config knobs in `main/pannuke.yaml` training section:
-`architecture=nulite_detr, nulite_variant=fastvit_t12, pretrained=true, lambda_seg=1.0,
-seed_map_target=true, detr_hd=128, detr_d_ffn=1024, detr_ndl=3, detr_shared_layers=true,
-detr_separable_decoder=true, detr_per_layer_match=true, detr_grid_size=0.05 (→400 q),
-detr_query_selection=grid, detr_seed_feature=true, detr_seed_in_content=true,
-detr_no_object=true, detr_no_object_weight=2.0, detr_cost_inside=10.0, detr_mds=false,
-fitness_warmup_epochs=75, amp=false, patience=300, warm_restarts=false,
-inference_conf=0.20`. → ~7.85M params.
+All figures are Fold3 held-out `eval_lsp` bPQ after a full 332-epoch run unless
+noted. The Train44 configuration is the common control for this series.
 
----
+| mechanism | config flag | bPQ | verdict |
+|---|---:|---:|---|
+| Train44 control | — | 0.6374 | strongest accuracy, 15.27M |
+| nucleus-CDN | `detr_nucleus_cdn` | 0.6302 | learned shortcut: score head read the answer off a private class embedding |
+| CDN token-only | `detr_nucleus_cdn` (no lookup) | 0.6251 | confirmatory null |
+| CDN real-to-DN attention | `detr_nucleus_cdn_real_to_dn` | collapsed | real queries depended on anchors absent at eval |
+| RoPE | `detr_self_attention_rope` | 0.6301 | null; positions load-bearing but redundant with absolute PE |
+| sliding-tile attention | `detr_self_attention_sta` | 0.6294 | best bSQ of the series, no compute saving, worse bDQ |
+| shared single stream | `detr_backbone: shared` | 0.6259 | cheaper, but the map drifted and precision fell |
+| map modulation | `detr_map_modulation` | stopped ~ep133 | live but ~1-2% of content norm; within noise |
+| balanced proposal loss | `detr_proposal_bal_weight` | stopped ~ep117 | recalled +0.006 stable, far short of what is needed |
+| score-size bias | `detr_score_size_bias` | stopped ~ep73 | directionally correct, but the size proxy carries too little information |
+| **thin T8** | `main/pannuke-thin-t8.yaml` | **0.6337** | **new baseline at 6.16M** |
 
-## 3-FOLD CV PROTOCOL (user-confirmed workflow)
+Full-U-Net thaw with fusion adapters (Train44) and the thin T8 baseline
+(Train50) are the two survivors of this line. Everything else was either a
+measured null or a learned shortcut.
 
-Each CV model trains on ONE fold. Committed scheme: `main/pannuke.yaml`
-`datasets.PanNuke.split_args.split_map`. Current committed value (rotation-1, commit
-688427d): fold1=train, fold2=val, fold3=test.
+## Current state and next steps
 
-For each rotation: edit split_map + run pipeline with a **fresh --output dir**
-(user: *"we will simply set the output flag to a different output"*).
+Train50 is the baseline. Its remaining failure profile, from the cohort audit:
 
-- Train: `uv run python -m raycasted.pipeline --config main/pannuke.yaml --output <fresh dir> --stage train --epochs 600 --batch 16 --device 0`
-  (runs land `<dir>/trainNN`). Do NOT use --stage all unless ETL tiles are absent.
-- Eval (held-out fold test tiles): `uv run python -m raycasted.evals.eval_lsp --weights <dir>/.../weights/best.pt --data-dir <dir>/transformed/test --parquet raycasted/data/dataset/PanNuke/data/<testfold>-00000-of-00001.parquet --batch 16 --device 0` (~5 min GPU, 700s timeout, log to /tmp/opencode/).
-- User runs training on cuda:0 RTX 5070 Ti; I (agents) prep config + verify + may run evals. **Do NOT launch training.**
+| cohort | count |
+|---|---:|
+| matched | 51,066 |
+| good_suppressed_bg | 8,782 |
+| no_good_polygon | 6,403 |
+| wrong_type | 7,729 |
+| unmatched_predictions | 11,491 |
 
-Rotation-1 DONE: `output/f1-train/train/weights/{best,last}.pt` (locked t12-sep 7.85M,
-fold1→fold3). Test tree `output/f1-train/transformed/test` (fold3, 2722 tiles).
-LSP-protocol numbers (above); full log `/tmp/opencode/eval_lsp_f1train.log`;
-run doc committed at `docs/runs/nulite-detr/cv-lsp-protocol.md`.
-Rotations 2/3 NOT yet run (fold2-train and fold3-train of the locked recipe).
+The thinning recovered 949 nuclei from the suppression cohort but added 1,780
+unmatched predictions. If that recall gain is real rather than churn, the
+follow-up is to recover the precision: the surviving unmatched predictions
+should be characterised by size, crowding, and class before any further
+mechanism is built.
 
----
+Three-fold cross-validation remains required for any comparison with published
+LSP-DETR (3-fold macro bPQ 0.675, mPQ 0.482) or LKCell numbers. All results
+here are single-fold held-out diagnostics.
 
-## WHAT WE TRIED + RESULTS (summarized; full details in docs/runs + compressed history)
+## Reproduction commands
 
-**FCN→DETR pivot.** Original YOLO26-FCN RayCastED suffered same-scale duplicate
-overprediction. Built NuLite-DETR (above) — query grid + 1:1 Hungarian eliminates
-duplicates (overprediction 6.1x → 1.2-1.3x) but changed the whole game to
-winner-selection/discrimination.
+The user runs training; agents must not launch it. The baseline is produced by:
 
-**Seed-branch ablation arc (fold3-contaminated test, RELATIVE ranking still valid):**
-S+F+Q > S > S+F > none > Q. Seg loss is the main seed contributor; Q alone harmful but
-unlocks F in the trio. → locked S+F+Q.
+```bash
+SKIP_SEG=1 DET_NAME=train50_thin-t8-aggressive scripts/train_thin_t8.sh
+```
 
-**Head-slimming ladder** (selected on contaminated folds — clean evals later showed it
-HURT): shared layers (train31) won on contaminated test; separable decoder + t12 + hd128
-enabled sub-10M (down to 7.85M) but slimming reduces discrimination. Clean leaderboard
-(fold2, OLD eval_pannuke protocol): train19 s12 old-decoder bPQ 0.6123 best; all
-post-train19 "improvements" (per-layer-match train28 0.5059, decoder parity, shared
-layers, hd128, t12, separable → 0.51) actually REGRESSED. train19 recipe = s12 OLD
-(pre-parity) decoder, MDS off, S+F+Q seed, cost_inside, hd256, NO per-layer-match,
-15.46M.
+The script runs the segmentation oracle first and the detector second;
+`SKIP_SEG=1` reuses `output/oracle/nuLiteT-fold1-sep-t8.pt`. Without the
+override it retrains the oracle with `raycasted.model.train_nulite_seg`.
 
-Under the LSP protocol the locked t12-sep and train19 recipes are within noise of each
-other (~0.62 macro bPQ).
+For final held-out evaluation:
 
-**Recall ceiling diagnostic (partial)**: on 400 fold3 tiles / 9753 GT, rotation-1 model:
-72.3% of GT have a *fired* (∅-passed) query within 12px; 99.9% have *any* of the 400
-queries within 12px (caveat: 20×20 grid geometry makes ~everything covered). → The
-recall gap is concentrated in the ~27.7% of GT whose nearest query is **∅-suppressed**,
-i.e. sits at the class/∅ decision boundary. Diagnostic script (unfinished, needs a
-conclusion run): `/tmp/opencode/recall_ceiling_diag.py`. The key unknown: for
-suppressed-only GT, is the nearest query a correctly-localized polygon that the gate
-wrongly drops (→ lower `detr_no_object_weight`/retrain helps) or a poorly-placed query
-(→ gate tuning dead, need architecture)?
+```bash
+uv run python -m raycasted.evals.eval_lsp \
+  --weights output/v2/train50_thin-t8-aggressive/weights/last.pt \
+  --data-dir output/v2/transformed/test \
+  --parquet raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet \
+  --batch 8 --workers 0 --device 0 --save-predictions
+```
 
-**What did NOT work historically** (AGENTS.md gotchas): soft targets/QFL, DINO
-denoising, quality head, PSS head, self-attention variants, AIFI, higher topk2. All on
-the old FCN; the DETR line superseded those.
-
----
-
-## NEXT STEPS (in suggested order)
-
-1. **Finish the recall-ceiling diagnostic** (build mode, ~2 min GPU): in
-   `/tmp/opencode/recall_ceiling_diag.py`, compute the IoU of the *nearest query polygon*
-   for the ∅-suppressed-only GT. If most are IoU>0.5 TPs → the ∅ gate is wrongly killing
-   good detections → fix by retraining rotation-1 with a **lower `detr_no_object_weight`
-   (2.0 → ~0.5)** and re-eval under eval_lsp. If most suppressed queries are off-center /
-   low-IoU → gate tuning is a dead end.
-
-2. **Architecture path (likely needed)**: the discrimination capacity is the gap axis
-   vs LSP-DETR (Swin-V2-T fine-tuned, d=384, 6 layers, 45M vs our t12 sep d128 3 shared
-   layers 7.85M, ImageNet-only encoder with no fine-tuning phase). Restore capacity on a
-   CLEAN rotation: s12 or fastvit_sa12/sa24, unshared layers, hd 256-384, and/or a
-   proper backbone-fine-tune schedule (freeze 30 ep @10% lr like LSP). One clean 3-fold
-   rotation of the bigger model answers whether 0.675 is reachable.
-
-3. **Finish rotations 2/3** of whichever recipe is chosen → report mean±std across the 3
-   test folds (final/last ckpt) → this is the number for the paper vs LSP Table 3.
-
-4. **Update the record**: docs/runs/nulite-detr/{train18..train36}.md + benchmark.md +
-   AGENTS.md contain contaminated absolute numbers — add a warning header or rewrite
-   with clean fold2/3 numbers before any paper use. (AGENTS.md still describes the old
-   FCN architecture / raycasted-v1 and has NO mention of NuLite-DETR / eval_lsp / the
-   contamination / the locked architecture.)
-
----
-
-## DURABLE INFRA FACTS
-
-- Repo: `feature/nulite-raycast-seg` @ `3d582e6`. Machine has GPU (cuda:0 RTX 5070 Ti);
-  USER runs training interactively. ruff clean expected on edited files
-  (`uv run ruff check`); tests `tests/phase_10/test_nulite_integration.py` +
-  `test_nulite_detr_integration.py` 12/12. GFLOPs printed by eval_pannuke is a HARDCODED
-  placeholder — use ms/img.
-- Data: tiles `output/pannuke_64/transformed/{train,val,test}` (fold1/2/3 = 2656/2523/2722,
-  keys image/annotations/content_h/content_w/tissue) and `output/nulite/transformed/*`
-  (the CONTAMINATED historical tree: train=fold3, val=fold1, test=fold2).
-- Reference paper PDFs/text in /tmp/opencode/: lsp_detr.pdf/txt, lkcell.pdf/txt,
-  cellvit.pdf/txt, hover_net.pdf/txt, pannuke_ext.pdf/txt, pannuke_readme.md.
-  LSP-DETR source clone: `/tmp/opencode/lsp-detr` (metrics/binary_panoptic_quality.py,
-  panoptic_quality.py, data/pannuke.py, configs/experiment/PanNuke.yaml are authoritative
-  for the protocol). `pannuke_readme.md` = HF RationAI/PanNuke card.
-- Era worktrees for loading old checkpoints under era code: `/tmp/opencode/wt-train18`
-  (b7444b6, old-decoder era) and `/tmp/opencode/wt-train28` (7d3368e). eval_lsp.py was
-  copied into wt-train18 already.
-- Old checkpoints: `output/nulite/train{18..36}/weights/{best,last}.pt` (trained fold3;
-  train19 best clean). NuLite source clone at /tmp/nulite_src if needed.
+Then run `raycasted/evals/audit_lsp_cohorts.py` on the saved predictions to
+compare matched nuclei, good-polygon/background suppression, no-good-polygon
+misses, size, crowding, class, and duplicate proxies.

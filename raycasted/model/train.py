@@ -151,6 +151,7 @@ def _raycast_collate_fn(batch: list) -> dict:
     # (background negative, center positive). Matches InstanSeg exactly so the
     # NP head can be queried by local-maxima for DETR query selection.
     np_masks = []
+    instance_masks = []
     semantic_masks = []
     seed_maps = []
     for labels in labels_list:
@@ -180,6 +181,7 @@ def _raycast_collate_fn(batch: list) -> dict:
                 semantic[overlap] = -1  # ambiguous pixels are ignored by the type loss
                 occupied |= instance_mask
         np_masks.append(torch.from_numpy(mask[None]))  # (1, H, W)
+        instance_masks.append(torch.from_numpy(inst))  # (H, W), 0=background, 1..N=GT index + 1
         semantic_masks.append(torch.from_numpy(semantic))  # (H, W), 0=background, 1..nc=nucleus type
         # Per-instance normalized EDT: center=1 regardless of nucleus size.
         dist = cv2.distanceTransform((mask * 255).astype(np.uint8), cv2.DIST_L2, 3)
@@ -201,6 +203,7 @@ def _raycast_collate_fn(batch: list) -> dict:
         'cls': targets[:, 1],
         'bboxes': targets[:, 2:],  # [N, 2+n_rays] = cx, cy, d_1..d_n
         'np_mask': torch.stack(np_masks),  # (B, 1, H, W)
+        'instance_mask': torch.stack(instance_masks),  # (B, H, W), aligned with per-image GT order
         'semantic_mask': torch.stack(semantic_masks),  # (B, H, W), -1=ignore
         'seed_map': torch.stack(seed_maps),  # (B, 1, H, W) normalized distance-to-boundary
         'ori_shape': torch.stack(ori_shapes),
@@ -425,6 +428,7 @@ class RayCastTrainer(DetectionTrainer):
         # Staged backbone unfreeze (no-op unless backbone_freeze_epochs > 0)
         self.add_callback('on_train_epoch_start', self._staged_backbone_unfreeze)
         self.add_callback('on_train_epoch_start', self._staged_decoder_unfreeze)
+        self.add_callback('on_train_epoch_start', self._staged_frozen_thaw)
         # Grid -> seed query warm-up (no-op unless detr_query_warmup_epochs > 0)
         self.add_callback('on_train_epoch_start', self._query_warmup_switch)
 
@@ -504,6 +508,17 @@ class RayCastTrainer(DetectionTrainer):
         decoder_lr_scale = float((self.training_config or {}).get('decoder_lr_scale', 0.1))
         enc_pre = 'encoder_decoder.encoder.'
         enc_dec = 'encoder_decoder.'
+        # ``frozen`` layout: the oracle encoder lives under ``seg_encoder.``, so
+        # its thawed parameters need their own reduced-LR group (see
+        # ``_setup_train``). Without this they would inherit the head LR.
+        seg_enc_pre = 'seg_encoder.encoder_decoder.encoder.'
+        seg_dec_pre = 'seg_encoder.encoder_decoder.'
+        seg_dec0_pre = 'seg_encoder.decoder0.'
+        thaw_frozen_encoder = bool(
+            (self.training_config or {}).get('detr_frozen_oracle_unfreeze_encoder', False)
+            or (self.training_config or {}).get('detr_frozen_oracle_unfreeze_decoder', False)
+        )
+        split_regions = bool(freeze_epochs or dec_freeze_epochs or thaw_frozen_encoder)
 
         if use_muon:
             num_params[0] = len(g[3])
@@ -513,14 +528,16 @@ class RayCastTrainer(DetectionTrainer):
             g_ = []  # new param groups
             for x in g:
                 p = x.pop('params')
-                if freeze_epochs or dec_freeze_epochs:
+                if split_regions:
                     # partition each bucket by (lr*3 boost subset, encoder membership,
                     # NuLite-decoder membership) so each frozen region carries its own
                     # lr scale for the post-unfreeze phase (groups stay in the optimizer
                     # as no-ops while frozen — MuSGD skips params whose .grad is None).
                     def _region(k):
-                        if k.startswith(enc_pre):
+                        if k.startswith(enc_pre) or k.startswith(seg_enc_pre):
                             return 'enc'
+                        if k.startswith(seg_dec_pre) or k.startswith(seg_dec0_pre):
+                            return 'dec'  # thawed oracle U-Net decoder/decoder0 at decoder_lr_scale
                         if k.startswith(enc_dec):
                             return 'dec'
                         return 'other'
@@ -582,13 +599,50 @@ class RayCastTrainer(DetectionTrainer):
         # self.args.freeze (which is null here). build_optimizer runs AFTER that
         # loop, so re-apply the freeze to keep the oracle prior frozen for the whole
         # run (MuSGD skips params whose .grad is None, so the no-op groups are safe).
-        if getattr(model, 'backbone', 'nulite') in ('dual', 'two_stream'):
+        if getattr(model, 'backbone', 'nulite') == 'shared':
+            # Shared stream: only the oracle ENCODER stays frozen; the shared
+            # NuLite decoder and the detection head must keep training.
+            enc = getattr(getattr(model, 'encoder_decoder', None), 'encoder', None)
+            if enc is not None:
+                n_enc = sum(1 for p in enc.parameters() if p.requires_grad)
+                if n_enc:
+                    enc.requires_grad_(False)
+                    LOGGER.info(f'Shared-stream freeze: {n_enc} frozen oracle-encoder params (whole run)')
+        if getattr(model, 'backbone', 'nulite') in ('dual', 'two_stream', 'frozen'):
             seg = getattr(model, 'seg_encoder', None)
             if seg is not None:
                 n_seg = sum(1 for p in seg.parameters() if p.requires_grad)
                 if n_seg:
                     seg.requires_grad_(False)
                     LOGGER.info(f'Seg-stream freeze: {n_seg} frozen FG/BG prior params (whole run)')
+        # Opt-in partial thaw for the ``frozen`` layout: keep the oracle U-Net
+        # frozen but let its FastViT encoder adapt at the backbone LR scale, the
+        # way a dedicated detection encoder would. Only the encoder is thawed;
+        # the decoder0 / upsample decoder / np_head keep producing the same map.
+        if getattr(model, 'backbone', 'nulite') == 'frozen' and bool(
+            (self.training_config or {}).get('detr_frozen_oracle_unfreeze_encoder', False)
+            or (self.training_config or {}).get('detr_frozen_oracle_unfreeze_decoder', False)
+        ):
+            full = bool((self.training_config or {}).get('detr_frozen_oracle_unfreeze_decoder', False))
+            warmup = int((self.training_config or {}).get('detr_frozen_thaw_warmup_epochs', 0) or 0)
+            if warmup > 0:
+                # Staged thaw: the DETR head (+adapters) must first learn to read
+                # the frozen oracle features; the U-Net thaws only after the
+                # warm-up window, so head gradients cannot wreck the oracle's
+                # segmentation geometry before the head is anchored.
+                self._frozen_thaw_pending = (full, warmup)
+                LOGGER.info(
+                    f'Frozen-oracle staged thaw: U-Net frozen for the first {warmup} epochs '
+                    f'({"full U-Net" if full else "encoder"} thaws afterwards)'
+                )
+            else:
+                model.thaw_oracle_encoder(full_unet=full)
+                n = sum(1 for p in model.seg_encoder.parameters() if p.requires_grad)
+                scope = 'full U-Net (np_head frozen)' if full else 'encoder only'
+                LOGGER.info(
+                    f'Frozen-oracle thaw ({scope}): {n} params trainable at lr x'
+                    f'{float((self.training_config or {}).get("backbone_lr_scale", 0.1))}'
+                )
 
         # freeze_encoder_decoder (phase-2a: train head only): get_model calls
         # model.freeze_encoder_decoder_np(), but ultralytics _setup_train then
@@ -681,6 +735,28 @@ class RayCastTrainer(DetectionTrainer):
         if n:
             scale = float(tcfg.get('backbone_lr_scale', 0.1))
             LOGGER.info(f'Epoch {self.epoch + 1}: backbone unfrozen ({n} params) at lr x{scale}')
+
+    def _staged_frozen_thaw(self, trainer=None):
+        """Thaw the frozen oracle U-Net after the warm-up window ends.
+
+        Companion to ``detr_frozen_thaw_warmup_epochs``: during the first N
+        epochs only the DETR head + fusion adapters train against the frozen
+        oracle; at epoch N the opted-in thaw (encoder-only or full U-Net)
+        applies. Fires on 'on_train_epoch_start' so resumes past the boundary
+        thaw immediately. ``trainer`` is ignored (see sibling callbacks).
+        """
+        pending = getattr(self, '_frozen_thaw_pending', None)
+        if not pending:
+            return
+        full, warmup = pending
+        if self.epoch < warmup:
+            return
+        model = self.model
+        model.thaw_oracle_encoder(full_unet=full)
+        self._frozen_thaw_pending = None
+        n = sum(1 for p in model.seg_encoder.parameters() if p.requires_grad)
+        scope = 'full U-Net (np_head frozen)' if full else 'encoder only'
+        LOGGER.info(f'Epoch {self.epoch + 1}: frozen-oracle thaw ({scope}): {n} params at reduced lr')
 
     def _staged_decoder_unfreeze(self, trainer=None):
         """Unfreeze the NuLite upsampling decoder after its freeze window ends.
@@ -803,6 +879,11 @@ class RayCastTrainer(DetectionTrainer):
             seed_feature=bool(tcfg.get('detr_seed_feature', True)),
             no_object=bool(tcfg.get('detr_no_object', True)),
             seed_in_content=bool(tcfg.get('detr_seed_in_content', True)),
+            seed_in_content_pooled=bool(tcfg.get('detr_seed_in_content_pooled', False)),
+            seed_in_content_pool_sizes=tuple(tcfg.get('detr_seed_in_content_pool_sizes', (3, 5, 9))),
+            map_modulation=bool(tcfg.get('detr_map_modulation', False)),
+            score_size_bias=bool(tcfg.get('detr_score_size_bias', False)),
+            score_size_bias_hidden=int(tcfg.get('detr_score_size_bias_hidden', 32)),
             no_object_weight=float(tcfg.get('detr_no_object_weight', 1.0)),
             cls_weight=float(tcfg.get('detr_cls_weight', 2.0)),
             piou_weight=float(tcfg.get('detr_piou_weight', 3.0)),
@@ -825,6 +906,8 @@ class RayCastTrainer(DetectionTrainer):
             respawn_peaks=int(tcfg.get('detr_respawn_peaks', 64)),
             respawn_min_seed=float(tcfg.get('detr_respawn_min_seed', 0.5)),
             self_attention_rope=bool(tcfg.get('detr_self_attention_rope', False)),
+            self_attention_sta=bool(tcfg.get('detr_self_attention_sta', False)),
+            sta_kernel=int(tcfg.get('detr_sta_kernel', 3)),
             rope_theta=float(tcfg.get('detr_rope_theta', 100.0)),
             rope_position_scale=float(tcfg.get('detr_rope_position_scale', 0.05)),
             polygon_masked_attention=bool(tcfg.get('detr_polygon_masked_attention', False)),
@@ -837,6 +920,10 @@ class RayCastTrainer(DetectionTrainer):
             appearance_imitation_weight=float(tcfg.get('detr_appearance_imitation_weight', 0.0)),
             appearance_imitation_temperature=float(tcfg.get('detr_appearance_imitation_temperature', 0.1)),
             appearance_imitation_small_area=float(tcfg.get('detr_appearance_imitation_small_area', 200.0)),
+            instance_alignment_weight=float(tcfg.get('detr_instance_alignment_weight', 0.0)),
+            instance_alignment_temperature=float(tcfg.get('detr_instance_alignment_temperature', 0.1)),
+            instance_alignment_radius_px=float(tcfg.get('detr_instance_alignment_radius_px', 30.0)),
+            instance_alignment_max_negatives=int(tcfg.get('detr_instance_alignment_max_negatives', 8)),
             presence_negative_margin_px=float(tcfg.get('detr_presence_negative_margin_px', 4.0)),
             aux_dense_weight=float(tcfg.get('detr_aux_dense_weight', 0.0)),
             aux_dense_type_weight=float(tcfg.get('detr_aux_dense_type_weight', 1.0)),
@@ -844,6 +931,15 @@ class RayCastTrainer(DetectionTrainer):
             seg_fg_margin=float(tcfg.get('detr_seg_fg_margin', 1.0)),
             seg_fg_radius_px=float(tcfg.get('detr_seg_fg_radius_px', 4.0)),
             seg_fg_margin_layer_weights=tcfg.get('detr_seg_fg_margin_layer_weights'),
+            viable_owner_fg_weight=float(tcfg.get('detr_viable_owner_fg_weight', 0.0)),
+            viable_owner_iou=float(tcfg.get('detr_viable_owner_iou', 0.5)),
+            viable_owner_margin=float(tcfg.get('detr_viable_owner_margin', 1.0)),
+            proposal_bal_weight=float(tcfg.get('detr_proposal_bal_weight', 0.0)),
+            proposal_bal_cap=float(tcfg.get('detr_proposal_bal_cap', 5.0)),
+            nucleus_cdn=int(tcfg.get('detr_nucleus_cdn', 0)),
+            nucleus_cdn_weight=float(tcfg.get('detr_nucleus_cdn_weight', 0.0)),
+            nucleus_cdn_class_embed=bool(tcfg.get('detr_nucleus_cdn_class_embed', False)),
+            nucleus_cdn_real_to_dn=bool(tcfg.get('detr_nucleus_cdn_real_to_dn', False)),
             mds=bool(tcfg.get('detr_mds', True)),
             cost_inside=float(tcfg.get('detr_cost_inside', 10.0)),
             per_layer_match=bool(tcfg.get('detr_per_layer_match', False)),
@@ -851,12 +947,14 @@ class RayCastTrainer(DetectionTrainer):
             seed_map_target=bool(tcfg.get('seed_map_target', True)),
             use_decoder=bool(tcfg.get('detr_use_decoder', True)),
             shared_layers=bool(tcfg.get('detr_shared_layers', False)),
+            shared_layer_groups=int(tcfg.get('detr_shared_layer_groups', 0)),
             separable_decoder=bool(tcfg.get('detr_separable_decoder', False)),
             backbone=tcfg.get('detr_backbone', 'nulite'),
             use_seed=bool(tcfg.get('detr_use_seed', True)),
             yolo11_scale=tcfg.get('yolo11_scale', 'n'),
             yolo11_ckpt=tcfg.get('yolo11_ckpt'),
             det_variant=tcfg.get('det_variant', 'fastvit_t12'),
+            frozen_adapter=bool(tcfg.get('detr_frozen_adapter', False)),
             verbose=verbose,
         )
 
@@ -1171,12 +1269,20 @@ class RayCastTrainer(DetectionTrainer):
                 self.loss_names += ('aux_obj_loss', 'aux_type_loss')
             if float((self.training_config or {}).get('detr_seg_fg_margin_weight', 0.0)) > 0:
                 self.loss_names += ('seg_fg_margin_loss',)
+            if float((self.training_config or {}).get('detr_viable_owner_fg_weight', 0.0)) > 0:
+                self.loss_names += ('viable_owner_fg_loss',)
+            if float((self.training_config or {}).get('detr_nucleus_cdn_weight', 0.0)) > 0:
+                self.loss_names += ('nucleus_cdn_loss',)
+            if float((self.training_config or {}).get('detr_proposal_bal_weight', 0.0)) > 0:
+                self.loss_names += ('proposal_bal_loss',)
             if float((self.training_config or {}).get('detr_appearance_weight', 0.0)) > 0:
                 self.loss_names += ('appearance_loss',)
             if float((self.training_config or {}).get('detr_presence_weight', 0.0)) > 0:
                 self.loss_names += ('presence_loss',)
             if float((self.training_config or {}).get('detr_appearance_imitation_weight', 0.0)) > 0:
                 self.loss_names += ('appearance_imitation_loss',)
+            if float((self.training_config or {}).get('detr_instance_alignment_weight', 0.0)) > 0:
+                self.loss_names += ('instance_alignment_loss',)
         else:
             self.loss_names = (
                 'xy_loss',

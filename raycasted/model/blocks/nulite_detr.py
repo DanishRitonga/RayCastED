@@ -29,8 +29,153 @@ from ultralytics.nn.modules.transformer import MLP, MSDeformAttn, multi_scale_de
 from raycasted.data.etl.utils import constants as _const
 
 
+class ScoreBias(nn.Module):
+    """Learned per-query, per-class score bias from a query-size proxy.
+
+    The trained score head applies one global empty-vs-class boundary to every
+    query, but the margin distribution is strongly size dependent: a nucleus's
+    best query sits only a few logits below that boundary, and the required
+    offset grows with (log) predicted radius. This module lets the boundary be
+    a function of the query itself instead.
+
+    Module-level (not a closure) so ultralytics can pickle the whole model.
+    The final layer is zero-initialised: at step 0 the bias is exactly zero and
+    the run starts from the control checkpoint's behaviour.
+    """
+
+    def __init__(self, n_classes: int, hidden: int = 32):
+        """Build the bias MLP over ``n_classes`` output logits."""
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(1, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, n_classes),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, radius_proxy: torch.Tensor) -> torch.Tensor:
+        """Map a ``(B, nq, 1)`` size proxy to a ``(B, nq, n_classes)`` bias."""
+        return self.net(torch.log(radius_proxy.clamp_min(1e-3)))
+
+
+def sliding_tile_mask(n_side: int, kernel: int = 3, device=None) -> torch.Tensor:
+    """LSP-DETR sliding-tile attention mask over an ``n_side x n_side`` query grid.
+
+    Port of ``generate_sta_mask`` from ``lsp_detr/modeling/lsp_detr.py``: each
+    query belongs to a tile at ``(x, y)``; its tile centre is clamped into the
+    canvas so border tiles keep a full ``kernel x kernel`` neighbourhood, and a
+    key tile is visible when it lies within ``kernel // 2`` tiles of that centre
+    along both axes. Here the query grid IS the tile grid (``q_tile ==
+    kv_tile == 1`` cell), so the result is simply a ``kernel x kernel`` window
+    of neighbouring cells with clamped borders.
+
+    Args:
+        n_side: grid side length (e.g. 20 for 400 queries at ``grid_size=0.05``).
+        kernel: window side in cells (LSP-DETR self-attention uses 3).
+        device: torch device for the returned mask.
+
+    Returns:
+        ``(n_side*n_side, n_side*n_side)`` boolean mask, True = BLOCKED.
+    """
+    if n_side <= 0:
+        raise ValueError('n_side must be positive')
+    if kernel <= 0 or kernel % 2 == 0:
+        raise ValueError('kernel must be a positive odd integer')
+    centre = kernel // 2
+    coords = torch.arange(n_side, device=device)
+    qy, qx = torch.meshgrid(coords, coords, indexing='ij')
+    qy = qy.reshape(-1)
+    qx = qx.reshape(-1)
+    cy = qy.clamp(centre, n_side - 1 - centre)
+    cx = qx.clamp(centre, n_side - 1 - centre)
+    ky = coords[None, :, None]
+    kx = coords[None, None, :]
+    visible = ((ky - cy[:, None, None]).abs() <= centre) & ((kx - cx[:, None, None]).abs() <= centre)
+    return ~visible.reshape(n_side * n_side, n_side * n_side)
+
+
+def _unblock_empty_rows(mask: torch.Tensor) -> torch.Tensor:
+    """Make sure no attention row is fully blocked (True = blocked).
+
+    Composing a locality window with the MDS rank-causal mask can leave a query
+    with no visible key at all: the rank mask only exposes strictly higher
+    ranked queries, and the spatial window may contain none of them. Softmax
+    over an empty set is NaN, so such rows fall back to their own diagonal.
+    """
+    blocked_rows = mask.all(-1, keepdim=True)
+    if not blocked_rows.any():
+        return mask
+    eye = torch.eye(mask.shape[-1], dtype=torch.bool, device=mask.device)
+    # Blocked rows fall back to self-attention only; the rest are unchanged.
+    return (mask & ~blocked_rows) | (eye & blocked_rows)
+
+
+def _make_orthogonal(matrix: torch.Tensor) -> torch.Tensor:
+    """Return the Q factor of ``matrix = QR`` with non-negative ``diag(R)``.
+
+    Verbatim port of ``torch.nn.utils.parametrizations._make_orthogonal``.
+    """
+    reflectors, tau = torch.geqrf(matrix)
+    basis = torch.linalg.householder_product(reflectors, tau)
+    basis *= reflectors.diagonal(dim1=-2, dim2=-1).sgn().unsqueeze(-2)
+    return basis
+
+
+class _CayleyOrthogonal(nn.Module):
+    """Orthogonal matrix via the Cayley retraction, without ``torch.parametrize``.
+
+    Equivalent to ``torch.nn.utils.parametrizations.orthogonal(Linear, 'cayley')``
+    but stored as a plain ``Parameter`` + ``base`` buffer. The parametrized
+    variant cannot be pickled (``ParametrizationList.__getstate__`` raises), and
+    the trainer checkpoints the whole model object rather than a state dict.
+
+    ``base`` is the orthonormalized initial weight; the learned parameter starts
+    at ``-I`` so that ``base @ cayley(-I) == base``, i.e. the matrix starts
+    orthogonal and stays orthogonal.
+    """
+
+    def __init__(self, dim: int):
+        super().__init__()
+        initial = torch.empty(dim, dim)
+        nn.init.kaiming_uniform_(initial, a=math.sqrt(5))
+        with torch.no_grad():
+            self.register_buffer('base', _make_orthogonal(initial))
+        original = torch.zeros(dim, dim)
+        original.diagonal().fill_(-1.0)
+        self.original = nn.Parameter(original)
+
+    def matrix(self) -> torch.Tensor:
+        """Return the current orthogonal matrix."""
+        generator = self.original.tril()
+        generator = generator - generator.mH
+        identity = torch.eye(generator.shape[0], dtype=generator.dtype, device=generator.device)
+        retraction = torch.linalg.solve(
+            torch.add(identity, generator, alpha=-0.5),
+            torch.add(identity, generator, alpha=0.5),
+        )
+        return self.base @ retraction
+
+    @property
+    def weight(self) -> torch.Tensor:
+        """Compatibility alias matching a ``Linear`` weight."""
+        return self.matrix()
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """Apply the learned orthogonal projection."""
+        return F.linear(inputs, self.matrix().to(dtype=inputs.dtype))
+
+
 class CayleySTRING2D(nn.Module):
-    """Learnable 2D rotary encoding used by LSP-DETR's STRING attention."""
+    """Learnable 2D rotary encoding used by LSP-DETR's STRING attention.
+
+    Exact port of ``lsp_detr/modeling/layers/cayley_string.py`` (Cayley-STRING
+    from "Learning the RoPEs: Better 2D and 3D Position Encodings with STRING",
+    arXiv 2502.02562): RoPE-Mixed with per-axis learned frequency banks and a
+    learnable orthogonal matrix P parameterized by the Cayley transform.
+    """
 
     def __init__(self, dim: int, theta: float = 100.0):
         super().__init__()
@@ -38,23 +183,19 @@ class CayleySTRING2D(nn.Module):
             raise ValueError('Cayley-STRING head dimension must be even')
         if theta <= 0:
             raise ValueError('Cayley-STRING theta must be positive')
-        frequencies = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
-        self.frequencies = nn.Parameter(frequencies.repeat(2, 1))
-        self.cayley_parameter = nn.Parameter(torch.empty(dim, dim))
-        nn.init.normal_(self.cayley_parameter, std=0.02)
-
-    def orthogonal_projection(self) -> torch.Tensor:
-        """Return the differentiable orthogonal matrix defined by the generator."""
-        generator = self.cayley_parameter - self.cayley_parameter.transpose(0, 1)
-        identity = torch.eye(generator.shape[0], dtype=generator.dtype, device=generator.device)
-        return torch.linalg.solve(identity - generator, identity + generator)
+        freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
+        # Stacked per-axis banks, shape (pos_dim=2, dim/2); learned from the
+        # same geometric initialization on both axes.
+        self.freqs = nn.Parameter(freqs.repeat(2, 1).clone())
+        # Orthogonal projection via the Cayley transform, mathematically identical
+        # to the reference's ``orthogonal(Linear(dim, dim), 'cayley')``.
+        self.P = _CayleyOrthogonal(dim)
 
     @torch.autocast('cuda', enabled=False)
     def forward(self, inputs: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         """Rotate ``[batch, heads, queries, head_dim]`` using 2D positions."""
-        projection = self.orthogonal_projection().float()
-        projected = F.linear(inputs.float(), projection)
-        angles = positions.float() @ self.frequencies
+        projected = self.P(inputs.float())
+        angles = positions.float() @ self.freqs
         phase = torch.polar(torch.ones_like(angles), angles).unsqueeze(1)
         paired = torch.view_as_complex(projected.reshape(*projected.shape[:-1], -1, 2))
         rotated = torch.view_as_real(paired * phase).flatten(-2)
@@ -300,6 +441,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         seed_in_content: bool = True,
         mds: bool = True,
         shared_layers: bool = False,
+        shared_layer_groups: int = 0,
         query_block_size: float = 0.0,
         content_top: bool = False,
         content_top_channels: int = 0,
@@ -315,6 +457,13 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         respawn_peaks: int = 64,
         respawn_min_seed: float = 0.5,
         self_attention_rope: bool = False,
+        self_attention_sta: bool = False,
+        sta_kernel: int = 3,
+        seed_in_content_pooled: bool = False,
+        seed_in_content_pool_sizes: tuple = (3, 5, 9),
+        map_modulation: bool = False,
+        score_size_bias: bool = False,
+        score_size_bias_hidden: int = 32,
         rope_theta: float = 100.0,
         rope_position_scale: float | None = None,
         polygon_masked_attention: bool = False,
@@ -324,6 +473,9 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         appearance_channels: int = 0,
         appearance_after_layer: int = 3,
         presence_head: bool = False,
+        nucleus_cdn: int = 0,
+        nucleus_cdn_class_embed: bool = False,
+        nucleus_cdn_real_to_dn: bool = False,
     ):
         self.n_rays = n_rays or _const.N_RAYS
         self.raycast_dim = 2 + self.n_rays
@@ -344,6 +496,13 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         self.respawn_peaks = int(respawn_peaks)
         self.respawn_min_seed = float(respawn_min_seed)
         self.self_attention_rope = bool(self_attention_rope)
+        self.self_attention_sta = bool(self_attention_sta)
+        self.sta_kernel = int(sta_kernel)
+        if self.self_attention_sta:
+            if self.self_attention_rope:
+                raise ValueError('self_attention_sta and self_attention_rope are mutually exclusive')
+            if self.sta_kernel <= 0 or self.sta_kernel % 2 == 0:
+                raise ValueError('sta_kernel must be a positive odd integer')
         self.polygon_masked_attention = bool(polygon_masked_attention)
         self.polygon_oracle_mask = bool(polygon_oracle_mask)
         if self.polygon_oracle_mask and not self.polygon_masked_attention:
@@ -391,9 +550,27 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             QueryAppearanceFusion(appearance_channels, hd, self.n_rays) if appearance_channels else None
         )
         self.presence_head = nn.Linear(hd, 1) if presence_head else None
+        # nucleus-CDN: canonical denoising queries built DIRECTLY from GT ray
+        # polygons. Each GT is duplicated ``nucleus_cdn`` times; the DN query's
+        # reference polygon is the GT polygon encoded into ray-logit space, so
+        # geometry is canonical (not learned) while its SCORE is supervised
+        # against the GT class at every layer including the encoder proposal.
+        # This targets the observed failure where a good raw polygon stays
+        # classified as empty: the same query slot is trained to fire on a GT
+        # polygon it is literally sitting on. Inference is unaffected
+        # (training-only path; eval emits no DN block).
+        self.nucleus_cdn = int(nucleus_cdn)
+        self.nucleus_cdn_class_embed = bool(nucleus_cdn_class_embed)
+        self.nucleus_cdn_real_to_dn = bool(nucleus_cdn_real_to_dn)
+        if self.nucleus_cdn < 0:
+            raise ValueError('nucleus_cdn must be non-negative')
+        if self.nucleus_cdn > 0:
+            self.nucleus_dn_token = nn.Parameter(torch.zeros(1, 1, hd))
+            nn.init.normal_(self.nucleus_dn_token, std=0.02)
         self._last_presence_logits = None
         self._last_presence_polygons = None
         self._last_appearance_embeddings = None
+        self._last_appearance_queries = None
         self.seed_threshold = seed_threshold
         self.peak_distance = peak_distance
         self.grid_size = grid_size
@@ -402,6 +579,29 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         self.seed_feature = seed_feature
         self.no_object = no_object
         self.seed_in_content = seed_in_content
+        # Map modulation. The single scalar sampled at a grid cell centre is at
+        # chance for the fg/bg decision (AUC 0.503 in the probe) because the map
+        # signal is localised at the nucleus centre and a query can sit up to
+        # half a cell (12.8 px) away. Two additive variants keep a localised
+        # peak reachable by a grid query:
+        #   * ``seed_in_content_pooled``: instead of ONE raw seed column, append
+        #     the raw column plus max-pooled (peak-preserving) samples at several
+        #     window sizes, so a nearby peak still reaches the head. The extra
+        #     columns widen the score heads by len(pool_sizes).
+        #   * ``map_modulation``: a FiLM-style additive term added to the query
+        #     content itself (so it also feeds the ray heads), from the same
+        #     multi-scale peak-preserving samples through a zero-initialised
+        #     projection. Zero-init means the run starts at the control's
+        #     behaviour and only departs from it if the map helps.
+        self.seed_in_content_pooled = bool(seed_in_content_pooled)
+        self.seed_in_content_pool_sizes = tuple(int(p) for p in seed_in_content_pool_sizes)
+        if self.seed_in_content_pooled:
+            if not self.seed_in_content:
+                raise ValueError('seed_in_content_pooled requires seed_in_content')
+            self._validate_seed_pool_sizes(self.seed_in_content_pool_sizes)
+        self.map_modulation = bool(map_modulation)
+        if self.map_modulation and not self.seed_in_content:
+            raise ValueError('map_modulation requires seed_in_content (the seed map)')
         self.mds = mds
         # LSP-DETR query-init knobs: query_block_size = grid cell diameter in
         # PIXELS (0 = legacy normalized ``grid_size`` grid); content_top samples
@@ -428,6 +628,17 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             # instance across all ndl steps (params-only saving, FLOPs unchanged). Per-layer
             # dec_bbox_head/dec_score_head stay distinct so iterative refinement still varies.
             self.decoder.layers = nn.ModuleList([self.decoder.layers[0]] * self.decoder.num_layers)
+        elif shared_layer_groups > 1:
+            # Grouped weight sharing: repeat each of the first ``shared_layer_groups``
+            # distinct layers round-robin to fill all ``ndl`` steps (e.g. 6 steps,
+            # 2 groups -> layers 1-3 reuse layer 1's weights, 4-6 reuse layer 2's).
+            # Same saving logic as ``shared_layers`` but with a few independent bases.
+            if shared_layer_groups >= self.decoder.num_layers:
+                raise ValueError('shared_layer_groups must be < number of decoder layers')
+            bases = list(self.decoder.layers[:shared_layer_groups])
+            self.decoder.layers = nn.ModuleList(
+                [bases[i % shared_layer_groups] for i in range(self.decoder.num_layers)]
+            )
         self.shared_layers = shared_layers
         self.self_attention_rope_layers = (
             nn.ModuleList([CayleySTRING2D(hd // nh, theta=rope_theta) for _ in range(ndl)])
@@ -495,6 +706,8 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         # input (undiluted objectness read, differentiable into the NP head),
         # so the Linear input width is hd+1.
         score_in = hd + 1 if seed_in_content else hd
+        if getattr(self, 'seed_in_content_pooled', False):
+            score_in += len(self.seed_in_content_pool_sizes)
         if self.no_object or seed_in_content:
             self.enc_score_head = nn.Linear(score_in, nc + 1 if self.no_object else nc)
             self.dec_score_head = nn.ModuleList(
@@ -504,6 +717,31 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             nn.init.constant_(self.enc_score_head.bias, b)
             for h in self.dec_score_head:
                 nn.init.constant_(h.bias, b)
+
+        if getattr(self, 'map_modulation', False):
+            # Zero-initialised additive modulation of the query content. Input is
+            # the raw seed plus one max-pooled sample per window size.
+            n_mod = 1 + len(self.seed_in_content_pool_sizes)
+            self.map_modulation_proj = nn.Sequential(nn.Linear(n_mod, hd), nn.GELU(), nn.Linear(hd, hd))
+            nn.init.zeros_(self.map_modulation_proj[2].weight)
+            nn.init.zeros_(self.map_modulation_proj[2].bias)
+        else:
+            self.map_modulation_proj = None
+
+        # Learned per-query, per-class score bias as a function of query size.
+        # Zero-init, so step 0 matches the control exactly.
+        self.score_size_bias = bool(score_size_bias)
+        if self.score_size_bias:
+            if not self.no_object:
+                raise ValueError('score_size_bias requires no_object')
+            n_out = nc + 1
+            self.enc_score_bias = ScoreBias(n_out, score_size_bias_hidden)
+            self.dec_score_bias = nn.ModuleList(
+                [ScoreBias(n_out, score_size_bias_hidden) for _ in range(ndl)]
+            )
+        else:
+            self.enc_score_bias = None
+            self.dec_score_bias = None
 
         # Ray-polygon heads (2+n_rays outputs) and 2-dim centroid query pos.
         self.enc_bbox_head = MLP(hd, hd, self.raycast_dim, num_layers=3)
@@ -557,8 +795,6 @@ class NuLiteDETRDecoder(RTDETRDecoder):
                 LSP FeatureSampling query content (``content_top``).
             appearance_map: optional supervised stride-2 appearance features.
         """
-        from ultralytics.models.utils.ops import get_cdn_group
-
         # Inject the seed map as an extra feature channel (SPAR-Det-style seg
         # conditioning): the deformable cross-attention then attends over
         # nucleus-aware features. Downsample the full-res seed prob to each
@@ -592,16 +828,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
 
         attended_seed = seed_map if seed_level_map is None else seed_level_map
         feats, shapes, proj2d = self._get_encoder_input(x, seed_map=attended_seed)
-        dn_embed, dn_bbox, attn_mask, dn_meta = get_cdn_group(
-            batch,
-            self.nc,
-            self.num_queries,
-            self.denoising_class_embed.weight,
-            self.num_denoising,
-            self.label_noise_ratio,
-            self.box_noise_scale,
-            self.training,
-        )
+        dn_embed, dn_bbox, dn_meta = self._nucleus_dn_queries(batch, proj2d, seed_map=seed_map)
         # seed_q: raw seed logit bilinearly sampled at each query position,
         # differentiable into the NP head. Concatenated directly to the score
         # head inputs (Path B) so the classifier sees the seed's 3.8-logit
@@ -621,7 +848,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             else:
                 confine_s = (1.0 / max(1, round(1.0 / self.grid_size))) / 2.0
             if self.seed_in_content and seed_map is not None:
-                seed_q = self._sample_seed_at(seed_map, p0)
+                seed_q = self._seed_columns(seed_map, p0)
         elif self.query_selection == 'hybrid':
             # Grid queries UNION seed-peak queries (DQ-DETR-style dynamic
             # placement): the regular grid is kept for coverage + background
@@ -638,7 +865,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             else:
                 confine_s = (1.0 / max(1, round(1.0 / self.grid_size))) / 2.0
             if self.seed_in_content and seed_map is not None:
-                seed_q = self._sample_seed_at(seed_map, p0)
+                seed_q = self._seed_columns(seed_map, p0)
         elif self.query_selection == 'seed':
             # Seed queries sit on nucleus peaks. NO hard centroid confinement:
             # train27 showed tanh-clamping to a half-grid-cell disc saturates
@@ -652,14 +879,61 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             p0 = None
             confine_s = None
             if self.seed_in_content and seed_map is not None:
-                seed_q = self._sample_seed_at(seed_map, seed_pts)
+                seed_q = self._seed_columns(seed_map, seed_pts)
         else:
             # Learned selection across all tokens; no grid-cell confinement.
             embed, refer_centroids, refer_polygon_logits, enc_polygons, enc_scores, seed_pts = (
                 self._learned_decoder_input(feats, shapes, seed_map=seed_map, dn_embed=dn_embed, dn_bbox=dn_bbox)
             )
             if self.seed_in_content and seed_map is not None:
-                seed_q = self._sample_seed_at(seed_map, seed_pts)
+                seed_q = self._seed_columns(seed_map, seed_pts)
+
+        if dn_meta is not None:
+            # DN queries get seed evidence at their GT centroid, appended in
+            # the same block order that _grid_decoder_input used (DN first).
+            dn_seed_q = dn_meta.pop('seed_q', None)
+            # Encoder-proposal scores for the DN block, so enc_scores has the
+            # same padded width as the decoder scores (model.loss splits both
+            # at n_dn) and the rank-causal mask keeps the DN isolation block.
+            dn_enc_scores = self._score(
+                self.enc_score_head,
+                dn_embed,
+                dn_seed_q if self.seed_in_content else None,
+            )
+            if dn_seed_q is not None:
+                seed_q = dn_seed_q if seed_q is None else torch.cat([dn_seed_q, seed_q], 1)
+            if enc_scores is not None:
+                enc_scores = torch.cat([dn_enc_scores, enc_scores], 1)
+            # Isolate DN queries from real queries in self-attention: DN rows
+            # may not attend to real queries and real rows may not attend to
+            # DN rows (CDN convention). DN<->DN within an image stays open so
+            # the canonical copies denoise each other. Real<->real unchanged.
+            n_dn = dn_meta['n_dn']
+            n_q = embed.shape[1]
+            attn_mask = torch.zeros(1, n_q, n_q, dtype=torch.bool, device=embed.device)
+            attn_mask[:, :n_dn, n_dn:] = True
+            # DN rows stay isolated from real queries (their targets are the
+            # GT itself and must not be contaminated). Opening real->DN lets
+            # real queries attend to the canonical GT anchors — the only
+            # measured lever that moved real-query margins (+4.4 logits at
+            # the proposal layer in the probe) — while DN->real stays
+            # blocked so DN targets remain clean.
+            if not self.nucleus_cdn_real_to_dn:
+                attn_mask[:, n_dn:, :n_dn] = True
+            heads = self.decoder.layers[0].self_attn.num_heads
+            attn_mask = attn_mask.expand(embed.shape[0] * heads, n_q, n_q)
+            # DN rows precede the real queries in every per-query tensor, so
+            # the grid-cell confinement anchor must be padded the same way.
+            if p0 is not None:
+                p0 = torch.cat([refer_centroids[:, :n_dn], p0], 1)
+        else:
+            attn_mask = None
+
+        # Checkpoints saved before the STA flag existed are unpickled without the
+        # attribute, so forward must not assume it is present.
+        if getattr(self, 'self_attention_sta', False):
+            sta_mask = self._sta_attention_mask(embed)
+            attn_mask = sta_mask if attn_mask is None else (attn_mask | sta_mask)
 
         dec_polygons, dec_scores = self._raycast_decoder(
             embed,
@@ -734,6 +1008,20 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         return anchors_encoded, valid_mask
 
     @staticmethod
+    def _validate_seed_pool_sizes(sizes):
+        """Reject pooling windows that are non-positive or even.
+
+        Args:
+            sizes: iterable of integer pooling window sizes.
+
+        Raises:
+            ValueError: if any window is not a positive odd integer.
+        """
+        for p in sizes:
+            if int(p) < 1 or int(p) % 2 == 0:
+                raise ValueError('seed_in_content pool sizes must be positive odd integers')
+
+    @staticmethod
     def _sample_seed_at(seed_map, positions):
         """Bilinearly sample raw seed logits at normalized query positions.
 
@@ -747,6 +1035,151 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         grid = positions * 2 - 1
         s = F.grid_sample(seed_map, grid.unsqueeze(1), mode='bilinear', align_corners=False, padding_mode='border')
         return s.squeeze(2).transpose(1, 2)  # (B, nq, 1)
+
+    @staticmethod
+    def _sample_seed_multiscale(seed_map, positions, pool_sizes):
+        """Sample raw seed logits plus one max-pooled sample per window size.
+
+        A single bilinear sample at a grid cell centre misses a nucleus whose map
+        peak sits up to half a cell away. Max pooling first preserves the peak,
+        so a nearby nucleus still registers at the query.
+
+        Args:
+            seed_map: (B, 1, H, W) raw NP seed logits (full resolution).
+            positions: (B, nq, 2) normalized (x, y) in [0, 1].
+            pool_sizes: iterable of odd pooling window sizes.
+
+        Returns:
+            (B, nq, 1 + len(pool_sizes)) raw sample followed by the pooled ones.
+        """
+        cols = [NuLiteDETRDecoder._sample_seed_at(seed_map, positions)]
+        for k in pool_sizes:
+            pooled = F.max_pool2d(seed_map, kernel_size=int(k), stride=1, padding=int(k) // 2)
+            cols.append(NuLiteDETRDecoder._sample_seed_at(pooled, positions))
+        return torch.cat(cols, -1)
+
+    def _seed_columns(self, seed_map, positions):
+        """Seed-head input columns: plain, pooled multi-scale, or None."""
+        if seed_map is None or not self.seed_in_content:
+            return None
+        if getattr(self, 'seed_in_content_pooled', False):
+            return self._sample_seed_multiscale(seed_map, positions, self.seed_in_content_pool_sizes)
+        return self._sample_seed_at(seed_map, positions)
+
+    def _apply_map_modulation(self, content, seed_map, positions):
+        """Add the (zero-init) FiLM-style map term to the query content."""
+        if not getattr(self, 'map_modulation', False) or seed_map is None:
+            return content
+        pooled = self._sample_seed_multiscale(seed_map, positions, self.seed_in_content_pool_sizes)
+        return content + self.map_modulation_proj(pooled)
+
+    def _nucleus_dn_queries(self, batch, proj2d, seed_map=None):
+        """Build nucleus-CDN denoising queries directly from GT ray polygons.
+
+        Unlike stock CDN (4-D box logits, incompatible with raycast_dim>4), a
+        DN query's reference polygon is the GT polygon itself encoded into
+        ray-logit space, so geometry is canonical: the decoder is asked to
+        classify a polygon it is literally sitting on. Each GT is duplicated
+        ``nucleus_cdn`` times. Queries are laid out per image, padded to the
+        per-batch maximum GT count so the DN block has a uniform width.
+
+        Args:
+            batch: targets dict with 'bboxes' (M, raycast_dim), 'cls' (M,),
+                'gt_groups' (list[int]).
+            proj2d: projected P2 map, used only for dtype/device and for the
+                centroid sampling of seed evidence at the GT centroid.
+            seed_map: optional raw seed logits for the DN score input.
+
+        Returns:
+            (dn_embed, dn_polygon_logits, dn_meta) or (None, None, None) when
+            there is no GT or nucleus_cdn is disabled. ``dn_meta`` is a dict
+            with: 'n_dn' (width of the DN block), 'groups' (per-image real GT
+            count), 'labels' (flat DN GT classes, length B*n_dn, padded with
+            ``self.nc`` = no-object so padding rows train ∅), and 'per_image'
+            (python list of per-image DN GT class lists).
+        """
+        if getattr(self, 'nucleus_cdn', 0) <= 0 or batch is None or not self.training:
+            return None, None, None
+        gt_polygons = batch.get('bboxes')
+        gt_cls = batch.get('cls')
+        gt_groups = batch.get('gt_groups')
+        if gt_polygons is None or gt_cls is None or gt_groups is None:
+            return None, None, None
+        bs = proj2d[0].shape[0]
+        device, dtype = proj2d[0].device, proj2d[0].dtype
+        if len(gt_polygons) == 0:
+            return None, None, None
+        gt_groups = [int(g) for g in gt_groups]
+        if len(gt_groups) != bs:
+            return None, None, None
+        if sum(gt_groups) == 0:
+            return None, None, None
+
+        copies = self.nucleus_cdn
+        n_dn = max(gt_groups) * copies
+        refer_logits = torch.zeros(bs, n_dn, self.raycast_dim, device=device, dtype=dtype)
+        centers = torch.zeros(bs, n_dn, 2, device=device, dtype=dtype)
+        labels = torch.full((bs, n_dn), self.nc, device=device, dtype=torch.long)
+        valid = torch.zeros(bs, n_dn, device=device, dtype=torch.bool)
+        slot = torch.zeros(bs, n_dn, device=device, dtype=torch.bool)
+        per_image = []
+        off = 0
+        for bi, n_gt in enumerate(gt_groups):
+            cls_i = gt_cls[off:off + n_gt].to(device, torch.long)
+            per_image.append(cls_i.detach().cpu().tolist())
+            k = n_gt * copies
+            if k:
+                poly_i = gt_polygons[off:off + n_gt].to(device, dtype)
+                enc_i = encode_polygon(poly_i)  # (n_gt, raycast_dim) in logit space
+                enc_i = enc_i.unsqueeze(1).expand(n_gt, copies, self.raycast_dim).reshape(k, -1)
+                lbl_i = cls_i.unsqueeze(1).expand(n_gt, copies).reshape(-1)
+                ctr_i = poly_i[:, :2].unsqueeze(1).expand(n_gt, copies, 2).reshape(k, 2)
+                refer_logits[bi, :k] = enc_i.detach()
+                centers[bi, :k] = ctr_i.detach()
+                labels[bi, :k] = lbl_i
+                valid[bi, :k] = True
+                # The first ``n_gt`` DN slots are kept for the class loss so
+                # padded rows (which train ∅) never dominate the denominator.
+                slot[bi, :n_gt] = True
+            off += n_gt
+
+        # Embedding: learnable DN token, optionally plus the class embedding of
+        # the GT class. The class embedding is a private, answer-carrying
+        # lookup: the score head can read the label straight off it instead of
+        # the image. On train35 it became worth 7.9 logits by ep332 while the
+        # DN token and seed evidence stayed exactly dead, so the DN loss fell
+        # fast while the real decision boundary never moved. Default is
+        # token-only; ``nucleus_cdn_class_embed=True`` restores the shortcut as
+        # an explicit control. ``denoising_class_embed`` has only ``nc`` rows
+        # (no empty column), so padding labels (== nc) are clamped to a real
+        # row for the embedding while ``dn_meta['labels']`` keeps the empty
+        # target.
+        dn_embed = self.nucleus_dn_token.expand(bs, n_dn, -1).detach()
+        if self.nucleus_cdn_class_embed:
+            embed_labels = labels.clamp(max=self.nc - 1)
+            dn_embed = (dn_embed + self.denoising_class_embed(embed_labels)).detach()
+
+        # Optional seed evidence at the GT centroid, concatenated into the
+        # score head input exactly like real queries (seed_in_content).
+        seed_q = None
+        if self.seed_in_content and seed_map is not None:
+            seed_q = self._sample_seed_at(seed_map, centers)
+            seed_q = seed_q.masked_fill(~valid.unsqueeze(-1), 0.0)
+
+        # ``refer_logits`` is detached: geometry is frozen on the GT polygon;
+        # the decoder's residual heads still refine it per layer but the DN
+        # regression terms are not applied, so gradients flow only through the
+        # classification path this experiment targets.
+        dn_meta = {
+            'n_dn': n_dn,
+            'copies': copies,
+            'groups': gt_groups,
+            'labels': labels,
+            'valid': valid,
+            'slot': slot,
+            'seed_q': seed_q,
+        }
+        return dn_embed, refer_logits, dn_meta
 
     def _grid_decoder_input(self, feats, proj2d, seed_map=None, dn_embed=None, dn_bbox=None, top_feat=None):
         """LSP-DETR-style grid-query initialization (no learned selection).
@@ -785,6 +1218,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             cell_px = crop_px / n_side
         cell = cell_px / crop_px  # normalized cell width
         self.num_queries = n_side * n_side
+        self.sta_n_side = n_side
 
         coords_px = (torch.arange(n_side, device=device, dtype=dtype) + 0.5) * cell_px
         gy, gx = torch.meshgrid(coords_px, coords_px, indexing='ij')
@@ -822,14 +1256,17 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         rays = torch.full((bs, self.num_queries, self.n_rays), radius, device=device, dtype=dtype)
         anchors = encode_polygon(torch.cat([p0, rays], -1))
 
+        content = self._apply_map_modulation(content, seed_map, p0)
+
         refer_polygon_logits = self.enc_bbox_head(content) + anchors
         enc_polygons = decode_polygon(refer_polygon_logits)
         refer_centroids = enc_polygons[..., :2]
         enc_scores = self._score(
             self.enc_score_head,
             content,
-            self._sample_seed_at(seed_map, p0) if (self.seed_in_content and seed_map is not None) else None,
+            self._seed_columns(seed_map, p0),
         )
+        enc_scores = self._score_bias_enc(enc_scores, enc_polygons)
         embeddings = content
 
         if self.training:
@@ -972,8 +1409,9 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         enc_scores = self._score(
             self.enc_score_head,
             content,
-            self._sample_seed_at(seed_map, p0) if (self.seed_in_content and seed_map is not None) else None,
+            self._seed_columns(seed_map, p0),
         )
+        enc_scores = self._score_bias_enc(enc_scores, enc_polygons)
         embeddings = content
 
         if self.training:
@@ -1005,9 +1443,10 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         features = self.enc_output(valid_mask * feats)
         all_positions = decode_polygon(anchors)[..., :2].expand(bs, -1, -1)  # (B, N, 2) normalized xy
         seed_all = (
-            self._sample_seed_at(seed_map, all_positions) if self.seed_in_content and seed_map is not None else None
+            self._seed_columns(seed_map, all_positions)
         )
         enc_outputs_scores = self._score(self.enc_score_head, features, seed_all)  # (B, N, nc+1)
+        enc_outputs_scores = self._score_bias_enc(enc_outputs_scores, decode_polygon(anchors))
         # Rank by the best REAL class score: with no_object=True the head emits
         # nc+1 logits and ranking on the raw max would let the ∅ column win,
         # selecting the most confidently-background tokens as queries.
@@ -1124,7 +1563,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         # a seed maximum, so this is a strong foreground cue) and concat to the
         # score-head input exactly like the grid branch. Without this the head is
         # fed width hd while seed_in_content built it for hd+1 -> crash.
-        seed_q = self._sample_seed_at(seed_map, centroids) if self.seed_in_content and seed_map is not None else None
+        seed_q = self._seed_columns(seed_map, centroids)
         enc_scores = self._score(self.enc_score_head, content, seed_q)
         embeddings = content
 
@@ -1147,6 +1586,54 @@ class NuLiteDETRDecoder(RTDETRDecoder):
         if seed_q is not None:
             feats = torch.cat([feats, seed_q], -1)
         return head(feats)
+
+    @staticmethod
+    def _size_proxy(polygons: torch.Tensor) -> torch.Tensor:
+        """Mean predicted ray length per query, shape ``(B, nq, 1)``."""
+        return polygons[..., 2:].mean(-1, keepdim=True)
+
+    def _score_bias_enc(self, scores: torch.Tensor, polygons: torch.Tensor) -> torch.Tensor:
+        """Add the learned encoder-proposal size bias, if enabled."""
+        if not getattr(self, 'score_size_bias', False):
+            return scores
+        return scores + self.enc_score_bias(self._size_proxy(polygons))
+
+    def _score_bias_dec(self, layer: int, scores: torch.Tensor, polygons: torch.Tensor) -> torch.Tensor:
+        """Add the learned per-layer decoder size bias, if enabled."""
+        if not getattr(self, 'score_size_bias', False):
+            return scores
+        return scores + self.dec_score_bias[layer](self._size_proxy(polygons))
+
+    def _sta_attention_mask(self, embed: torch.Tensor) -> torch.Tensor:
+        """Sliding-tile self-attention mask over the grid queries (True = blocked).
+
+        The real-query block is the LSP-DETR STA window on the ``n_side x n_side``
+        grid recorded by ``_grid_decoder_input``. Denoising rows, when present,
+        are PREPENDED to the query dimension: they may attend only to other DN
+        rows (DN isolation), while real queries stay isolated from DN rows and
+        see their own sliding window.
+
+        Args:
+            embed: (B, n_dn + n_real, hd) query embeddings.
+
+        Returns:
+            (B*nhead, nq, nq) boolean mask for ``nn.MultiheadAttention``.
+        """
+        n_side = getattr(self, 'sta_n_side', None)
+        if n_side is None:
+            raise ValueError('self_attention_sta requires the grid query layout (query_selection="grid")')
+        n_q = embed.shape[1]
+        n_real = n_side * n_side
+        n_dn = n_q - n_real
+        if n_dn < 0:
+            raise ValueError('STA grid size exceeds the query count')
+        window = sliding_tile_mask(n_side, self.sta_kernel, device=embed.device)
+        mask = torch.zeros(n_q, n_q, dtype=torch.bool, device=embed.device)
+        mask[n_dn:, n_dn:] = window
+        heads = self.decoder.layers[0].self_attn.num_heads
+        # Materialize (no ``expand``): nn.MultiheadAttention needs a contiguous
+        # mask, and the masked-attention kernels silently misread a broadcast view.
+        return mask[None].repeat(embed.shape[0] * heads, 1, 1)
 
     def _rank_causal_mask(self, scores: torch.Tensor) -> torch.Tensor:
         """Build the MDS-DETR rank-causal self-attention mask (True = blocked).
@@ -1294,7 +1781,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
 
         seed_q2 = None
         if self.seed_in_content:
-            seed_q2 = self._sample_seed_at(seed_map, p2_pos)
+            seed_q2 = self._seed_columns(seed_map, p2_pos)
 
         # 4. single batched second pass through the shared layers.
         polys2, logits2 = self._raycast_decoder(
@@ -1392,7 +1879,14 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             query_pos = self.query_pos_head(refer_centroids_2d)
             layer_attn_mask = attn_mask
             if self.mds and i == self.decoder.eval_idx and prev_scores is not None:
-                layer_attn_mask = self._rank_causal_mask(prev_scores)
+                mds_mask = self._rank_causal_mask(prev_scores)
+                if layer_attn_mask is not None and mds_mask.shape[-1] == layer_attn_mask.shape[-1]:
+                    # compose DN-isolation (already boolean) with the rank-causal
+                    # mask; both are on the same padded query width.
+                    layer_attn_mask = layer_attn_mask | mds_mask
+                else:
+                    layer_attn_mask = mds_mask
+                layer_attn_mask = _unblock_empty_rows(layer_attn_mask)
             rope_layers = getattr(self, 'self_attention_rope_layers', None)
             if rope_layers is None:
                 output = layer(
@@ -1436,8 +1930,9 @@ class NuLiteDETRDecoder(RTDETRDecoder):
             # for the classification loss to move the regression output.
             layer_seed_q = seed_q
             if self.seed_in_content and recast_seed is not None:
-                layer_seed_q = self._sample_seed_at(recast_seed, refined[..., :2].detach())
+                layer_seed_q = self._seed_columns(recast_seed, refined[..., :2].detach())
             scores_i = self._score(self.dec_score_head[i], output, layer_seed_q)
+            scores_i = self._score_bias_dec(i, scores_i, refined)
             if self.training:
                 dec_cls.append(scores_i)
                 dec_polygons.append(refined)
@@ -1454,6 +1949,7 @@ class NuLiteDETRDecoder(RTDETRDecoder):
                     raise ValueError('appearance fusion requires a stride-2 appearance map')
                 output, appearance_embeddings = appearance_fusion(output, refined, appearance_map)
                 self._last_appearance_embeddings = appearance_embeddings
+                self._last_appearance_queries = output
                 self._last_presence_polygons = refined.detach()
                 if self.training and self.presence_head is not None:
                     self._last_presence_logits = self.presence_head(output).squeeze(-1)
@@ -1472,11 +1968,17 @@ class NuLiteDETRDecoder(RTDETRDecoder):
 
     @staticmethod
     def _self_attention_with_rope(layer, embed, query_pos, attn_mask, rope, rope_positions):
-        """Run stock MHA projections while rotating projected Q/K in 2D."""
+        """Run stock MHA projections while rotating projected Q/K in 2D.
+
+        LSP-DETR carries position INFORMATION ONLY through STRING RoPE on the
+        projected queries/keys; it has no absolute positional encoding. Adding
+        the absolute ``query_pos`` here as well would double-count position and
+        make RoPE redundant, so Q/K are projected from the query content alone.
+        """
         attention = layer.self_attn
         if attention.bias_k is not None or attention.bias_v is not None or attention.add_zero_attn:
             raise ValueError('Cayley-STRING does not support augmented MultiheadAttention keys')
-        qk = layer.with_pos_embed(embed, query_pos)
+        qk = embed
         q_weight, k_weight, v_weight = attention.in_proj_weight.chunk(3)
         if attention.in_proj_bias is None:
             q_bias = k_bias = v_bias = None
