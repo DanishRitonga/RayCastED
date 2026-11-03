@@ -98,6 +98,11 @@ def parse_args(argv=None):
     ap.add_argument('--limit', type=int, default=0, help='0=all tiles, else cap (smoke tests)')
     ap.add_argument('--device', default='0')
     ap.add_argument('--out', required=True, help='best checkpoint path (dir auto-created)')
+    ap.add_argument(
+        '--cache-root',
+        default='output/oracle',
+        help='directory for the memmap tile caches (default: output/oracle, relative to cwd)',
+    )
     ap.add_argument('--seed', type=int, default=0)
     args = ap.parse_args(argv)
     target_modes = sum((args.edt_target, args.center_potential_target, args.fg_center_target))
@@ -142,12 +147,22 @@ class _Conv2DBlock(nn.Module):
         return self.block(x)
 
 
+def resolve_timm_name(name):
+    """Return a full timm checkpoint name for an encoder variant.
+
+    Bare FastViT-style variants (``fastvit_t8``) expand to their Apple
+    pretrained checkpoint. Any name that already carries a tag
+    (``edgenext_xx_small.in1k``) is passed through untouched.
+    """
+    return name if '.' in name else f'{name}.apple_in1k'
+
+
 class _FastViT(nn.Module):
     def __init__(self, name):
         super().__init__()
         import timm
 
-        self.fast_vit = timm.create_model(f'{name}.apple_in1k', features_only=True, pretrained=True)
+        self.fast_vit = timm.create_model(resolve_timm_name(name), features_only=True, pretrained=True)
 
     def forward(self, x):
         return self.fast_vit(x)
@@ -519,7 +534,7 @@ def main(args=None):
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    cache_root = Path('/mnt/data/projects/RayCastED/output/oracle')
+    cache_root = Path(args.cache_root)
     cache_root.mkdir(parents=True, exist_ok=True)
     tag = f'tr-{Path(args.train_tiles).name}-va-{Path(args.val_tiles).name}-l{args.limit}'
     needs_centers = args.center_potential_target or args.fg_center_target

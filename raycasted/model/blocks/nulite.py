@@ -70,6 +70,16 @@ class _ConvBlock(nn.Module):
         return self.block(x)
 
 
+def _resolve_timm_name(variant: str) -> str:
+    """Return a full timm checkpoint name for an encoder variant.
+
+    Bare FastViT-style variants (``fastvit_t8``) expand to their Apple
+    pretrained checkpoint. Any name that already carries a tag
+    (``edgenext_xx_small.in1k``) is passed through untouched.
+    """
+    return variant if '.' in variant else f'{variant}.apple_in1k'
+
+
 class NuLiteEncoderDecoder(nn.Module):
     """FastViT encoder + NuLite 5-block upsample decoder.
 
@@ -92,7 +102,7 @@ class NuLiteEncoderDecoder(nn.Module):
         super().__init__()
         self.use_decoder = use_decoder
         self.separable_decoder = separable_decoder
-        self.encoder = timm.create_model(f'{variant}.apple_in1k', features_only=True, pretrained=pretrained)
+        self.encoder = timm.create_model(_resolve_timm_name(variant), features_only=True, pretrained=pretrained)
         dims = list(self.encoder.feature_info.channels())  # [64, 128, 256, 512] for s12
         self.embed_dims = dims
         if not use_decoder:

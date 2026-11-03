@@ -234,8 +234,10 @@ class RayCastPipeline:
                 )
 
         yaml_data = {
-            'train': str(train_dir.resolve()),
-            'val': str(val_dir.resolve()),
+            # Relative to the yaml itself (ultralytics resolves `train`/`val`
+            # against the data.yaml directory) so the tree stays portable.
+            'train': 'train',
+            'val': 'val',
             'nc': nc,
             'names': names,
         }
