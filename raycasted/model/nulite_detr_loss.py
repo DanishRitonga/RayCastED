@@ -34,21 +34,31 @@ def _log_space_ray_loss(pred_rays: torch.Tensor, target_rays: torch.Tensor, eps:
     return (log_pred - log_tgt).abs().mean(-1)
 
 
-def _points_inside_star(pred_xy, gt_xy, gt_rays, n_rays):
-    """Test whether each predicted centroid lies inside each GT star polygon.
+def _points_inside_star_excess(pred_xy, gt_xy, gt_rays, n_rays, eps=1e-6):
+    """Per-pair inside mask plus normalized distance beyond the star boundary.
 
     LSP-DETR inner-mask cost term Wm: a centroid is "inside" a star-convex
     nucleus iff its distance from the GT center along its angular direction is
     <= the ray length interpolated between the two bracketing rays.
+
+    The second return value is the geometric excess used by the soft gate:
+
+        excess = clamp(dist / (d_phi + eps) - 1, min=0)
+
+    which is exactly 0 for every inside pair and grows outward for outside
+    pairs (0.5 means twice the boundary radius, etc.). Deriving it from the
+    same interpolated boundary keeps it free of scale assumptions.
 
     Args:
         pred_xy: (nq, 2) predicted centroids, normalized [0,1].
         gt_xy: (n_gt, 2) GT centers, normalized [0,1].
         gt_rays: (n_gt, n_rays) GT ray lengths, normalized [0,1].
         n_rays: number of radial rays.
+        eps: stabilizer for degenerate (zero-length) rays.
 
     Returns:
-        (nq, n_gt) bool tensor, True where the centroid is inside the polygon.
+        inside: (nq, n_gt) bool tensor, True where the centroid is inside.
+        excess: (nq, n_gt) float tensor, >= 0, zero on/inside the boundary.
     """
     nq = pred_xy.shape[0]
     n_gt = gt_xy.shape[0]
@@ -68,7 +78,22 @@ def _points_inside_star(pred_xy, gt_xy, gt_rays, n_rays):
     r1 = gt_rays_exp.gather(2, i1.unsqueeze(-1)).squeeze(-1)
     d_phi = r0 * (1 - frac) + r1 * frac
 
-    return dist <= d_phi
+    inside = dist <= d_phi
+    excess = (dist / (d_phi + eps) - 1.0).clamp(min=0.0)
+    return inside, excess
+
+
+def _points_inside_star(pred_xy, gt_xy, gt_rays, n_rays):
+    """Test whether each predicted centroid lies inside each GT star polygon.
+
+    Thin wrapper over :func:`_points_inside_star_excess` kept for callers that
+    only need the boolean mask.
+
+    Returns:
+        (nq, n_gt) bool tensor, True where the centroid is inside the polygon.
+    """
+    inside, _ = _points_inside_star_excess(pred_xy, gt_xy, gt_rays, n_rays)
+    return inside
 
 
 class RayCastHungarianMatcher(nn.Module):
@@ -87,6 +112,9 @@ class RayCastHungarianMatcher(nn.Module):
         n_rays=None,
         cost_inside=10.0,
         lsp_mode=False,
+        soft_inside=False,
+        soft_inside_w=20.0,
+        soft_inside_p=2.0,
     ):
         super().__init__()
         if cost_gain is None:
@@ -100,6 +128,13 @@ class RayCastHungarianMatcher(nn.Module):
         # 1*log-space radial (measured from the PRED centroid) + 9999*inside-gate.
         # Replaces the legacy static two-origin ray/polar-IoU cost terms.
         self.lsp_mode = lsp_mode
+        # Soft inside gate: replace the constant 9999 veto on outside pairs with
+        # w * excess**p, where excess is the normalized distance beyond the GT
+        # star boundary (0 inside). Lets a barely-outside query compete instead
+        # of being treated as infinitely wrong. Off = byte-identical legacy.
+        self.soft_inside = soft_inside
+        self.soft_inside_w = soft_inside_w
+        self.soft_inside_p = soft_inside_p
 
     def forward(
         self,
@@ -155,17 +190,21 @@ class RayCastHungarianMatcher(nn.Module):
 
             if self.lsp_mode:
                 # LSP-DETR cost matrix: Wc*cls + Wp*point_L1 + Wr*radial + Wm*inner.
-                # All weights 1.0 except the near-hard inner gate (9999): a
-                # centroid outside a GT mask is effectively un-matchable.
+                # All weights 1.0 except the inner gate: a 9999 constant veto
+                # (default) or the soft distance-scaled penalty.
                 cost_xy = (pred_xy.unsqueeze(1) - gt_xy.unsqueeze(0)).abs().sum(-1)  # point L1
-                inside = _points_inside_star(pred_xy, gt_xy, gt_rays, self.n_rays)  # (nq, n_gt) bool
+                if getattr(self, 'soft_inside', False):
+                    inside, excess = _points_inside_star_excess(pred_xy, gt_xy, gt_rays, self.n_rays)
+                else:
+                    inside = _points_inside_star(pred_xy, gt_xy, gt_rays, self.n_rays)  # (nq, n_gt) bool
                 # Radial cost is only meaningful where the query centroid is inside
-                # the GT polygon (outside pairs are overwritten with 1.0 below and
-                # dominated by the 9999 gate anyway). Solve ONLY those pairs with the
-                # O(m) paired kernel instead of the full (nq, n_gt, n_verts, R)
-                # broadcast — identical math, but peak memory drops from ~GBs (dense
-                # tiles: nq*ngt*64*64 intermediates) to O(inside_pairs). This was the
-                # per-epoch slowdown AND the post-epoch-1 OOM source.
+                # the GT polygon (outside pairs are overwritten with 1.0 below and,
+                # if they matter at all, decided by the inner gate). Solve ONLY those
+                # pairs with the O(m) paired kernel instead of the full
+                # (nq, n_gt, n_verts, R) broadcast — identical math, but peak memory
+                # drops from ~GBs (dense tiles: nq*ngt*64*64 intermediates) to
+                # O(inside_pairs). This was the per-epoch slowdown AND the
+                # post-epoch-1 OOM source.
                 cost_radial = torch.ones(nq, n_gt, device=pred_polygons.device, dtype=pred_polygons.dtype)
                 i_in, j_in = inside.nonzero(as_tuple=True)
                 if len(i_in) > 0:
@@ -183,7 +222,17 @@ class RayCastHungarianMatcher(nn.Module):
                     log_tgt = torch.clamp(dnorm, min=1e-4).log()
                     radial_in = (log_pred - log_tgt).abs().mean(-1)  # log-space L1 over rays
                     cost_radial[i_in, j_in] = radial_in
-                cost = cost_class + cost_xy + cost_radial + 9999.0 * (~inside).float()
+                if getattr(self, 'soft_inside', False):
+                    cost_inside_term = getattr(self, 'soft_inside_w', 20.0) * excess.pow(
+                        getattr(self, 'soft_inside_p', 2.0)
+                    )
+                    # Bound the tail: a pair already above the legacy 9999 veto
+                    # can never win, and this keeps the matrix finite under fp16
+                    # AMP (max 65504) and for degenerate zero-length GT rays.
+                    cost_inside_term = cost_inside_term.clamp(max=9999.0)
+                else:
+                    cost_inside_term = 9999.0 * (~inside).float()
+                cost = cost_class + cost_xy + cost_radial + cost_inside_term
             else:
                 cost_ray = (pred_rays.unsqueeze(1) - gt_rays.unsqueeze(0)).abs().sum(-1)
                 cost_xy = (pred_xy.unsqueeze(1) - gt_xy.unsqueeze(0)).abs().sum(-1)
@@ -373,6 +422,9 @@ class NuLiteDETRLoss(nn.Module):
         lsp_mode=False,
         matcher_lsp=False,
         duplicate_train_topk=1,
+        soft_inside=False,
+        soft_inside_w=20.0,
+        soft_inside_p=2.0,
     ):
         super().__init__()
         if loss_gain is None:
@@ -396,6 +448,9 @@ class NuLiteDETRLoss(nn.Module):
             cost_gain={'class': 2, 'ray': 5, 'piou': 2, 'inside': cost_inside},
             n_rays=self.n_rays,
             lsp_mode=(lsp_mode or matcher_lsp),
+            soft_inside=soft_inside,
+            soft_inside_w=soft_inside_w,
+            soft_inside_p=soft_inside_p,
         )
         self.duplicate_matcher = (
             RayCastDuplicateMatcher(self.matcher, self.duplicate_train_topk, no_object=self.no_object)

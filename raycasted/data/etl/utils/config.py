@@ -77,6 +77,9 @@ class TrainingSettings(BaseModel):
     detr_xy_weight: float = 500.0  # centroid loss gain (loss_gain['xy']); 500 was tuned for Huber delta=0.05
     detr_lsp: bool = False  # LSP-DETR-exact loss/matching+query init (equal ∅ cols, no pIoU, 9999 gate)
     detr_matcher_lsp: bool = False  # LSP-DETR-exact MATCHER only (class1/pointL1/radial-from-centroid/9999 gate); loss + query init stay locked
+    detr_matcher_soft_inside: bool = False  # replace the 9999 outside veto with soft_inside_w * excess**soft_inside_p
+    detr_matcher_soft_inside_w: float = 20.0  # soft inside-gate weight (calibrated on measured excess distribution)
+    detr_matcher_soft_inside_p: float = 2.0  # soft inside-gate exponent
     detr_query_block_size: float = 0.0  # grid cell dia in PIXELS for LSP init (0 = legacy grid_size grid)
     detr_content_top: bool = False  # query content from top-level (st32) feature (LSP FeatureSampling)
     detr_seed_resize: str = 'bilinear'  # F-channel seed downsample: bilinear (locked) | max | avg | topk

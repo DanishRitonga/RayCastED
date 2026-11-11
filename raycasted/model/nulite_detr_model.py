@@ -137,6 +137,9 @@ class NuLiteRayCastDETRModel(DetectionModel):
         duplicate_train_topk: int = 1,
         detr_lsp: bool = False,
         detr_matcher_lsp: bool = False,
+        detr_matcher_soft_inside: bool = False,
+        detr_matcher_soft_inside_w: float = 20.0,
+        detr_matcher_soft_inside_p: float = 2.0,
         detr_layer_schedule: str = '',
         hybrid_peaks: int = 100,
         seed_level: bool = False,
@@ -220,6 +223,9 @@ class NuLiteRayCastDETRModel(DetectionModel):
             raise ValueError('duplicate_train_topk must be at least 1')
         self.detr_lsp = detr_lsp
         self.detr_matcher_lsp = detr_matcher_lsp
+        self.detr_matcher_soft_inside = detr_matcher_soft_inside
+        self.detr_matcher_soft_inside_w = float(detr_matcher_soft_inside_w)
+        self.detr_matcher_soft_inside_p = float(detr_matcher_soft_inside_p)
         self.detr_layer_schedule = detr_layer_schedule
         self.seed_level = seed_level
         self.seed_level_stride = seed_level_stride
@@ -841,6 +847,9 @@ class NuLiteRayCastDETRModel(DetectionModel):
             per_layer_match=self.per_layer_match,
             duplicate_train_topk=self.duplicate_train_topk,
             matcher_lsp=getattr(self, 'detr_matcher_lsp', False),
+            soft_inside=getattr(self, 'detr_matcher_soft_inside', False),
+            soft_inside_w=getattr(self, 'detr_matcher_soft_inside_w', 20.0),
+            soft_inside_p=getattr(self, 'detr_matcher_soft_inside_p', 2.0),
         )
 
     def _segmentation_foreground_margin(self, dec_polygons, dec_scores, targets, gt_groups, seed):
