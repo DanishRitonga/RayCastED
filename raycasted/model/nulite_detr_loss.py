@@ -115,6 +115,9 @@ class RayCastHungarianMatcher(nn.Module):
         soft_inside=False,
         soft_inside_w=20.0,
         soft_inside_p=2.0,
+        empty_cost=False,
+        empty_cost_lambda=1.0,
+        has_no_object=False,
     ):
         super().__init__()
         if cost_gain is None:
@@ -135,6 +138,14 @@ class RayCastHungarianMatcher(nn.Module):
         self.soft_inside = soft_inside
         self.soft_inside_w = soft_inside_w
         self.soft_inside_p = soft_inside_p
+        # Empty-column cost: add lambda * -log(1 - p_empty) to every match cost
+        # of a query. The term is constant across GT columns, so it cannot
+        # reorder a fixed-size assignment; it changes WHICH queries the solver
+        # leaves unused, steering assignment away from queries that claim the
+        # explicit no-object class. Off = byte-identical legacy.
+        self.empty_cost = empty_cost
+        self.empty_cost_lambda = empty_cost_lambda
+        self.has_no_object = has_no_object
 
     def forward(
         self,
@@ -182,6 +193,15 @@ class RayCastHungarianMatcher(nn.Module):
                 cost_class = pos_cost - neg_cost
             else:
                 cost_class = -pred_sel
+
+            if getattr(self, 'empty_cost', False) and getattr(self, 'has_no_object', False) and p_scores.shape[1] > 1:
+                # Row-constant: penalise every GT column of a query that claims
+                # the no-object class, so Hungarian prefers to leave that query
+                # unused instead of spending it on a real nucleus.
+                p_empty = p_scores[:, -1:]  # (nq, 1) -> broadcast over (nq, n_gt)
+                cost_class = cost_class + getattr(self, 'empty_cost_lambda', 1.0) * (
+                    -(1.0 - p_empty + 1e-8).log()
+                )
 
             pred_rays = p_poly[:, 2:]
             gt_rays = g_poly[:, 2:]
@@ -425,6 +445,8 @@ class NuLiteDETRLoss(nn.Module):
         soft_inside=False,
         soft_inside_w=20.0,
         soft_inside_p=2.0,
+        empty_cost=False,
+        empty_cost_lambda=1.0,
     ):
         super().__init__()
         if loss_gain is None:
@@ -451,6 +473,9 @@ class NuLiteDETRLoss(nn.Module):
             soft_inside=soft_inside,
             soft_inside_w=soft_inside_w,
             soft_inside_p=soft_inside_p,
+            empty_cost=empty_cost,
+            empty_cost_lambda=empty_cost_lambda,
+            has_no_object=no_object,
         )
         self.duplicate_matcher = (
             RayCastDuplicateMatcher(self.matcher, self.duplicate_train_topk, no_object=self.no_object)

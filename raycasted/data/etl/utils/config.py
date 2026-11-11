@@ -80,6 +80,8 @@ class TrainingSettings(BaseModel):
     detr_matcher_soft_inside: bool = False  # replace the 9999 outside veto with soft_inside_w * excess**soft_inside_p
     detr_matcher_soft_inside_w: float = 20.0  # soft inside-gate weight (calibrated on measured excess distribution)
     detr_matcher_soft_inside_p: float = 2.0  # soft inside-gate exponent
+    detr_matcher_empty_cost: bool = False  # add lambda*-log(1-p_empty) to each query's match cost
+    detr_matcher_empty_cost_lambda: float = 1.0  # empty-column cost weight
     detr_query_block_size: float = 0.0  # grid cell dia in PIXELS for LSP init (0 = legacy grid_size grid)
     detr_content_top: bool = False  # query content from top-level (st32) feature (LSP FeatureSampling)
     detr_seed_resize: str = 'bilinear'  # F-channel seed downsample: bilinear (locked) | max | avg | topk
