@@ -142,6 +142,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         detr_matcher_soft_inside_p: float = 2.0,
         detr_matcher_empty_cost: bool = False,
         detr_matcher_empty_cost_lambda: float = 1.0,
+        detr_matcher_empty_cost_mode: str = 'additive',
         detr_layer_schedule: str = '',
         hybrid_peaks: int = 100,
         seed_level: bool = False,
@@ -230,6 +231,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.detr_matcher_soft_inside_p = float(detr_matcher_soft_inside_p)
         self.detr_matcher_empty_cost = detr_matcher_empty_cost
         self.detr_matcher_empty_cost_lambda = float(detr_matcher_empty_cost_lambda)
+        self.detr_matcher_empty_cost_mode = str(detr_matcher_empty_cost_mode)
         self.detr_layer_schedule = detr_layer_schedule
         self.seed_level = seed_level
         self.seed_level_stride = seed_level_stride
@@ -835,6 +837,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
                 lsp_mode=True,
                 empty_cost=getattr(self, 'detr_matcher_empty_cost', False),
                 empty_cost_lambda=getattr(self, 'detr_matcher_empty_cost_lambda', 1.0),
+                empty_cost_mode=getattr(self, 'detr_matcher_empty_cost_mode', 'additive'),
             )
         return NuLiteDETRLoss(
             nc=self.nc,
@@ -858,6 +861,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
             soft_inside_p=getattr(self, 'detr_matcher_soft_inside_p', 2.0),
             empty_cost=getattr(self, 'detr_matcher_empty_cost', False),
             empty_cost_lambda=getattr(self, 'detr_matcher_empty_cost_lambda', 1.0),
+            empty_cost_mode=getattr(self, 'detr_matcher_empty_cost_mode', 'additive'),
         )
 
     def _segmentation_foreground_margin(self, dec_polygons, dec_scores, targets, gt_groups, seed):

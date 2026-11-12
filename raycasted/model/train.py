@@ -895,6 +895,7 @@ class RayCastTrainer(DetectionTrainer):
             detr_matcher_soft_inside_p=float(tcfg.get('detr_matcher_soft_inside_p', 2.0)),
             detr_matcher_empty_cost=bool(tcfg.get('detr_matcher_empty_cost', False)),
             detr_matcher_empty_cost_lambda=float(tcfg.get('detr_matcher_empty_cost_lambda', 1.0)),
+            detr_matcher_empty_cost_mode=str(tcfg.get('detr_matcher_empty_cost_mode', 'additive')),
             query_block_size=float(tcfg.get('detr_query_block_size', 0.0) or 0.0),
             content_top=bool(tcfg.get('detr_content_top', False)),
             seed_resize=str(tcfg.get('detr_seed_resize', 'bilinear')),

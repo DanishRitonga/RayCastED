@@ -117,6 +117,7 @@ class RayCastHungarianMatcher(nn.Module):
         soft_inside_p=2.0,
         empty_cost=False,
         empty_cost_lambda=1.0,
+        empty_cost_mode='additive',
         has_no_object=False,
     ):
         super().__init__()
@@ -145,6 +146,13 @@ class RayCastHungarianMatcher(nn.Module):
         # explicit no-object class. Off = byte-identical legacy.
         self.empty_cost = empty_cost
         self.empty_cost_lambda = empty_cost_lambda
+        if empty_cost_mode not in ('additive', 'conditional'):
+            raise ValueError(f'empty_cost_mode must be additive|conditional, got {empty_cost_mode!r}')
+        # 'additive'    : cost += lambda * -log(1 - p_empty)   (row-constant)
+        # 'conditional': renormalise the class probability over {true class,
+        #                no-object} before the focal term, so sharing mass with
+        #                the empty column directly reduces the class score.
+        self.empty_cost_mode = empty_cost_mode
         self.has_no_object = has_no_object
 
     def forward(
@@ -187,6 +195,19 @@ class RayCastHungarianMatcher(nn.Module):
                 continue
 
             pred_sel = p_scores[:, g_cls]  # (nq, n_gt)
+            empty_active = (
+                getattr(self, 'empty_cost', False)
+                and getattr(self, 'has_no_object', False)
+                and p_scores.shape[1] > 1
+            )
+            empty_mode = getattr(self, 'empty_cost_mode', 'additive')
+            if empty_active and empty_mode == 'conditional':
+                # Renormalise over {true class, no-object}: p_cond drops when the
+                # query splits its probability mass with the empty column, so a
+                # query that is merely "not empty" no longer scores like one that
+                # is confidently foreground. lambda is unused in this mode.
+                p_empty = p_scores[:, -1:]  # (nq, 1) -> broadcast over (nq, n_gt)
+                pred_sel = pred_sel / (pred_sel + p_empty + 1e-8)
             if self.use_fl:
                 neg_cost = (1 - self.alpha) * (pred_sel**self.gamma) * (-(1 - pred_sel + 1e-8).log())
                 pos_cost = self.alpha * ((1 - pred_sel) ** self.gamma) * (-(pred_sel + 1e-8).log())
@@ -194,7 +215,7 @@ class RayCastHungarianMatcher(nn.Module):
             else:
                 cost_class = -pred_sel
 
-            if getattr(self, 'empty_cost', False) and getattr(self, 'has_no_object', False) and p_scores.shape[1] > 1:
+            if empty_active and empty_mode == 'additive':
                 # Row-constant: penalise every GT column of a query that claims
                 # the no-object class, so Hungarian prefers to leave that query
                 # unused instead of spending it on a real nucleus.
@@ -447,6 +468,7 @@ class NuLiteDETRLoss(nn.Module):
         soft_inside_p=2.0,
         empty_cost=False,
         empty_cost_lambda=1.0,
+        empty_cost_mode='additive',
     ):
         super().__init__()
         if loss_gain is None:
@@ -475,6 +497,7 @@ class NuLiteDETRLoss(nn.Module):
             soft_inside_p=soft_inside_p,
             empty_cost=empty_cost,
             empty_cost_lambda=empty_cost_lambda,
+            empty_cost_mode=empty_cost_mode,
             has_no_object=no_object,
         )
         self.duplicate_matcher = (
