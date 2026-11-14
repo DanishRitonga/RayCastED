@@ -951,6 +951,7 @@ class RayCastTrainer(DetectionTrainer):
             per_layer_match=bool(tcfg.get('detr_per_layer_match', False)),
             duplicate_train_topk=int(tcfg.get('detr_duplicate_train_topk', 1)),
             seed_map_target=bool(tcfg.get('seed_map_target', True)),
+            seed_map_loss=bool(tcfg.get('detr_seed_map_loss', False)),
             use_decoder=bool(tcfg.get('detr_use_decoder', True)),
             shared_layers=bool(tcfg.get('detr_shared_layers', False)),
             shared_layer_groups=int(tcfg.get('detr_shared_layer_groups', 0)),

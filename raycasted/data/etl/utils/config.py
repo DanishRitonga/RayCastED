@@ -55,6 +55,7 @@ class TrainingSettings(BaseModel):
     pretrained: bool = True  # ImageNet-pretrained encoder via timm (V1/V2); false = full scratch
     lambda_seg: float = 1.0  # NP seg loss weight (0.0 = V3 no-seg baseline)
     seed_map_target: bool = False  # InstanSeg-style center-weighted distance-to-boundary seg target (vs hard binary NP)
+    detr_seed_map_loss: bool = False  # opt in to the direct seed-map loss (lambda_seg) in frozen/shared-prior layouts
     gate_scale: float = 1.0  # SAM gate bound (cond = det + gate_scale*fuse); <1.0 forces head to learn discrimination
     freeze_encoder_decoder: bool = False  # phase-2a: freeze encoder+decoder+NP, train head only
 

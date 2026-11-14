@@ -152,6 +152,7 @@ class NuLiteRayCastDETRModel(DetectionModel):
         seed_resize: str = 'bilinear',
         seed_resize_frac: float = 0.25,
         seed_map_target: bool = True,
+        seed_map_loss: bool = False,
         oracle_kind: str = 'binary',
         use_decoder: bool = True,
         shared_layers: bool = False,
@@ -243,6 +244,9 @@ class NuLiteRayCastDETRModel(DetectionModel):
         self.seed_resize = seed_resize
         self.seed_resize_frac = seed_resize_frac
         self.seed_map_target = seed_map_target
+        # Direct supervision of the oracle's seed map (L1 to ``batch['seed_map']``).
+        # Off by default: the frozen-prior layouts set ``lambda_seg`` to 0 below.
+        self.seed_map_loss = bool(seed_map_loss)
         self.oracle_kind = str(oracle_kind)
         if self.oracle_kind not in {'binary', 'center_potential', 'fg_centroid'}:
             raise ValueError("oracle_kind must be 'binary', 'center_potential', or 'fg_centroid'")
@@ -359,7 +363,8 @@ class NuLiteRayCastDETRModel(DetectionModel):
             self.use_decoder = True
             self.decoder0 = None
             self.np_head = None
-            self.lambda_seg = 0.0  # seg loss is inert (frozen prior stream)
+            # seg loss is inert unless opted in (frozen prior stream)
+            self.lambda_seg = float(lambda_seg) if seed_map_loss else 0.0
             self.seg_encoder.requires_grad_(False)  # frozen FG/BG prior
             # ``requires_grad_(False)`` does not freeze BatchNorm running
             # statistics. Keep the oracle in eval mode from construction; the
@@ -409,7 +414,8 @@ class NuLiteRayCastDETRModel(DetectionModel):
             self.use_decoder = True
             self.decoder0 = None
             self.np_head = None
-            self.lambda_seg = 0.0  # seg stream is a frozen prior; no seg loss
+            # seg stream is a frozen prior unless explicitly supervised
+            self.lambda_seg = float(lambda_seg) if seed_map_loss else 0.0
             self.seg_encoder.requires_grad_(False)
             self.seg_encoder.eval()
             self.frozen_oracle = True
