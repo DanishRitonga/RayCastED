@@ -48,6 +48,27 @@ Train36 stopped at epoch 246. Train30, Train31, Train34, Train44, and Train50
 all stopped at epoch 332 under a 600-epoch learning-rate schedule, so Train36
 is a provisional rather than matched control for them.
 
+## Seed map used by every reported result (added 2026-11-13)
+
+**This version of the manuscript uses ONLY the fg−bg (binary plateau) seed map.
+The centroid-potential map is unused for now.**
+
+Every checkpoint behind a reported number — Train50/T8, the FastViT backbone
+sweep, the edgeNeXt variants, the T8 and T12 decoder grids, and all four
+matcher arms — was trained with `nuLiteT-fold1-sep-*.pt` and no
+`nulite_oracle_kind`, i.e. `oracle_kind: binary` where seed =
+`logit(fg) − logit(bg)`. This was verified from the checkpoint attributes, not
+inferred from recipes.
+
+The centroid-potential oracles (`nuLiteT-fold1-center-t12.pt`,
+`nuLiteT-fold1-fg-center-t12.pt`) were built on 2026-10-02 / 2026-10-05 and no
+recipe referenced them before 2026-11-13. The single centroid arm
+(`train60_fgmap-fgcentroid`, held-out bPQ 0.6387 / mPQ 0.4542 / F1 0.8034) is
+below the adoption bar, is not adopted, and is not part of any manuscript
+number. It is retained only as a directional hint that a properly calibrated
+centroid map may improve the detection operating point. Details:
+`docs/runs/nulite-detr/fg-map-ablation-results.md`.
+
 ## Architecture of the Train50 baseline
 
 Two streams, one forward pass. A frozen NuLite-T8 U-Net produces the
