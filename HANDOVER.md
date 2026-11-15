@@ -1,4 +1,4 @@
-# RayCastED handover — 2026-10-26
+# RayCastED handover — 2026-10-26 (updated 2026-11-15)
 
 ## Current objective
 
@@ -137,6 +137,102 @@ Full-U-Net thaw with fusion adapters (Train44) and the thin T8 baseline
 (Train50) are the two survivors of this line. Everything else was either a
 measured null or a learned shortcut.
 
+## Lines closed since Train50 (2026-11-15)
+
+Post-Train50 ablations run on a FastViT-T12 control,
+`output/v2/train52_fastvit-t12/weights/last.pt`: bPQ 0.6372, bDQ 0.7798,
+bSQ 0.8032, mPQ 0.4561, macro bPQ 0.6566, macro mPQ 0.4618, F1 0.7987,
+P 0.8270, R 0.7724. Every arm is a single-fold, single-seed held-out Fold3
+`eval_lsp` run with raw `nc+1` argmax and no NMS. The pre-registered rule for
+each arm was: adopt only if bPQ **and** macro bPQ both gain more than +0.002;
+reject if bPQ drops more than 0.002.
+
+### Decoder geometry — exhausted
+
+T8 and T12 grids over `detr_ndl` {4,5,6}, `detr_hd` {128,192,256} and
+`detr_shared_layer_groups` {0,2,3}: total spread 0.0032 bPQ, no variant cleared
+the band, and the T8 ranking did not transfer to T12. The 5-layer / 192-width /
+3-group thinning is confirmed as adequate. Doc:
+`docs/runs/nulite-detr/t12-decoder-grid-results.md`.
+
+### Assignment (matcher) — closed
+
+| arm | bPQ | macro bPQ | cohort move | verdict |
+|---|---:|---:|---|---|
+| soft inside gate | 0.6345 | 0.6548 | `good_suppressed_bg` −14, `no_good_polygon` +30, `unmatched` +73 | rejected (−0.0027) |
+| additive empty cost λ=1 | 0.6391 | 0.6578 | `good_suppressed_bg` 1,163 → 1,045 (−118), `matched` +102 | best point, below the +0.002 bar |
+| additive empty cost λ=2 | 0.6360 | 0.6554 | suppression only −12, `wrong_type` +37 | rejected; λ sweep closed |
+| conditional empty cost | 0.6365 | 0.6565 | `good_suppressed_bg` +78, `matched` −40 | rejected |
+
+The one-to-one Hungarian decision rule is not fixable through match cost.
+`wrong_type` (974 of 8,917 audited GT) is untouched because
+`p(correct) − p(best_wrong)` has median 0.000 on this head, and the best arm
+still leaves ~1,045 suppressed nuclei. Docs:
+`docs/runs/nulite-detr/empty-column-cost-results.md`,
+`.../soft-inside-gate-results.md`, `.../empty-column-cost-conditional-results.md`.
+
+### Foreground map — closed
+
+Consumer 1, `detr_seed_in_content` off: 0.6365 (−0.0007), null — the decision
+path does not use the map. Consumer 2, `detr_seed_level` off: 0.6332
+(−0.0040) — the 4th deformable level is load-bearing for geometry. Consumer 3,
+`detr_hybrid_peaks`, is dead config under `query_selection: grid`. Consumer 4,
+`seed_map_target` + `lambda_seg`, is inert because `lambda_seg` is forced to 0;
+enabling it as `detr_seed_map_loss` scored 0.6343 (−0.0029). The current
+binary plateau map is therefore not the binding constraint, but improving the
+map representation is still the most promising direction left (see the
+`fgcentroid` result below). Doc:
+`docs/runs/nulite-detr/fg-map-ablation-results.md`.
+
+### Recast and cohort-margin losses (2026-11-15)
+
+Removal arms, both a copy of `main/pannuke-thin-t12.yaml`:
+
+| arm | recipe (one mechanism removed) | bPQ | bDQ | bSQ | mPQ | macro bPQ | macro mPQ | F1 | P | R |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| control | `main/pannuke-thin-t12.yaml` | 0.6372 | 0.7798 | 0.8032 | 0.4561 | 0.6566 | 0.4618 | 0.7987 | 0.8270 | 0.7724 |
+| norecast | `detr_recast: false` | 0.6380 | 0.7808 | 0.8038 | 0.4590 | 0.6581 | 0.4648 | 0.7975 | 0.8221 | 0.7743 |
+| nomargin | `detr_seg_fg_margin_weight: 0`, `detr_viable_owner_fg_weight: 0` | 0.6289 | 0.7647 | 0.8068 | 0.4524 | 0.6507 | 0.4576 | 0.7945 | 0.8756 | 0.7271 |
+
+Cohort audit (384 images, 8,917 GT):
+
+| cohort | control | norecast | nomargin |
+|---|---:|---:|---:|
+| matched | 6,929 | 6,955 | 6,477 |
+| good_suppressed_bg | 1,163 | 1,143 | 1,620 |
+| no_good_polygon | 798 | 779 | 808 |
+| wrong_type | 974 | 972 | 916 |
+| unmatched_predictions | 1,262 | 1,304 | 860 |
+| raw predictions | 8,196 | 8,261 | 7,339 |
+
+**Recast (`train62_norecast`) is harmful as configured.** Removing the
+inter-layer query correction is inside ±0.002 on bPQ and macro bPQ, and it
+improves the metrics that actually separate nucleus types: mPQ +0.0029 and
+macro mPQ +0.0030. It also saves 37k parameters (10.031M → 9.994M construction
+count; 6.51 h vs 6.55 h). It is not an inert gate: on the control checkpoint
+the projection weight norm is 8.35 (zero at init) and the mean correction is
+2.21 against a query norm of 12.65, i.e. ~17.5% of the query magnitude. So the
+module is doing substantial work that actively shifts queries without buying
+accuracy; the decoder can re-derive the same information from later layers.
+Recast should be treated as a removal candidate from the baseline and must not
+be presented as a contributor. This is the paper's namesake mechanism, which
+makes the negative result important to state explicitly rather than omit.
+
+**The cohort-margin losses (`train63_nomargin`) are strongly load-bearing.**
+Removing `detr_seg_fg_margin_weight` and `detr_viable_owner_fg_weight` costs
+0.0083 bPQ and 0.0059 macro bPQ, roughly doubles `good_suppressed_bg`
+(1,163 → 1,620, +457), drops matched by 452, emits 857 fewer predictions, and
+raises precision 0.8270 → 0.8756 while dropping recall 0.7724 → 0.7271. That is
+an emit-fewer signature: without the margin terms the head reverts to
+suppressing real nuclei. These two 0.5-weight terms account for about 457 of
+the 1,163 suppressed nuclei — roughly four times the best matcher arm — and
+must stay. The arm also trains 17% faster (58.9 vs 70.9 s/epoch) because the
+removed terms do per-layer stencil sampling and polygon-IoU work.
+
+Artefacts: `main/pannuke-thin-t12-norecast.yaml`,
+`main/pannuke-thin-t12-nomargin.yaml`, `scripts/train_recast_margin.sh`;
+runs `output/v2/train62_norecast`, `output/v2/train63_nomargin`.
+
 ## Current state and next steps
 
 Train50 is the baseline. Its remaining failure profile, from the cohort audit:
@@ -158,6 +254,38 @@ mechanism is built.
 Three-fold cross-validation remains required for any comparison with published
 LSP-DETR (3-fold macro bPQ 0.675, mPQ 0.482) or LKCell numbers. All results
 here are single-fold held-out diagnostics.
+
+### Where this leaves the project (2026-11-15)
+
+Four lever families are closed: decoder geometry, matcher cost, foreground-map
+quality, and the recast correction. The only active mechanisms still without a
+controlled A/B are `detr_per_layer_match` and `detr_matcher_lsp`. The
+margin/viable-owner losses are the most effective component measured for the
+dominant failure cohort and stay at 0.5/0.5.
+
+Two constraints remain that no matcher or map change has moved: the class head
+does not separate nucleus types (`p(correct) − p(best_wrong)` median 0.000;
+`wrong_type` is about 11% of audited GT), and one-to-one Hungarian training
+keeps foreground recall near 0.65 while a balanced linear probe on the exact
+257-d head input reaches AUC 0.912 at recall 0.931.
+
+The next mechanism to pursue is a better foreground-map representation, which
+the `fgcentroid` arm points at. That arm (`train60_fgmap-fgcentroid`, an
+`fg_centroid` oracle carrying foreground and centroid-potential channels) is
+the best detection operating point measured in the sweep even though it sits
+below the +0.002 adoption bar: bPQ 0.6387 (+0.0015), macro bPQ 0.6584
+(+0.0018), F1 0.8034, P 0.8313, R 0.7773, and 36 fewer `good_suppressed_bg`
+nuclei. It is not yet adoptable because two things changed at once (the map
+target and the oracle initialisation) and because the saved centroid channel is
+sharp (σ = 2.5–4 px), leaving it nearly dead at the 12.8 px query grid — only
+2.9–3.5% of cell centres exceed 0.5, against 74% for the plateau map. The
+prepared follow-up is the wide-σ centroid oracle
+(`scripts/train_oracle_fgcenter_wide.sh`, σ scale 0.6 / min 4.0 / max 8.0, 120
+epochs, output `output/oracle/nuLiteT-fold1-fg-center-wide-t12.pt`) followed by
+the already-prepared `main/pannuke-thin-t12-fgmap-fgcentroid-wide.yaml`.
+
+A three-fold rotation on the chosen configuration is the next required step
+before any literature claim.
 
 ## Reproduction commands
 
