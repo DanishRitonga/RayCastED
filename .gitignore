@@ -9,7 +9,15 @@
 *$py.class
 
 cache
-output
+output/*
+!output/v2
+output/v2/*
+!output/v2/train52_fastvit-t12
+output/v2/train52_fastvit-t12/*
+!output/v2/train52_fastvit-t12/deploy
+output/v2/train52_fastvit-t12/deploy/*
+!output/v2/train52_fastvit-t12/deploy/*.onnx
+!output/v2/train52_fastvit-t12/deploy/*.meta.json
 results
 
 # Training artifacts

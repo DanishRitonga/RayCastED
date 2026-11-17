@@ -1,0 +1,16 @@
+{
+  "arch": "nulite-detr",
+  "crop_size": 256,
+  "imgsz": 256,
+  "nc": 5,
+  "n_rays": 64,
+  "raycast_dim": 66,
+  "no_object": true,
+  "oracle_kind": "binary",
+  "input_range": "0..1 (CHW float32, as produced by RayCastTileDataset augment=False)",
+  "decode": "keep = argmax(logits, -1) != nc (last col); label = argmax over first nc cols; score = 1 - sigmoid(logit[:, nc]); pixels = poly * crop_size. No NMS, no confidence threshold.",
+  "opset": 17,
+  "dynamic_batch": true,
+  "weights": "output/v2/train52_fastvit-t12/weights/last.pt",
+  "onnx_sha256": "e5ca679d5eaaffcc0e4e8c9bab84593463017d0db09aba5f67852c36823c2293"
+}
