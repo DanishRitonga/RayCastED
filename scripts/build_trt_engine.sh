@@ -22,7 +22,19 @@ if [ ! -f "$ONNX" ]; then
   exit 1
 fi
 
-trtexec \
+TRTEXEC=${TRTEXEC:-$(command -v trtexec || true)}
+if [ -z "$TRTEXEC" ]; then
+  for cand in /usr/src/tensorrt/bin/trtexec /usr/local/tensorrt/bin/trtexec; do
+    if [ -x "$cand" ]; then TRTEXEC=$cand; break; fi
+  done
+fi
+if [ -z "$TRTEXEC" ]; then
+  echo "trtexec not found; install TensorRT or set TRTEXEC=/path/to/trtexec" >&2
+  exit 1
+fi
+echo "Using trtexec: $TRTEXEC"
+
+"$TRTEXEC" \
   --onnx="$ONNX" \
   --saveEngine="$OUT" \
   --fp16 \
