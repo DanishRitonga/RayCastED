@@ -1,4 +1,4 @@
-# RayCastED handover — 2026-10-26 (updated 2026-11-15)
+# RayCastED handover — 2026-10-26 (updated 2026-11-17)
 
 ## Current objective
 
@@ -218,20 +218,75 @@ Recast should be treated as a removal candidate from the baseline and must not
 be presented as a contributor. This is the paper's namesake mechanism, which
 makes the negative result important to state explicitly rather than omit.
 
-**The cohort-margin losses (`train63_nomargin`) are strongly load-bearing.**
-Removing `detr_seg_fg_margin_weight` and `detr_viable_owner_fg_weight` costs
-0.0083 bPQ and 0.0059 macro bPQ, roughly doubles `good_suppressed_bg`
-(1,163 → 1,620, +457), drops matched by 452, emits 857 fewer predictions, and
-raises precision 0.8270 → 0.8756 while dropping recall 0.7724 → 0.7271. That is
-an emit-fewer signature: without the margin terms the head reverts to
-suppressing real nuclei. These two 0.5-weight terms account for about 457 of
-the 1,163 suppressed nuclei — roughly four times the best matcher arm — and
-must stay. The arm also trains 17% faster (58.9 vs 70.9 s/epoch) because the
-removed terms do per-layer stencil sampling and polygon-IoU work.
+**The cohort-margin pair (`train63_nomargin`) is strongly load-bearing, but
+neither term is individually load-bearing — the requirement is implemented
+twice.** Removing `detr_seg_fg_margin_weight` and `detr_viable_owner_fg_weight`
+together costs 0.0083 bPQ and 0.0059 macro bPQ, roughly doubles
+`good_suppressed_bg` (1,163 → 1,620, +457), drops matched by 452, emits 857
+fewer predictions, and raises precision 0.8270 → 0.8756 while dropping recall
+0.7724 → 0.7271. That is an emit-fewer signature: with no class-vs-empty margin
+pressure at all the head reverts to suppressing real nuclei. The arm also
+trains 17% faster (58.9 vs 70.9 s/epoch) because the removed terms do per-layer
+stencil sampling and polygon-IoU work. The 2026-11-17 split arms below show
+that this 0.0083 is **not** attributable to either term: each single removal is
+inside ±0.002 and the joint effect is ~5× the sum.
 
 Artefacts: `main/pannuke-thin-t12-norecast.yaml`,
 `main/pannuke-thin-t12-nomargin.yaml`, `scripts/train_recast_margin.sh`;
 runs `output/v2/train62_norecast`, `output/v2/train63_nomargin`.
+
+### Margin-term split: the requirement is duplicated, not distributed (2026-11-17)
+
+The joint removal above is confounded, so each term was removed alone. Both
+recipes differ from `main/pannuke-thin-t12.yaml` in exactly one key:
+
+| arm | recipe (one key removed) | bPQ | bDQ | bSQ | mPQ | macro bPQ | macro mPQ | F1 | P | R |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| control | `main/pannuke-thin-t12.yaml` | 0.6372 | 0.7798 | 0.8032 | 0.4561 | 0.6566 | 0.4618 | 0.7987 | 0.8270 | 0.7724 |
+| segonly | `detr_viable_owner_fg_weight: 0` | **0.6373** | 0.7773 | 0.8056 | 0.4566 | 0.6574 | 0.4628 | 0.7982 | 0.8425 | 0.7584 |
+| viableonly | `detr_seg_fg_margin_weight: 0` | 0.6354 | 0.7750 | 0.8057 | 0.4530 | 0.6562 | 0.4574 | 0.7969 | 0.8408 | 0.7574 |
+| nomargin | both removed | 0.6289 | 0.7647 | 0.8068 | 0.4524 | 0.6507 | 0.4576 | 0.7945 | 0.8756 | 0.7271 |
+
+Cohort audit (384 images, 8,917 GT):
+
+| cohort | control | segonly | viableonly | nomargin |
+|---|---:|---:|---:|---:|
+| matched | 6,929 | 6,785 | 6,787 | 6,477 |
+| good_suppressed_bg | 1,163 | 1,331 | 1,293 | 1,620 |
+| no_good_polygon | 798 | 781 | 812 | 808 |
+| wrong_type | 974 | 966 | 975 | 916 |
+| unmatched_predictions | 1,262 | 1,117 | 1,114 | 860 |
+| raw predictions | 8,196 | 7,903 | 7,902 | 7,339 |
+
+**Neither term is individually load-bearing.** Removing `viable_owner_fg` is
+flat (bPQ +0.0001, macro bPQ +0.0008) and slightly improves mPQ (+0.0005) and
+macro mPQ (+0.0010). Removing `seg_fg_margin` costs 0.0018 bPQ / 0.0004 macro
+bPQ, just inside the pre-registered ±0.002 band.
+
+**The pair is load-bearing and the effect is super-additive.** The two single
+removals sum to −0.0017 bPQ, but removing both costs −0.0083, about 5× that.
+The counts show the same shape: matched −144 / −142 individually versus −452
+jointly, and `good_suppressed_bg` +168 / +130 versus +457. So the model carries
+one "do not lose a matched nucleus to the empty logit" requirement
+implemented twice — an evidence-gated 3×3 seed-stencil hinge
+(`detr_seg_fg_margin_weight`) and an ungated `softplus` on viable owners
+(`detr_viable_owner_fg_weight`). Either one alone sustains it; only removing
+both breaks it. Both single arms also produce the same operating-point shift
+(precision +0.014, recall −0.014, F1 flat), which is what redundancy looks like.
+
+The useful consequence is that one term can be dropped at no measured cost:
+`segonly` is the better operating point on every macro metric and removes a
+loss term, while keeping the evidence-gated form that is easier to defend in
+the paper. This is a simplification candidate, not a PQ gain, and the joint arm
+shows the pair must never be removed together. No recipe change is adopted
+yet.
+
+Artefacts: `main/pannuke-thin-t12-margin-segonly.yaml`,
+`main/pannuke-thin-t12-margin-viableonly.yaml`,
+`scripts/train_margin_split.sh`; runs `output/v2/train64_margin-segonly`
+(21,768.8 s = 6.05 h), `output/v2/train65_margin-viableonly` (22,168.2 s =
+6.16 h); evaluation in `output/evals/margin_split/`. Doc:
+`docs/runs/nulite-detr/margin-term-split-results.md`.
 
 ## Current state and next steps
 
@@ -257,11 +312,13 @@ here are single-fold held-out diagnostics.
 
 ### Where this leaves the project (2026-11-15)
 
-Four lever families are closed: decoder geometry, matcher cost, foreground-map
-quality, and the recast correction. The only active mechanisms still without a
-controlled A/B are `detr_per_layer_match` and `detr_matcher_lsp`. The
-margin/viable-owner losses are the most effective component measured for the
-dominant failure cohort and stay at 0.5/0.5.
+Five lever families are closed: decoder geometry, matcher cost, foreground-map
+quality, the recast correction, and the cohort-margin terms. The margin pair is
+the only mechanism measured so far that is strongly load-bearing (−0.0083 bPQ
+when both are removed), but the split shows the two terms are redundant: each
+alone is inside ±0.002, so one can be dropped and the pair must never be
+removed together. The only active mechanisms still without a controlled A/B are
+`detr_per_layer_match` and `detr_matcher_lsp`.
 
 Two constraints remain that no matcher or map change has moved: the class head
 does not separate nucleus types (`p(correct) − p(best_wrong)` median 0.000;
