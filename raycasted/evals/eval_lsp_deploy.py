@@ -127,6 +127,28 @@ def fetch_hf_parquet(repo_id: str, filename: str, cache_dir: str | None = None) 
 # ---------------------------------------------------------------------------
 
 
+def tile_gt_from_npz(path: Path, crop: int) -> tuple[list, np.ndarray, int]:
+    """Render GT for one tile from its .npz raycast annotations.
+
+    The annotation rows are ``[class_id, cx, cy, d_1..d_n]`` (class 255 =
+    ignore). Polygons are rasterized with ``rasterize_polys`` — the same PIL
+    fill + greatest-Euclidean-distance overlap ownership the evaluator uses
+    for predictions — so the GT masks follow the same construction rule.
+
+    Returns (gt_masks, gt_labels, tissue) like ``ParquetGT.get``.
+    """
+    with np.load(path) as data:
+        anns = np.asarray(data['annotations'], dtype=np.float64)
+        tissue = int(data['tissue'])
+    if anns.size == 0:
+        return [], np.zeros((0,), dtype=int), tissue
+    anns = anns[anns[:, 0] != 255]
+    if len(anns) == 0:
+        return [], np.zeros((0,), dtype=int), tissue
+    masks, labels = rasterize_polys(anns[:, 1:], crop, crop, anns[:, 0].astype(int))
+    return masks, labels, tissue
+
+
 def generate_test_tiles(
     parquet_path: str,
     etl_config: str,
@@ -387,6 +409,15 @@ def main():
     )
     ap.add_argument('--hf-cache-dir', default=None, help='Custom HF download cache dir (default: HF default)')
     ap.add_argument(
+        '--gt-tiles',
+        action='store_true',
+        help='Render GT from the .npz annotations (raycast polygons rasterized with '
+        'the same PIL+EDT rule) instead of the dense parquet masks; when the tiles '
+        'already exist the parquet is not required at all. WARNING: this deviates '
+        'from the eval_lsp literature protocol (dense parquet GT), so the numbers '
+        'are NOT comparable to eval_lsp results',
+    )
+    ap.add_argument(
         '--parquet-repo',
         default='RationAI/PanNuke',
         help='HF dataset repo to fetch the raw fold parquet from when the local '
@@ -405,8 +436,45 @@ def main():
 
     if args.hf_dataset is None:
         tiles_dir = Path(args.data_dir)
+        have_tiles = tiles_dir.is_dir() and any(tiles_dir.glob('*.npz'))
         parquet = Path(args.parquet)
-        if not parquet.is_file():
+        if not have_tiles:
+            # Tiles must be generated, and that needs the raw parquet.
+            if not parquet.is_file():
+                cands = sorted(tiles_dir.glob('*.parquet')) or sorted(tiles_dir.parent.glob('*.parquet'))
+                if len(cands) == 1:
+                    args.parquet = str(cands[0])
+                    parquet = cands[0]
+                    print(f'Using parquet found next to tiles: {args.parquet}', file=sys.stderr)
+                else:
+                    print(
+                        f'--parquet not found: {parquet}; fetching fold parquet '
+                        f'data/{parquet.name} from HuggingFace repo {args.parquet_repo} ...',
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    parquet = fetch_hf_parquet(args.parquet_repo, parquet.name, args.hf_cache_dir)
+                    args.parquet = str(parquet)
+                    print(f'  parquet: {args.parquet}', file=sys.stderr)
+            print(
+                f'No tiles at {tiles_dir}: generating them from {args.parquet} via the ETL pipeline ...',
+                file=sys.stderr,
+                flush=True,
+            )
+            test_dir = generate_test_tiles(
+                args.parquet,
+                args.etl_config,
+                tiles_dir.parent,
+                args.stain_profile or None,
+            )
+            args.data_dir = str(test_dir)
+            tiles_dir = test_dir
+        elif args.gt_tiles:
+            print(
+                'GT source: .npz annotations (--gt-tiles); the dense parquet is not required',
+                file=sys.stderr,
+            )
+        elif not parquet.is_file():
             cands = sorted(tiles_dir.glob('*.parquet')) or sorted(tiles_dir.parent.glob('*.parquet'))
             if len(cands) == 1:
                 args.parquet = str(cands[0])
@@ -422,25 +490,6 @@ def main():
                 parquet = fetch_hf_parquet(args.parquet_repo, parquet.name, args.hf_cache_dir)
                 args.parquet = str(parquet)
                 print(f'  parquet: {args.parquet}', file=sys.stderr)
-        if not tiles_dir.is_dir() or not any(tiles_dir.glob('*.npz')):
-            if not parquet.is_file():
-                ap.error(
-                    f'No .npz tiles at {tiles_dir} and no raw parquet to generate them from; '
-                    f'pass --parquet (the raw fold parquet) so the ETL pipeline can build the tiles'
-                )
-            print(
-                f'No tiles at {tiles_dir}: generating them from {args.parquet} via the ETL pipeline ...',
-                file=sys.stderr,
-                flush=True,
-            )
-            test_dir = generate_test_tiles(
-                args.parquet,
-                args.etl_config,
-                tiles_dir.parent,
-                args.stain_profile or None,
-            )
-            args.data_dir = str(test_dir)
-            tiles_dir = test_dir
 
     import json
 
@@ -477,8 +526,16 @@ def main():
         print(f'  parquet: {args.parquet}', file=sys.stderr)
 
     tile_paths = sorted(Path(args.data_dir).glob('*.npz'))
-    gt = ParquetGT(args.parquet)
-    assert len(tile_paths) == len(gt), (len(tile_paths), len(gt))
+    if args.gt_tiles:
+        print(
+            'WARNING: --gt-tiles renders GT from the npz raycast annotations '
+            '(not the dense parquet) — NOT comparable to eval_lsp literature numbers',
+            file=sys.stderr,
+        )
+        gt = None
+    else:
+        gt = ParquetGT(args.parquet)
+        assert len(tile_paths) == len(gt), (len(tile_paths), len(gt))
     if args.max_images is not None:
         if args.max_images <= 0:
             raise ValueError('--max-images must be positive')
@@ -546,8 +603,10 @@ def main():
         )
 
     for path, res in zip(tile_paths, preds):
-        roi = roi_id_from_path(path)
-        gt_masks, gt_labels, tissue = gt.get(roi)
+        if gt is None:
+            gt_masks, gt_labels, tissue = tile_gt_from_npz(path, crop)
+        else:
+            gt_masks, gt_labels, tissue = gt.get(roi_id_from_path(path))
         pred_polys = res['polys']
         pred_labels = res['labels']
         n_pred_raw_total += len(pred_polys)
