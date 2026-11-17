@@ -10,11 +10,17 @@
 #   # -> deploy/train52_fastvit-t12.fp16.engine
 set -euo pipefail
 
-ONNX=$1
+DEFAULT_ONNX=output/v2/train52_fastvit-t12/deploy/train52_fastvit-t12.onnx
+ONNX=${1:-$DEFAULT_ONNX}
 BATCH=${BATCH:-8}
 IMGSZ=${IMGSZ:-256}
 MAX_BATCH=$(( BATCH > 8 ? BATCH : 8 ))
 OUT=${2:-${ONNX%.onnx}.fp16.engine}
+
+if [ ! -f "$ONNX" ]; then
+  echo "ONNX graph not found: $ONNX" >&2
+  exit 1
+fi
 
 trtexec \
   --onnx="$ONNX" \
@@ -22,7 +28,6 @@ trtexec \
   --fp16 \
   --minShapes=images:1x3x${IMGSZ}x${IMGSZ} \
   --optShapes=images:${BATCH}x3x${IMGSZ}x${IMGSZ} \
-  --maxShapes=images:${MAX_BATCH}x3x${IMGSZ}x${IMGSZ} \
-  "$@"
+  --maxShapes=images:${MAX_BATCH}x3x${IMGSZ}x${IMGSZ}
 
 echo "Engine written: $OUT"
