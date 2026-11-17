@@ -286,7 +286,15 @@ def main():
             ap.error(f'--data-dir not found: {tiles_dir}')
         parquet = Path(args.parquet)
         if not parquet.is_file():
-            ap.error(f'--parquet not found: {parquet}')
+            cands = sorted(tiles_dir.glob('*.parquet')) or sorted(tiles_dir.parent.glob('*.parquet'))
+            if len(cands) == 1:
+                args.parquet = str(cands[0])
+                print(f'Using parquet found next to tiles: {args.parquet}', file=sys.stderr)
+            else:
+                ap.error(
+                    f'--parquet not found: {parquet}. Copy the held-out fold parquet '
+                    f'(dense GT) next to {tiles_dir} or pass --parquet explicitly'
+                )
 
     import json
 
