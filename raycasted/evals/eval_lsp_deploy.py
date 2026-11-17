@@ -30,8 +30,10 @@ Defaults load the transformed test tiles (.npz) from ``output/v2/transformed/tes
 and the fold3 dense-GT parquet from ``raycasted/data/dataset/PanNuke/data/``;
 if the tiles are missing they are generated from the raw fold parquet via the
 ETL pipeline (ingest + transform, fold3-only workspace). Override with
-``--data-dir`` / ``--parquet``, or set ``--hf-dataset`` to fetch them from a
-HuggingFace repo instead.
+``--data-dir`` / ``--parquet``, set ``--hf-dataset`` to fetch them from a
+HuggingFace repo instead, or rely on the default parquet fetch: when the local
+fold parquet is absent it is downloaded from ``--parquet-repo``
+(default: RationAI/PanNuke, file ``data/fold3-00000-of-00001.parquet``).
 """
 
 import argparse
@@ -104,6 +106,20 @@ def fetch_hf_testdata(repo_id: str, cache_dir: str | None = None) -> tuple[Path,
     if len(parquets) > 1:
         print(f'{repo_id}: multiple parquets, using {parquets[0].name}', file=sys.stderr)
     return test_dir, parquets[0]
+
+
+def fetch_hf_parquet(repo_id: str, filename: str, cache_dir: str | None = None) -> Path:
+    """Download one raw fold parquet (``data/<filename>``) from a HF dataset repo."""
+    from huggingface_hub import hf_hub_download
+
+    return Path(
+        hf_hub_download(
+            repo_id=repo_id,
+            repo_type='dataset',
+            filename=f'data/{filename}',
+            cache_dir=cache_dir,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +371,8 @@ def main():
         default='raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet',
         help='Held-out fold parquet with dense GT '
         '(default: raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet); '
-        'also the raw input when tiles are generated with the ETL pipeline',
+        'also the raw input when tiles are generated with the ETL pipeline; '
+        'fetched from --parquet-repo on HuggingFace when missing locally',
     )
     ap.add_argument(
         '--etl-config',
@@ -369,6 +386,12 @@ def main():
         '(default: main/pannuke-v2-stain-profile.json; pass "" to re-estimate from the fold)',
     )
     ap.add_argument('--hf-cache-dir', default=None, help='Custom HF download cache dir (default: HF default)')
+    ap.add_argument(
+        '--parquet-repo',
+        default='RationAI/PanNuke',
+        help='HF dataset repo to fetch the raw fold parquet from when the local '
+        '--parquet is missing (default: RationAI/PanNuke)',
+    )
     ap.add_argument('--batch', type=int, default=8)
     ap.add_argument('--workers', type=int, default=2)
     ap.add_argument('--device', default='0', help='CUDA device id for ORT (ignored on CPU/CPU EP)')
@@ -390,10 +413,15 @@ def main():
                 parquet = cands[0]
                 print(f'Using parquet found next to tiles: {args.parquet}', file=sys.stderr)
             else:
-                ap.error(
-                    f'--parquet not found: {parquet}. Copy the held-out fold parquet '
-                    f'(dense GT) next to {tiles_dir} or pass --parquet explicitly'
+                print(
+                    f'--parquet not found: {parquet}; fetching fold parquet '
+                    f'data/{parquet.name} from HuggingFace repo {args.parquet_repo} ...',
+                    file=sys.stderr,
+                    flush=True,
                 )
+                parquet = fetch_hf_parquet(args.parquet_repo, parquet.name, args.hf_cache_dir)
+                args.parquet = str(parquet)
+                print(f'  parquet: {args.parquet}', file=sys.stderr)
         if not tiles_dir.is_dir() or not any(tiles_dir.glob('*.npz')):
             if not parquet.is_file():
                 ap.error(
