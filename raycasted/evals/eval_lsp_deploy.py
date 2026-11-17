@@ -21,13 +21,15 @@ Usage (x86, ONNX Runtime — parity check against eval_lsp):
         --parquet raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet \
         --batch 16 --max-images 64
 
-Usage (Jetson, TensorRT engine built on-device with trtexec):
+Usage (Jetson, TensorRT engine built on-device with trtexec — local .npz tiles):
     python -m raycasted.evals.eval_lsp_deploy \
-        --engine <name>.fp16.engine \
-        --meta   <name>.meta.json \
-        --data-dir <transformed test tiles> \
-        --parquet  <held-out fold parquet> \
+        --engine output/v2/train52_fastvit-t12/deploy/train52_fastvit-t12.fp16.engine \
         --batch 8 --workers 2
+
+Defaults load the transformed test tiles (.npz) from ``output/v2/transformed/test``
+and the fold3 dense-GT parquet from ``raycasted/data/dataset/PanNuke/data/``;
+override with ``--data-dir`` / ``--parquet``, or set ``--hf-dataset`` to fetch
+them from a HuggingFace repo instead.
 """
 
 import argparse
@@ -245,14 +247,27 @@ def main():
     group = ap.add_mutually_exclusive_group(required=True)
     group.add_argument('--onnx', help='Path to the exported .onnx graph')
     group.add_argument('--engine', help='Path to a TensorRT .engine built on this device')
-    ap.add_argument('--meta', required=True, help='Companion .meta.json from the export')
+    ap.add_argument(
+        '--meta',
+        help='Companion .meta.json from the export (default: auto-locate the '
+        'single *.meta.json next to --onnx/--engine)',
+    )
     ap.add_argument(
         '--hf-dataset',
         help='HF dataset repo id holding test/*.npz + the fold parquet; '
-        'downloads (cached) and fills --data-dir/--parquet when they are not given',
+        'overrides local tile loading when set',
     )
-    ap.add_argument('--data-dir', help='Held-out transformed test tiles (.npz); optional with --hf-dataset')
-    ap.add_argument('--parquet', help='Held-out fold parquet with dense GT; optional with --hf-dataset')
+    ap.add_argument(
+        '--data-dir',
+        default='output/v2/transformed/test',
+        help='Held-out transformed test tiles (.npz) (default: output/v2/transformed/test)',
+    )
+    ap.add_argument(
+        '--parquet',
+        default='raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet',
+        help='Held-out fold parquet with dense GT '
+        '(default: raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet)',
+    )
     ap.add_argument('--hf-cache-dir', default=None, help='Custom HF download cache dir (default: HF default)')
     ap.add_argument('--batch', type=int, default=8)
     ap.add_argument('--workers', type=int, default=2)
@@ -265,7 +280,23 @@ def main():
     if args.save_predictions is not None and args.engine is not None:
         ap.error('--save-predictions is only supported with --onnx (ORT backend)')
 
+    if args.hf_dataset is None and args.engine is not None:
+        tiles_dir = Path(args.data_dir)
+        if not tiles_dir.is_dir():
+            ap.error(f'--data-dir not found: {tiles_dir}')
+        parquet = Path(args.parquet)
+        if not parquet.is_file():
+            ap.error(f'--parquet not found: {parquet}')
+
     import json
+
+    if args.meta is None:
+        artifact = args.onnx or args.engine
+        metas = sorted(Path(artifact).parent.glob('*.meta.json'))
+        if len(metas) == 1:
+            args.meta = str(metas[0])
+        else:
+            ap.error(f'--meta required: found {len(metas)} *.meta.json next to {artifact}')
 
     with open(args.meta) as f:
         meta = json.load(f)
@@ -281,15 +312,15 @@ def main():
 
     _const.configure_rays(64)
 
-    if args.hf_dataset is not None and (args.data_dir is None or args.parquet is None):
+    default_data_dir = 'output/v2/transformed/test'
+    default_parquet = 'raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet'
+    if args.hf_dataset is not None and (args.data_dir == default_data_dir or args.parquet == default_parquet):
         print(f'Fetching test data from HuggingFace: {args.hf_dataset} ...', file=sys.stderr, flush=True)
         hf_dir, hf_parquet = fetch_hf_testdata(args.hf_dataset, args.hf_cache_dir)
-        args.data_dir = args.data_dir or str(hf_dir)
-        args.parquet = args.parquet or str(hf_parquet)
+        args.data_dir = str(hf_dir) if args.data_dir == default_data_dir else args.data_dir
+        args.parquet = str(hf_parquet) if args.parquet == default_parquet else args.parquet
         print(f'  tiles:   {args.data_dir}', file=sys.stderr)
         print(f'  parquet: {args.parquet}', file=sys.stderr)
-    if args.data_dir is None or args.parquet is None:
-        ap.error('--data-dir and --parquet are required unless --hf-dataset provides them')
 
     tile_paths = sorted(Path(args.data_dir).glob('*.npz'))
     gt = ParquetGT(args.parquet)
