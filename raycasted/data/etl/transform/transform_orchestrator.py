@@ -19,12 +19,22 @@ _SAMPLE_SEED = 42
 class TransformOrchestrator:
     """Orchestrates the ETL transform pipeline: chunking, profiling, normalization."""
 
-    def __init__(self, config_manager, ingested_dir: str, final_output_dir: str, use_gpu: bool = False):
+    def __init__(
+        self,
+        config_manager,
+        ingested_dir: str,
+        final_output_dir: str,
+        use_gpu: bool = False,
+        stain_profile: str | None = None,
+    ):
         self.config = config_manager.get_global_config()
         self.ingested_dir = Path(ingested_dir)
         self.final_output_dir = Path(final_output_dir)
         self.final_output_dir.mkdir(parents=True, exist_ok=True)
         self.use_gpu = use_gpu
+        # Pre-computed population stain profile; skips Stage 2 when given so a
+        # partial-data run reproduces the profile of the original full run.
+        self.stain_profile = stain_profile
 
         # Memory-only transformers
         self.chunker = SpatialChunker(self.config)
@@ -36,8 +46,12 @@ class TransformOrchestrator:
         # 1. Run Chunking
         self.registry = self._chunk_and_index()
 
-        # 2. Run Profiling
-        profile_path = self._build_population_profile()
+        # 2. Run Profiling (skipped when a pre-computed profile is supplied)
+        if self.stain_profile and Path(self.stain_profile).is_file():
+            profile_path = self.stain_profile
+            print(f'Stage 2 skipped: using pre-computed stain profile {profile_path}')
+        else:
+            profile_path = self._build_population_profile()
 
         # 3. Instantiate Stage 3
         self.normalizer = NormalizerAndPadder(self.config, profile_path, use_gpu=self.use_gpu)

@@ -28,8 +28,10 @@ Usage (Jetson, TensorRT engine built on-device with trtexec — local .npz tiles
 
 Defaults load the transformed test tiles (.npz) from ``output/v2/transformed/test``
 and the fold3 dense-GT parquet from ``raycasted/data/dataset/PanNuke/data/``;
-override with ``--data-dir`` / ``--parquet``, or set ``--hf-dataset`` to fetch
-them from a HuggingFace repo instead.
+if the tiles are missing they are generated from the raw fold parquet via the
+ETL pipeline (ingest + transform, fold3-only workspace). Override with
+``--data-dir`` / ``--parquet``, or set ``--hf-dataset`` to fetch them from a
+HuggingFace repo instead.
 """
 
 import argparse
@@ -102,6 +104,92 @@ def fetch_hf_testdata(repo_id: str, cache_dir: str | None = None) -> tuple[Path,
     if len(parquets) > 1:
         print(f'{repo_id}: multiple parquets, using {parquets[0].name}', file=sys.stderr)
     return test_dir, parquets[0]
+
+
+# ---------------------------------------------------------------------------
+# ETL generation of the held-out test tiles (no pre-transformed data needed)
+# ---------------------------------------------------------------------------
+
+
+def generate_test_tiles(
+    parquet_path: str,
+    etl_config: str,
+    final_output_dir: Path,
+    stain_profile: str | None,
+) -> Path:
+    """Run the ETL pipeline (ingest -> transform) on one held-out fold parquet.
+
+    Builds a temporary ETL workspace with only the given parquet (symlinked in
+    as ``data/<name>.parquet``), derives a config whose split_map sends it to
+    ``test``, then runs IngestionOrchestrator + TransformOrchestrator and the
+    split re-organisation, producing ``<final_output_dir>/test/*.npz``.
+
+    Args:
+        parquet_path: Raw held-out fold parquet (also used as GT by the caller).
+        etl_config: Base ETL yaml (e.g. main/pannuke.yaml).
+        final_output_dir: Where transformed tiles are organised (test/ inside).
+        stain_profile: Pre-computed population stain profile json; if None the
+            profile is re-estimated from the ingested fold (slightly different
+            from the full-dataset reference run).
+
+    Returns:
+        Path to the generated test tiles directory.
+    """
+    import yaml as _yaml
+
+    from raycasted.data.etl.ingestors.ingestion_orchestrator import IngestionOrchestrator
+    from raycasted.data.etl.transform.transform_orchestrator import TransformOrchestrator
+    from raycasted.data.etl.utils.config import ETLConfig
+
+    workspace = final_output_dir / 'etl-workspace'
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    src_parquet = Path(parquet_path).resolve()
+    data_dir = workspace / 'data'
+    data_dir.mkdir(exist_ok=True)
+    linked = data_dir / src_parquet.name
+    if not linked.exists():
+        linked.symlink_to(src_parquet)
+
+    with open(etl_config) as f:
+        cfg = _yaml.safe_load(f)
+    cfg['global_settings']['root_dir'] = str(workspace)
+    cfg['datasets']['PanNuke']['root_dir'] = 'data'
+    cfg['datasets']['PanNuke']['split_args']['split_map'] = {'fold3': 'test'}
+    cfg.pop('training', None)
+    cfg_path = workspace / 'pannuke-fold3-eval.yaml'
+    with open(cfg_path, 'w') as f:
+        _yaml.dump(cfg, f, default_flow_style=False)
+
+    ingested_dir = workspace / 'ingested'
+    if not any(ingested_dir.rglob('*.npz')):
+        print(f'ETL ingest: {src_parquet.name} -> {ingested_dir} ...', file=sys.stderr, flush=True)
+        IngestionOrchestrator(str(cfg_path), output_dir=str(ingested_dir)).run('PanNuke')
+
+    print(f'ETL transform -> {final_output_dir} ...', file=sys.stderr, flush=True)
+    t = TransformOrchestrator(
+        config_manager=ETLConfig(str(cfg_path)),
+        ingested_dir=str(ingested_dir),
+        final_output_dir=str(final_output_dir),
+        use_gpu=False,
+        stain_profile=stain_profile,
+    )
+    t.run_pipeline()
+
+    # TransformOrchestrator saves tiles flat with the split in its registry;
+    # move each tile into <final_output_dir>/<split>/ like RayCastPipeline does.
+    moved = 0
+    for row in t.registry.iter_rows(named=True):
+        src = final_output_dir / Path(row['path']).name
+        if not src.exists():
+            continue
+        dst_dir = final_output_dir / row['split']
+        dst_dir.mkdir(exist_ok=True)
+        src.rename(dst_dir / src.name)
+        moved += 1
+    print(f'Reorganised {moved} tiles into {final_output_dir}/<split>/ subdirectories.')
+
+    return final_output_dir / 'test'
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +354,19 @@ def main():
         '--parquet',
         default='raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet',
         help='Held-out fold parquet with dense GT '
-        '(default: raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet)',
+        '(default: raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet); '
+        'also the raw input when tiles are generated with the ETL pipeline',
+    )
+    ap.add_argument(
+        '--etl-config',
+        default='main/pannuke.yaml',
+        help='Base ETL yaml used when test tiles must be generated (default: main/pannuke.yaml)',
+    )
+    ap.add_argument(
+        '--stain-profile',
+        default='main/pannuke-v2-stain-profile.json',
+        help='Pre-computed population stain profile for tile generation '
+        '(default: main/pannuke-v2-stain-profile.json; pass "" to re-estimate from the fold)',
     )
     ap.add_argument('--hf-cache-dir', default=None, help='Custom HF download cache dir (default: HF default)')
     ap.add_argument('--batch', type=int, default=8)
@@ -280,21 +380,39 @@ def main():
     if args.save_predictions is not None and args.engine is not None:
         ap.error('--save-predictions is only supported with --onnx (ORT backend)')
 
-    if args.hf_dataset is None and args.engine is not None:
+    if args.hf_dataset is None:
         tiles_dir = Path(args.data_dir)
-        if not tiles_dir.is_dir():
-            ap.error(f'--data-dir not found: {tiles_dir}')
         parquet = Path(args.parquet)
         if not parquet.is_file():
             cands = sorted(tiles_dir.glob('*.parquet')) or sorted(tiles_dir.parent.glob('*.parquet'))
             if len(cands) == 1:
                 args.parquet = str(cands[0])
+                parquet = cands[0]
                 print(f'Using parquet found next to tiles: {args.parquet}', file=sys.stderr)
             else:
                 ap.error(
                     f'--parquet not found: {parquet}. Copy the held-out fold parquet '
                     f'(dense GT) next to {tiles_dir} or pass --parquet explicitly'
                 )
+        if not tiles_dir.is_dir() or not any(tiles_dir.glob('*.npz')):
+            if not parquet.is_file():
+                ap.error(
+                    f'No .npz tiles at {tiles_dir} and no raw parquet to generate them from; '
+                    f'pass --parquet (the raw fold parquet) so the ETL pipeline can build the tiles'
+                )
+            print(
+                f'No tiles at {tiles_dir}: generating them from {args.parquet} via the ETL pipeline ...',
+                file=sys.stderr,
+                flush=True,
+            )
+            test_dir = generate_test_tiles(
+                args.parquet,
+                args.etl_config,
+                tiles_dir.parent,
+                args.stain_profile or None,
+            )
+            args.data_dir = str(test_dir)
+            tiles_dir = test_dir
 
     import json
 
