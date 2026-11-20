@@ -1,4 +1,4 @@
-"""Train a clean fold1-only NuLite-T segmentation oracle.
+"""Train a clean single-fold NuLite-T segmentation oracle.
 
 Replicates the released NuLite-T architecture EXACTLY (timm fastvit_s12 features_only
 encoder + NuLite decoder0/decoder/np_head U-Net) so the saved checkpoint is drop-in
@@ -6,8 +6,12 @@ compatible with pretrained/NuLite-T-Weights.pth key format
 ({'model_state_dict', 'arch', 'config'}).
 
 Purpose: the released NuLite-T weights were trained on the WHOLE PanNuke (incl fold3),
-so they are a soft oracle for fold3. This trainer produces a model trained on fold1
-ONLY (rotation-1 train split) -> genuinely held-out for the fold3 evals.
+so they are a soft oracle for fold3. This trainer produces a model trained on ONE fold
+ONLY -> genuinely held-out for every other fold.
+
+The fold is inferred from ``--train-parquet``/``--train-tiles`` (and ``--val-*``), or
+given explicitly with ``--train-fold``/``--val-fold``, and is written into the
+checkpoint so a detector can refuse an oracle that saw its held-out fold.
 
 The default legacy mode uses two-class CE plus soft Dice. ``--fg-center-target``
 instead gives the two output channels independent meanings:
@@ -38,6 +42,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from raycasted.data.etl.utils import constants as _const
 from raycasted.evals.eval_lsp import ParquetGT, roi_id_from_path
+from raycasted.model.oracle_provenance import fold_name, resolve_folds
 
 _const.configure_rays(64)
 
@@ -45,10 +50,10 @@ _const.configure_rays(64)
 def parse_args(argv=None):
     """Parse and validate oracle-training arguments."""
     ap = argparse.ArgumentParser()
-    ap.add_argument('--train-tiles', required=True, help='fold1 tile dir (sorted glob == parquet order)')
-    ap.add_argument('--train-parquet', required=True, help='fold1 dense GT parquet')
-    ap.add_argument('--val-tiles', required=True, help='fold2 tile dir')
-    ap.add_argument('--val-parquet', required=True, help='fold2 dense GT parquet')
+    ap.add_argument('--train-tiles', required=True, help='train-fold tile dir (sorted glob == parquet order)')
+    ap.add_argument('--train-parquet', required=True, help='train-fold dense GT parquet')
+    ap.add_argument('--val-tiles', required=True, help='val-fold tile dir')
+    ap.add_argument('--val-parquet', required=True, help='val-fold dense GT parquet')
     ap.add_argument('--epochs', type=int, default=120)
     ap.add_argument('--batch', type=int, default=16)
     ap.add_argument('--lr', type=float, default=3e-4)
@@ -104,6 +109,20 @@ def parse_args(argv=None):
         help='directory for the memmap tile caches (default: output/oracle, relative to cwd)',
     )
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument(
+        '--train-fold',
+        type=int,
+        choices=(1, 2, 3),
+        default=None,
+        help='PanNuke fold the train tiles come from (default: inferred from the paths)',
+    )
+    ap.add_argument(
+        '--val-fold',
+        type=int,
+        choices=(1, 2, 3),
+        default=None,
+        help='PanNuke fold the val tiles come from (default: inferred from the paths)',
+    )
     args = ap.parse_args(argv)
     target_modes = sum((args.edt_target, args.center_potential_target, args.fg_center_target))
     if target_modes > 1:
@@ -523,8 +542,35 @@ class _NullCtx:
         return False
 
 
+def oracle_provenance_config(args, folds, val_tiles_used):
+    """Checkpoint fields describing which folds the oracle was trained and selected on.
+
+    ``folds`` holds 0-based indices (the historical convention) while
+    ``fold_names`` holds ``foldN`` strings, which readers prefer. A fold that
+    could not be resolved is written as ``None`` rather than defaulting to
+    fold1, so an unverifiable checkpoint cannot masquerade as a clean one.
+    """
+    train_fold, train_source = folds['train']
+    val_fold, val_source = folds['val']
+    return {
+        'folds': {
+            'train': None if train_fold is None else train_fold - 1,
+            'val': None if val_fold is None else val_fold - 1,
+        },
+        'fold_names': {'train': fold_name(train_fold), 'val': fold_name(val_fold)},
+        'provenance': {
+            'inferred': {'train': train_source, 'val': val_source},
+            'train_tiles': str(args.train_tiles),
+            'train_parquet': str(args.train_parquet),
+            'val_tiles': str(args.val_tiles),
+            'val_parquet': str(args.val_parquet),
+            'val_tiles_used': int(val_tiles_used),
+        },
+    }
+
+
 def main(args=None):
-    """Train a fold1-only NuLite-T oracle and save the best validation checkpoint."""
+    """Train a single-fold NuLite-T oracle and save the best validation checkpoint."""
     args = parse_args() if args is None else args
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -533,6 +579,30 @@ def main(args=None):
     use_amp = device.type == 'cuda'
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    folds = resolve_folds(
+        args.train_tiles,
+        args.train_parquet,
+        args.val_tiles,
+        args.val_parquet,
+        overrides={'train': args.train_fold, 'val': args.val_fold},
+    )
+    train_fold, train_source = folds['train']
+    val_fold, val_source = folds['val']
+    print(
+        f'[provenance] train fold {fold_name(train_fold)} ({train_source or "unresolved"})'
+        f'  val fold {fold_name(val_fold)} ({val_source or "unresolved"})'
+    )
+    if train_fold is not None and train_fold == val_fold:
+        raise SystemExit(
+            f'[provenance] train and val both resolve to {fold_name(train_fold)}; '
+            'oracle selection would be in-sample. Fix --train-*/--val-* or pass the fold args.'
+        )
+    if train_fold is None or val_fold is None:
+        print(
+            '[provenance] WARNING: fold unresolved; the checkpoint records folds as unknown. '
+            'Pass --train-fold/--val-fold so detectors can check for leakage.'
+        )
 
     cache_root = Path(args.cache_root)
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -568,7 +638,7 @@ def main(args=None):
     nparams = sum(p.numel() for p in model.parameters())
     dec_params = sum(p.numel() for n, p in model.named_parameters() if n.startswith('decoder.'))
     print(
-        f'[model] NuLite-T fold1-only ({args.variant},'
+        f'[model] NuLite-T {fold_name(train_fold)}-only ({args.variant},'
         f' separable_decoder={args.separable_decoder}, edt_target={args.edt_target},'
         f' center_target={args.center_potential_target}, fg_center_target={args.fg_center_target})'
         f' trainable {nparams / 1e6:.2f}M'
@@ -735,10 +805,10 @@ def main(args=None):
                 channel_semantics = ['background_logit', 'foreground_logit']
             ck = {
                 'model_state_dict': sd,
-                'arch': f'NuLite-T({args.variant}) fold1-only',
+                'arch': f'NuLite-T({args.variant}) {fold_name(train_fold)}-only',
                 'config': {
                     'data.dataset': 'PanNuke',
-                    'folds': {'train': 0, 'val': 1},
+                    **oracle_provenance_config(args, folds, min(args.val_n, len(imgs_va))),
                     'training.loss': training_loss,
                     'oracle_kind': oracle_kind,
                     'channel_semantics': channel_semantics,
@@ -758,7 +828,7 @@ def main(args=None):
                         'score': val_score,
                         'center_weight': args.val_center_weight if args.fg_center_target else None,
                     },
-                    'note': 'oracle, fold1 only',
+                    'note': f'oracle, trained on {fold_name(train_fold)}, selected on {fold_name(val_fold)}',
                     'separable_decoder': bool(args.separable_decoder),
                 },
             }

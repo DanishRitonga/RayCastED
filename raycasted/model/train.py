@@ -45,6 +45,7 @@ from raycasted.model.builder import raycasted_parse_model
 from raycasted.model.loss import RayCastE2ELoss
 from raycasted.model.nulite_detr_model import NuLiteRayCastDETRModel
 from raycasted.model.nulite_model import NuLiteRayCastModel
+from raycasted.model.oracle_provenance import ALLOW_LEAK_KEY, check_oracle_fold_binding
 from raycasted.model.register import register_raycast_head
 from raycasted.model.val import RayCastValidator
 
@@ -972,6 +973,11 @@ class RayCastTrainer(DetectionTrainer):
         nulite_ckpt = tcfg.get('nulite_ckpt')
         if nulite_ckpt:
             model.load_nulite_ckpt(nulite_ckpt)
+            check_oracle_fold_binding(
+                nulite_ckpt,
+                data_yaml=getattr(self.args, 'data', None),
+                allow_leak=bool(tcfg.get(ALLOW_LEAK_KEY, False)),
+            )
 
         # encoder_input_norm is a plain Python attr (not in state_dict), so it is
         # lost by load_state_dict on resume. Preserve the trained input mode
@@ -1031,6 +1037,11 @@ class RayCastTrainer(DetectionTrainer):
         nulite_ckpt = tcfg.get('nulite_ckpt')
         if nulite_ckpt:
             model.load_nulite_ckpt(nulite_ckpt)
+            check_oracle_fold_binding(
+                nulite_ckpt,
+                data_yaml=getattr(self.args, 'data', None),
+                allow_leak=bool(tcfg.get(ALLOW_LEAK_KEY, False)),
+            )
 
         # Phase-2a freeze: freeze encoder+decoder+NP, train head+conditioners only.
         if tcfg.get('freeze_encoder_decoder', False):
