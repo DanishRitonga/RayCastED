@@ -49,7 +49,7 @@ training:
 
   # NuLite-specific
   nulite_variant: fastvit_t8    # SEG-stream variant (frozen oracle; must match nulite_ckpt)
-  nulite_ckpt: output/oracle/nuLiteT-fold2-sep-t8.pt   # frozen fold1-only T8 FG/BG oracle (separable decoder)
+  nulite_ckpt: output/oracle/nuLiteT-fold2-sep-t8.pt   # frozen fold2-only FG/BG oracle (separable decoder)
   det_variant: fastvit_t8       # DETECTION-stream encoder variant (trainable)
   pretrained: true              # ImageNet-pretrained encoder via timm (V1/V2); false = full scratch
   lambda_seg: 1.0               # seed-map seg loss weight (INERT in two_stream — seg stream frozen, lambda_seg zeroed in code)
