@@ -17,7 +17,7 @@ protocol.
 |---|---|
 | export script | `raycasted/export/export_nulite_detr.py` |
 | deploy evaluator | `raycasted/evals/eval_lsp_deploy.py` |
-| HF upload helper | `scripts/push_fold3_test_hf.py` |
+| HF upload helper | `scripts/push_dataset_hf.py` |
 | TRT build script | `scripts/build_trt_engine.sh` |
 | exported graph | `output/v2/train52_fastvit-t12/deploy/train52_fastvit-t12.onnx` |
 | metadata | `output/v2/train52_fastvit-t12/deploy/train52_fastvit-t12.meta.json` |
@@ -46,11 +46,14 @@ target the old YOLO26-FCN RayCastED and are untouched.
        --weights output/v2/train52_fastvit-t12/weights/last.pt --validate
    ```
 
-2. Push the test data to HuggingFace (2,722 tiles + fold3 parquet):
+2. Push the transformed splits to HuggingFace (train/val/test, 7,901 tiles):
 
    ```bash
-   HF_REPO_ID=<user>/pannuke-fold3-test uv run python scripts/push_fold3_test_hf.py
+   HF_REPO_ID=<user>/<repo> uv run python scripts/push_dataset_hf.py
    ```
+
+   Add `--with-parquet` to also upload the raw fold parquets (only needed if
+   the device must generate tiles locally with the ETL pipeline).
 
 ## Workflow on the Jetson (Orin Nano)
 
