@@ -52,8 +52,9 @@ target the old YOLO26-FCN RayCastED and are untouched.
    HF_REPO_ID=<user>/<repo> uv run python scripts/push_dataset_hf.py
    ```
 
-   Add `--with-parquet` to also upload the raw fold parquets (only needed if
-   the device must generate tiles locally with the ETL pipeline).
+   Add `--with-parquet` to also upload the raw fold parquets; the evaluator
+   does not need them (it renders GT from the tile annotations with
+   `--gt-tiles`, or downloads the dense fold3 parquet from `RationAI/PanNuke`).
 
 ## Workflow on the Jetson (Orin Nano)
 
@@ -94,14 +95,14 @@ Dependencies: `pip install huggingface_hub polars pyarrow opencv-python-headless
 
    `danishritonga/raycasted` holds the transformed tiles for all three splits
    (`train/` 2,656, `val/` 2,523, `test/` 2,722) but no parquet, so pass
-   `--gt-tiles` to render GT from the tile annotations. Drop `--gt-tiles` and
-   pass `--parquet` (or let it auto-fetch from `RationAI/PanNuke`) to get the
-   literature-comparable dense-mask GT. The HF fetch downloads `test/` only
+   `--gt-tiles` to render GT from the tile annotations. Drop `--gt-tiles` to
+   get the literature-comparable dense-mask GT: the fold3 parquet is then
+   downloaded from `RationAI/PanNuke`. The HF fetch downloads `test/` only
    (no `train/` or `val/`).
 
-   Local copies of `--data-dir`/`--parquet` override the HF fetch when given;
-   `--max-images N` runs the first N sorted tiles for a quick smoke test;
-   `--cpu` forces the ORT CPU EP.
+   Data always comes from HuggingFace (`--hf-dataset`, default
+   `danishritonga/raycasted`); `--max-images N` runs the first N sorted tiles
+   for a quick smoke test; `--cpu` forces the ORT CPU EP.
 
 3. Optional parity/audit on the Jetson:
 

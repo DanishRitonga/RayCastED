@@ -17,23 +17,19 @@ Usage (x86, ONNX Runtime — parity check against eval_lsp):
     uv run python -m raycasted.evals.eval_lsp_deploy \
         --onnx output/v2/train52_fastvit-t12/deploy/train52_fastvit-t12.onnx \
         --meta output/v2/train52_fastvit-t12/deploy/train52_fastvit-t12.meta.json \
-        --data-dir output/v2/transformed/test \
-        --parquet raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet \
         --batch 16 --max-images 64
 
-Usage (Jetson, TensorRT engine built on-device with trtexec — local .npz tiles):
+Usage (Jetson, TensorRT engine built on-device with trtexec):
     python -m raycasted.evals.eval_lsp_deploy \
         --engine output/v2/train52_fastvit-t12/deploy/train52_fastvit-t12.fp16.engine \
         --batch 8 --workers 2
 
-Defaults load the transformed test tiles (.npz) from ``output/v2/transformed/test``
-and the fold3 dense-GT parquet from ``raycasted/data/dataset/PanNuke/data/``;
-if the tiles are missing they are generated from the raw fold parquet via the
-ETL pipeline (ingest + transform, fold3-only workspace). Override with
-``--data-dir`` / ``--parquet``, set ``--hf-dataset`` to fetch them from a
-HuggingFace repo instead, or rely on the default parquet fetch: when the local
-fold parquet is absent it is downloaded from ``--parquet-repo``
-(default: RationAI/PanNuke, file ``data/fold3-00000-of-00001.parquet``).
+Evaluation data always comes from HuggingFace. The transformed test tiles are
+downloaded from ``--hf-dataset`` (default: danishritonga/raycasted, layout
+``test/<tile>.npz``). The dense-GT fold3 parquet is taken from that repo when it
+ships one, otherwise it is downloaded from ``--parquet-repo``
+(default: RationAI/PanNuke). With ``--gt-tiles`` the parquet is skipped and GT
+is rendered from the tile annotations instead (not literature comparable).
 """
 
 import argparse
@@ -54,6 +50,9 @@ from raycasted.evals.eval_lsp import (
     roi_id_from_path,
 )
 from raycasted.model.register import register_raycast_head  # noqa: F401
+
+#: Raw fold3 parquet filename as published in RationAI/PanNuke (``data/<name>``).
+PARQUET_NAME = 'fold3-00000-of-00001.parquet'
 
 
 def decode_deploy_outputs(polys, logits, crop_size):
@@ -129,7 +128,7 @@ def fetch_hf_parquet(repo_id: str, filename: str, cache_dir: str | None = None) 
 
 
 # ---------------------------------------------------------------------------
-# ETL generation of the held-out test tiles (no pre-transformed data needed)
+# GT from tile annotations (--gt-tiles, no dense parquet)
 # ---------------------------------------------------------------------------
 
 
@@ -154,86 +153,6 @@ def tile_gt_from_npz(path: Path, crop: int) -> tuple[list, np.ndarray, int]:
     masks, labels = rasterize_polys(anns[:, 1:], crop, crop, anns[:, 0].astype(int))
     return masks, labels, tissue
 
-
-def generate_test_tiles(
-    parquet_path: str,
-    etl_config: str,
-    final_output_dir: Path,
-    stain_profile: str | None,
-) -> Path:
-    """Run the ETL pipeline (ingest -> transform) on one held-out fold parquet.
-
-    Builds a temporary ETL workspace with only the given parquet (symlinked in
-    as ``data/<name>.parquet``), derives a config whose split_map sends it to
-    ``test``, then runs IngestionOrchestrator + TransformOrchestrator and the
-    split re-organisation, producing ``<final_output_dir>/test/*.npz``.
-
-    Args:
-        parquet_path: Raw held-out fold parquet (also used as GT by the caller).
-        etl_config: Base ETL yaml (e.g. main/pannuke.yaml).
-        final_output_dir: Where transformed tiles are organised (test/ inside).
-        stain_profile: Pre-computed population stain profile json; if None the
-            profile is re-estimated from the ingested fold (slightly different
-            from the full-dataset reference run).
-
-    Returns:
-        Path to the generated test tiles directory.
-    """
-    import yaml as _yaml
-
-    from raycasted.data.etl.ingestors.ingestion_orchestrator import IngestionOrchestrator
-    from raycasted.data.etl.transform.transform_orchestrator import TransformOrchestrator
-    from raycasted.data.etl.utils.config import ETLConfig
-
-    workspace = final_output_dir / 'etl-workspace'
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    src_parquet = Path(parquet_path).resolve()
-    data_dir = workspace / 'data'
-    data_dir.mkdir(exist_ok=True)
-    linked = data_dir / src_parquet.name
-    if not linked.exists():
-        linked.symlink_to(src_parquet)
-
-    with open(etl_config) as f:
-        cfg = _yaml.safe_load(f)
-    cfg['global_settings']['root_dir'] = str(workspace)
-    cfg['datasets']['PanNuke']['root_dir'] = 'data'
-    cfg['datasets']['PanNuke']['split_args']['split_map'] = {'fold3': 'test'}
-    cfg.pop('training', None)
-    cfg_path = workspace / 'pannuke-fold3-eval.yaml'
-    with open(cfg_path, 'w') as f:
-        _yaml.dump(cfg, f, default_flow_style=False)
-
-    ingested_dir = workspace / 'ingested'
-    if not any(ingested_dir.rglob('*.npz')):
-        print(f'ETL ingest: {src_parquet.name} -> {ingested_dir} ...', file=sys.stderr, flush=True)
-        IngestionOrchestrator(str(cfg_path), output_dir=str(ingested_dir)).run('PanNuke')
-
-    print(f'ETL transform -> {final_output_dir} ...', file=sys.stderr, flush=True)
-    t = TransformOrchestrator(
-        config_manager=ETLConfig(str(cfg_path)),
-        ingested_dir=str(ingested_dir),
-        final_output_dir=str(final_output_dir),
-        use_gpu=False,
-        stain_profile=stain_profile,
-    )
-    t.run_pipeline()
-
-    # TransformOrchestrator saves tiles flat with the split in its registry;
-    # move each tile into <final_output_dir>/<split>/ like RayCastPipeline does.
-    moved = 0
-    for row in t.registry.iter_rows(named=True):
-        src = final_output_dir / Path(row['path']).name
-        if not src.exists():
-            continue
-        dst_dir = final_output_dir / row['split']
-        dst_dir.mkdir(exist_ok=True)
-        src.rename(dst_dir / src.name)
-        moved += 1
-    print(f'Reorganised {moved} tiles into {final_output_dir}/<split>/ subdirectories.')
-
-    return final_output_dir / 'test'
 
 
 # ---------------------------------------------------------------------------
@@ -386,48 +305,25 @@ def main():
     )
     ap.add_argument(
         '--hf-dataset',
-        help='HF dataset repo id holding test/*.npz + the fold parquet; '
-        'overrides local tile loading when set',
-    )
-    ap.add_argument(
-        '--data-dir',
-        default='output/v2/transformed/test',
-        help='Held-out transformed test tiles (.npz) (default: output/v2/transformed/test)',
-    )
-    ap.add_argument(
-        '--parquet',
-        default='raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet',
-        help='Held-out fold parquet with dense GT '
-        '(default: raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet); '
-        'also the raw input when tiles are generated with the ETL pipeline; '
-        'fetched from --parquet-repo on HuggingFace when missing locally',
-    )
-    ap.add_argument(
-        '--etl-config',
-        default='main/pannuke.yaml',
-        help='Base ETL yaml used when test tiles must be generated (default: main/pannuke.yaml)',
-    )
-    ap.add_argument(
-        '--stain-profile',
-        default='main/pannuke-v2-stain-profile.json',
-        help='Pre-computed population stain profile for tile generation '
-        '(default: main/pannuke-v2-stain-profile.json; pass "" to re-estimate from the fold)',
+        default='danishritonga/raycasted',
+        help='HF dataset repo holding the transformed test tiles (test/*.npz) '
+        '(default: danishritonga/raycasted)',
     )
     ap.add_argument('--hf-cache-dir', default=None, help='Custom HF download cache dir (default: HF default)')
     ap.add_argument(
         '--gt-tiles',
         action='store_true',
         help='Render GT from the .npz annotations (raycast polygons rasterized with '
-        'the same PIL+EDT rule) instead of the dense parquet masks; when the tiles '
-        'already exist the parquet is not required at all. WARNING: this deviates '
-        'from the eval_lsp literature protocol (dense parquet GT), so the numbers '
-        'are NOT comparable to eval_lsp results',
+        'the same PIL+EDT rule) instead of the dense parquet masks, so no parquet '
+        'download is needed. WARNING: this deviates from the eval_lsp literature '
+        'protocol (dense parquet GT), so the numbers are NOT comparable to '
+        'eval_lsp results',
     )
     ap.add_argument(
         '--parquet-repo',
         default='RationAI/PanNuke',
-        help='HF dataset repo to fetch the raw fold parquet from when the local '
-        '--parquet is missing (default: RationAI/PanNuke)',
+        help='HF dataset repo to fetch the raw fold3 dense-GT parquet from when '
+        'the tile repo does not ship one (default: RationAI/PanNuke)',
     )
     ap.add_argument('--batch', type=int, default=8)
     ap.add_argument('--workers', type=int, default=2)
@@ -439,63 +335,6 @@ def main():
     args = ap.parse_args()
     if args.save_predictions is not None and args.engine is not None:
         ap.error('--save-predictions is only supported with --onnx (ORT backend)')
-
-    if args.hf_dataset is None:
-        tiles_dir = Path(args.data_dir)
-        have_tiles = tiles_dir.is_dir() and any(tiles_dir.glob('*.npz'))
-        parquet = Path(args.parquet)
-        if not have_tiles:
-            # Tiles must be generated, and that needs the raw parquet.
-            if not parquet.is_file():
-                cands = sorted(tiles_dir.glob('*.parquet')) or sorted(tiles_dir.parent.glob('*.parquet'))
-                if len(cands) == 1:
-                    args.parquet = str(cands[0])
-                    parquet = cands[0]
-                    print(f'Using parquet found next to tiles: {args.parquet}', file=sys.stderr)
-                else:
-                    print(
-                        f'--parquet not found: {parquet}; fetching fold parquet '
-                        f'data/{parquet.name} from HuggingFace repo {args.parquet_repo} ...',
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    parquet = fetch_hf_parquet(args.parquet_repo, parquet.name, args.hf_cache_dir)
-                    args.parquet = str(parquet)
-                    print(f'  parquet: {args.parquet}', file=sys.stderr)
-            print(
-                f'No tiles at {tiles_dir}: generating them from {args.parquet} via the ETL pipeline ...',
-                file=sys.stderr,
-                flush=True,
-            )
-            test_dir = generate_test_tiles(
-                args.parquet,
-                args.etl_config,
-                tiles_dir.parent,
-                args.stain_profile or None,
-            )
-            args.data_dir = str(test_dir)
-            tiles_dir = test_dir
-        elif args.gt_tiles:
-            print(
-                'GT source: .npz annotations (--gt-tiles); the dense parquet is not required',
-                file=sys.stderr,
-            )
-        elif not parquet.is_file():
-            cands = sorted(tiles_dir.glob('*.parquet')) or sorted(tiles_dir.parent.glob('*.parquet'))
-            if len(cands) == 1:
-                args.parquet = str(cands[0])
-                parquet = cands[0]
-                print(f'Using parquet found next to tiles: {args.parquet}', file=sys.stderr)
-            else:
-                print(
-                    f'--parquet not found: {parquet}; fetching fold parquet '
-                    f'data/{parquet.name} from HuggingFace repo {args.parquet_repo} ...',
-                    file=sys.stderr,
-                    flush=True,
-                )
-                parquet = fetch_hf_parquet(args.parquet_repo, parquet.name, args.hf_cache_dir)
-                args.parquet = str(parquet)
-                print(f'  parquet: {args.parquet}', file=sys.stderr)
 
     import json
 
@@ -521,36 +360,24 @@ def main():
 
     _const.configure_rays(64)
 
-    default_data_dir = 'output/v2/transformed/test'
-    default_parquet = 'raycasted/data/dataset/PanNuke/data/fold3-00000-of-00001.parquet'
-    if args.hf_dataset is not None and (args.data_dir == default_data_dir or args.parquet == default_parquet):
-        print(f'Fetching test data from HuggingFace: {args.hf_dataset} ...', file=sys.stderr, flush=True)
-        hf_dir, hf_parquet = fetch_hf_testdata(args.hf_dataset, args.hf_cache_dir)
-        args.data_dir = str(hf_dir) if args.data_dir == default_data_dir else args.data_dir
-        if args.parquet == default_parquet:
-            if hf_parquet is not None:
-                args.parquet = str(hf_parquet)
-            elif args.gt_tiles:
-                args.parquet = None
-                print(
-                    f'  parquet: none in {args.hf_dataset} (OK with --gt-tiles)',
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    f'  parquet: none in {args.hf_dataset}; fetching '
-                    f'{Path(default_parquet).name} from {args.parquet_repo}',
-                    file=sys.stderr,
-                    flush=True,
-                )
-                args.parquet = str(
-                    fetch_hf_parquet(args.parquet_repo, Path(default_parquet).name, args.hf_cache_dir)
-                )
-        print(f'  tiles:   {args.data_dir}', file=sys.stderr)
-        if args.parquet is not None:
-            print(f'  parquet: {args.parquet}', file=sys.stderr)
+    print(f'Fetching test data from HuggingFace: {args.hf_dataset} ...', file=sys.stderr, flush=True)
+    tiles_dir, hf_parquet = fetch_hf_testdata(args.hf_dataset, args.hf_cache_dir)
+    print(f'  tiles:   {tiles_dir}', file=sys.stderr)
+    parquet_path: Path | None = hf_parquet
+    if parquet_path is not None:
+        print(f'  parquet: {parquet_path}', file=sys.stderr)
+    elif args.gt_tiles:
+        print(f'  parquet: none in {args.hf_dataset} (OK with --gt-tiles)', file=sys.stderr)
+    else:
+        print(
+            f'  parquet: none in {args.hf_dataset}; fetching {PARQUET_NAME} from {args.parquet_repo}',
+            file=sys.stderr,
+            flush=True,
+        )
+        parquet_path = fetch_hf_parquet(args.parquet_repo, PARQUET_NAME, args.hf_cache_dir)
+        print(f'  parquet: {parquet_path}', file=sys.stderr)
 
-    tile_paths = sorted(Path(args.data_dir).glob('*.npz'))
+    tile_paths = sorted(tiles_dir.glob('*.npz'))
     if args.gt_tiles:
         print(
             'WARNING: --gt-tiles renders GT from the npz raycast annotations '
@@ -559,14 +386,14 @@ def main():
         )
         gt = None
     else:
-        gt = ParquetGT(args.parquet)
+        gt = ParquetGT(str(parquet_path))
         assert len(tile_paths) == len(gt), (len(tile_paths), len(gt))
     if args.max_images is not None:
         if args.max_images <= 0:
             raise ValueError('--max-images must be positive')
         tile_paths = tile_paths[: args.max_images]
 
-    ds = RayCastTileDataset(str(args.data_dir), crop_size=crop, augment=False)
+    ds = RayCastTileDataset(str(tiles_dir), crop_size=crop, augment=False)
     if args.max_images is not None:
         from torch.utils.data import Subset
 
