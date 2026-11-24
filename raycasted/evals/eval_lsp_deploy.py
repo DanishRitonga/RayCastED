@@ -26,13 +26,15 @@ Usage (Jetson, TensorRT engine built on-device with trtexec):
 
 Evaluation data always comes from HuggingFace. The transformed test tiles are
 downloaded from ``--hf-dataset`` (default: danishritonga/raycasted, layout
-``test/<tile>.npz``). The dense-GT fold3 parquet is taken from that repo when it
-ships one, otherwise it is downloaded from ``--parquet-repo``
-(default: RationAI/PanNuke). With ``--gt-tiles`` the parquet is skipped and GT
-is rendered from the tile annotations instead (not literature comparable).
+``test/<tile>.npz``). By default GT is rendered from those tile annotations, so
+no parquet is downloaded. Pass ``--dense-gt`` to score against the dense fold3
+parquet instead (the ``eval_lsp`` literature protocol); it is taken from the
+tile repo when it ships one, otherwise downloaded from ``--parquet-repo``
+(default: RationAI/PanNuke).
 """
 
 import argparse
+import contextlib
 import sys
 import time
 from pathlib import Path
@@ -89,8 +91,8 @@ def fetch_hf_testdata(repo_id: str, cache_dir: str | None = None) -> tuple[Path,
     """Download the tiles of a HF dataset repo (and its fold parquet, if any).
 
     Expected layout: ``test/<tile>.npz`` plus an optional ``*.parquet`` at the
-    repo root or under ``data/``. The parquet is skipped for tile-only repos
-    (use ``--gt-tiles`` there). Repeated calls are cache hits.
+    repo root or under ``data/``. Tile-only repos are fine (GT then comes from
+    the annotations). Repeated calls are cache hits.
     """
     from huggingface_hub import snapshot_download
 
@@ -128,7 +130,7 @@ def fetch_hf_parquet(repo_id: str, filename: str, cache_dir: str | None = None) 
 
 
 # ---------------------------------------------------------------------------
-# GT from tile annotations (--gt-tiles, no dense parquet)
+# GT from tile annotations (default; --dense-gt switches to the parquet)
 # ---------------------------------------------------------------------------
 
 
@@ -174,18 +176,19 @@ def make_ort_session(onnx_path: str, use_cuda: bool, device_id: int = 0):
     return ort.InferenceSession(onnx_path, providers=providers), providers
 
 
-def load_trt_runner(engine_path: str):
-    """TensorRT runner with dynamic-batch support (Jetson pycuda + tensorrt)."""
-    import pycuda.autoinit  # noqa: F401
-    import pycuda.driver as cuda
+def load_trt_engine(engine_path: str):
+    """Deserialize a TRT engine and inspect its I/O tensors (no pycuda needed)."""
     import tensorrt as trt
 
     logger = trt.Logger(trt.Logger.WARNING)
     runtime = trt.Runtime(logger)
     with open(engine_path, 'rb') as f:
         engine = runtime.deserialize_cuda_engine(f.read())
+    if engine is None:
+        raise SystemExit(f'failed to deserialize TensorRT engine: {engine_path}')
     context = engine.create_execution_context()
-    stream = cuda.Stream()
+    if context is None:
+        raise SystemExit(f'failed to create execution context for: {engine_path}')
 
     input_name = None
     outputs = []
@@ -199,68 +202,95 @@ def load_trt_runner(engine_path: str):
         trt.DataType.FLOAT: np.float32,
         trt.DataType.HALF: np.float16,
     }
-    return engine, context, stream, input_name, outputs, cuda, trt_dtype
+    return engine, context, input_name, outputs, trt_dtype
 
 
 class TrtRunner:
-    """Runs the engine with per-call batch shape; allocates max-profile buffers."""
+    """Runs the engine with per-call batch shape using torch CUDA buffers.
+
+    Device memory, stream handle, and host copies all go through torch, so the
+    runner works on Jetson without pycuda (which needs nvcc to build).
+    """
 
     def __init__(self, engine_path: str):
+        import torch
+
+        self.torch = torch
+        if not torch.cuda.is_available():
+            raise SystemExit('torch reports no CUDA device; TensorRT needs a GPU')
         (
             self.engine,
             self.context,
-            self.stream,
             self.input_name,
             self.outputs,
-            cuda,
             trt_dtype,
-        ) = load_trt_runner(engine_path)
-        self.cuda = cuda
+        ) = load_trt_engine(engine_path)
         self.trt_dtype_map = trt_dtype
         self.out_names = [name for name, _ in self.outputs]
 
-        # Buffer sizes from the (max) profile so any batch <= max works.
+        # Buffers sized from the (max) profile so any batch <= max works.
         profile = 0
-        max_shape = self.engine.get_tensor_profile_shape(self.input_name, profile)[-1]
-        self.max_batch = int(max_shape[0])
-        d_input = cuda.mem_alloc(int(np.prod(max_shape)) * np.dtype(np.float32).itemsize)
-        self.in_host = cuda.pagelocked_empty(int(np.prod(max_shape)), np.float32)
-        self.in_dev = d_input
-        self.host_out = {}
+        max_shape = tuple(int(v) for v in self.engine.get_tensor_profile_shape(self.input_name, profile)[-1])
+        self.max_batch = max_shape[0]
+        self.max_in_elems = int(np.prod(max_shape))
+        in_dtype = self.trt_dtype_map.get(self.engine.get_tensor_dtype(self.input_name), np.float32)
+        self.in_dtype = in_dtype
+        self.dev_in = torch.empty(
+            self.max_in_elems,
+            dtype=torch.float16 if in_dtype is np.float16 else torch.float32,
+            device='cuda',
+        )
+        self.context.set_tensor_address(self.input_name, self.dev_in.data_ptr())
+
         self.dev_out = {}
+        self.out_shapes = {}
+        self.out_dtypes = {}
         for name, dtype in self.outputs:
-            shape = self.engine.get_tensor_shape(name)
-            # Dynamic non-batch dims do not occur in this graph; only batch varies.
+            # Output profiles cannot be queried by name; only the batch axis is
+            # dynamic in this graph, so substitute the max batch for -1.
+            shape = [int(v) for v in self.engine.get_tensor_shape(name)]
             if shape[0] == -1:
-                pshape = self.engine.get_tensor_profile_shape(name, profile)[-1]
-                shape = pshape
-            n = int(np.prod(shape))
-            self.host_out[name] = cuda.pagelocked_empty(n, self.trt_dtype_map[dtype])
-            self.dev_out[name] = cuda.mem_alloc(n * self.host_out[name].itemsize)
-            self.context.set_tensor_address(name, int(self.dev_out[name]))
+                shape[0] = self.max_batch
+            np_dtype = self.trt_dtype_map[dtype]
+            self.dev_out[name] = torch.empty(
+                int(np.prod(shape)),
+                dtype=torch.float16 if np_dtype is np.float16 else torch.float32,
+                device='cuda',
+            )
+            self.out_shapes[name] = shape
+            self.out_dtypes[name] = np_dtype
+            self.context.set_tensor_address(name, self.dev_out[name].data_ptr())
         self.ctx_shapes = None
 
     def run(self, blob: np.ndarray) -> dict:
         """blob: (B, 3, H, W) float32. Returns {name: (B, ...) float32}."""
-        b = blob.shape[0]
-        shape = tuple(blob.shape)
+        torch = self.torch
+        b = int(blob.shape[0])
+        shape = tuple(int(v) for v in blob.shape)
         if self.ctx_shapes != shape:
             self.context.set_input_shape(self.input_name, shape)
+            with contextlib.suppress(Exception):
+                self.context.infer_shapes()
             self.ctx_shapes = shape
-        np.copyto(self.in_host[: blob.size], blob.ravel())
-        self.cuda.memcpy_htod_async(self.in_dev, self.in_host[: blob.size], self.stream)
-        self.context.execute_async_v3(self.stream.handle)
-        for name in self.out_names:
-            self.cuda.memcpy_dtoh_async(self.host_out[name], self.dev_out[name], self.stream)
-        self.stream.synchronize()
+
+        if self.in_dtype is np.float16:
+            host = torch.from_numpy(np.ascontiguousarray(blob.reshape(-1).astype(np.float16)))
+        else:
+            host = torch.from_numpy(np.ascontiguousarray(blob.reshape(-1), dtype=np.float32))
+        self.dev_in[: host.numel()].copy_(host, non_blocking=True)
+
+        stream = torch.cuda.current_stream()
+        self.context.execute_async_v3(stream.cuda_stream)
+        stream.synchronize()
+
         out = {}
         for name in self.out_names:
-            full = self.engine.get_tensor_shape(name)
+            full = [int(v) for v in self.context.get_tensor_shape(name)]
             if full[0] == -1:
-                pshape = self.engine.get_tensor_profile_shape(name, 0)[-1]
-                full = list(pshape)
+                full = list(self.out_shapes[name])
                 full[0] = b
-            out[name] = self.host_out[name][: int(np.prod(full))].reshape(full).astype(np.float32)
+            n = int(np.prod(full))
+            out[name] = self.dev_out[name][:n].cpu().numpy().reshape(full).astype(np.float32)
         return out
 
 
@@ -311,19 +341,17 @@ def main():
     )
     ap.add_argument('--hf-cache-dir', default=None, help='Custom HF download cache dir (default: HF default)')
     ap.add_argument(
-        '--gt-tiles',
+        '--dense-gt',
         action='store_true',
-        help='Render GT from the .npz annotations (raycast polygons rasterized with '
-        'the same PIL+EDT rule) instead of the dense parquet masks, so no parquet '
-        'download is needed. WARNING: this deviates from the eval_lsp literature '
-        'protocol (dense parquet GT), so the numbers are NOT comparable to '
-        'eval_lsp results',
+        help='Score against the dense fold3 parquet masks (eval_lsp literature '
+        'protocol) instead of the .npz raycast annotations. Requires downloading '
+        'the fold3 parquet from --parquet-repo.',
     )
     ap.add_argument(
         '--parquet-repo',
         default='RationAI/PanNuke',
         help='HF dataset repo to fetch the raw fold3 dense-GT parquet from when '
-        'the tile repo does not ship one (default: RationAI/PanNuke)',
+        '--dense-gt is set (default: RationAI/PanNuke)',
     )
     ap.add_argument('--batch', type=int, default=8)
     ap.add_argument('--workers', type=int, default=2)
@@ -363,11 +391,12 @@ def main():
     print(f'Fetching test data from HuggingFace: {args.hf_dataset} ...', file=sys.stderr, flush=True)
     tiles_dir, hf_parquet = fetch_hf_testdata(args.hf_dataset, args.hf_cache_dir)
     print(f'  tiles:   {tiles_dir}', file=sys.stderr)
-    parquet_path: Path | None = hf_parquet
-    if parquet_path is not None:
+    parquet_path: Path | None = None
+    if not args.dense_gt:
+        print('  GT: tile annotations (pass --dense-gt for dense fold3 parquet GT)', file=sys.stderr)
+    elif hf_parquet is not None:
+        parquet_path = hf_parquet
         print(f'  parquet: {parquet_path}', file=sys.stderr)
-    elif args.gt_tiles:
-        print(f'  parquet: none in {args.hf_dataset} (OK with --gt-tiles)', file=sys.stderr)
     else:
         print(
             f'  parquet: none in {args.hf_dataset}; fetching {PARQUET_NAME} from {args.parquet_repo}',
@@ -378,16 +407,17 @@ def main():
         print(f'  parquet: {parquet_path}', file=sys.stderr)
 
     tile_paths = sorted(tiles_dir.glob('*.npz'))
-    if args.gt_tiles:
+    if args.dense_gt:
+        gt = ParquetGT(str(parquet_path))
+        assert len(tile_paths) == len(gt), (len(tile_paths), len(gt))
+    else:
         print(
-            'WARNING: --gt-tiles renders GT from the npz raycast annotations '
-            '(not the dense parquet) — NOT comparable to eval_lsp literature numbers',
+            'NOTE: GT is rendered from the npz raycast annotations, not the dense '
+            'parquet — not comparable to eval_lsp literature results '
+            '(use --dense-gt for the literature protocol)',
             file=sys.stderr,
         )
         gt = None
-    else:
-        gt = ParquetGT(str(parquet_path))
-        assert len(tile_paths) == len(gt), (len(tile_paths), len(gt))
     if args.max_images is not None:
         if args.max_images <= 0:
             raise ValueError('--max-images must be positive')

@@ -53,8 +53,8 @@ target the old YOLO26-FCN RayCastED and are untouched.
    ```
 
    Add `--with-parquet` to also upload the raw fold parquets; the evaluator
-   does not need them (it renders GT from the tile annotations with
-   `--gt-tiles`, or downloads the dense fold3 parquet from `RationAI/PanNuke`).
+   does not need them (GT is rendered from the tile annotations by default, and
+   `--dense-gt` downloads the dense fold3 parquet from `RationAI/PanNuke`).
 
 ## Workflow on the Jetson (Orin Nano)
 
@@ -63,7 +63,8 @@ checkpoint .pt is NOT needed on the device), copy or fetch
 `deploy/train52_fastvit-t12.onnx` + `.meta.json`.
 
 Dependencies: `pip install huggingface_hub polars pyarrow opencv-python-headless scipy pillow onnxruntime`
-(TRT path additionally: `pycuda`, `tensorrt` — both ship with JetPack).
+(TRT path additionally: `tensorrt` and `torch` — no `pycuda` needed, device
+buffers go through torch CUDA tensors).
 
 1. Build the engine on-device (engines are device-specific — never copy an
    engine from x86):
@@ -81,7 +82,6 @@ Dependencies: `pip install huggingface_hub polars pyarrow opencv-python-headless
        --engine deploy/train52_fastvit-t12.fp16.engine \
        --meta   deploy/train52_fastvit-t12.meta.json \
        --hf-dataset danishritonga/raycasted \
-       --gt-tiles \
        --batch 8 --workers 2
 
    # Or, without TensorRT (ONNX Runtime; CUDA EP if the wheel has it):
@@ -89,16 +89,14 @@ Dependencies: `pip install huggingface_hub polars pyarrow opencv-python-headless
        --onnx deploy/train52_fastvit-t12.onnx \
        --meta deploy/train52_fastvit-t12.meta.json \
        --hf-dataset danishritonga/raycasted \
-       --gt-tiles \
        --batch 8 --workers 2
    ```
 
    `danishritonga/raycasted` holds the transformed tiles for all three splits
-   (`train/` 2,656, `val/` 2,523, `test/` 2,722) but no parquet, so pass
-   `--gt-tiles` to render GT from the tile annotations. Drop `--gt-tiles` to
-   get the literature-comparable dense-mask GT: the fold3 parquet is then
-   downloaded from `RationAI/PanNuke`. The HF fetch downloads `test/` only
-   (no `train/` or `val/`).
+   (`train/` 2,656, `val/` 2,523, `test/` 2,722) but no parquet, so by default
+   GT is rendered from the tile annotations and nothing but `test/` is
+   downloaded. Pass `--dense-gt` for the literature-comparable dense-mask GT:
+   the fold3 parquet is then downloaded from `RationAI/PanNuke`.
 
    Data always comes from HuggingFace (`--hf-dataset`, default
    `danishritonga/raycasted`); `--max-images N` runs the first N sorted tiles
