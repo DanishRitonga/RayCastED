@@ -86,23 +86,29 @@ def decode_deploy_outputs(polys, logits, crop_size):
 # ---------------------------------------------------------------------------
 
 
-def fetch_hf_testdata(repo_id: str, cache_dir: str | None = None) -> tuple[Path, Path]:
-    """Download the transformed test tiles + fold parquet from a HF dataset repo.
+def fetch_hf_testdata(repo_id: str, cache_dir: str | None = None) -> tuple[Path, Path | None]:
+    """Download the tiles of a HF dataset repo (and its fold parquet, if any).
 
-    Repo layout: ``test/<tile>.npz`` and one ``*.parquet`` at the repo root.
-    Returns (test_tiles_dir, parquet_path). Repeated calls are cache hits.
+    Expected layout: ``test/<tile>.npz`` plus an optional ``*.parquet`` at the
+    repo root or under ``data/``. The parquet is skipped for tile-only repos
+    (use ``--gt-tiles`` there). Repeated calls are cache hits.
     """
     from huggingface_hub import snapshot_download
 
     local = Path(
-        snapshot_download(repo_id=repo_id, repo_type='dataset', cache_dir=cache_dir)
+        snapshot_download(
+            repo_id=repo_id,
+            repo_type='dataset',
+            cache_dir=cache_dir,
+            allow_patterns=['test/*', '*.parquet', 'data/*.parquet'],
+        )
     )
     test_dir = local / 'test'
     if not test_dir.is_dir():
         raise SystemExit(f'{repo_id}: no test/ directory with .npz tiles at {local}')
-    parquets = sorted(local.glob('*.parquet'))
+    parquets = sorted(local.glob('*.parquet')) or sorted((local / 'data').glob('*.parquet'))
     if not parquets:
-        raise SystemExit(f'{repo_id}: no fold parquet at {local}')
+        return test_dir, None
     if len(parquets) > 1:
         print(f'{repo_id}: multiple parquets, using {parquets[0].name}', file=sys.stderr)
     return test_dir, parquets[0]
@@ -521,9 +527,28 @@ def main():
         print(f'Fetching test data from HuggingFace: {args.hf_dataset} ...', file=sys.stderr, flush=True)
         hf_dir, hf_parquet = fetch_hf_testdata(args.hf_dataset, args.hf_cache_dir)
         args.data_dir = str(hf_dir) if args.data_dir == default_data_dir else args.data_dir
-        args.parquet = str(hf_parquet) if args.parquet == default_parquet else args.parquet
+        if args.parquet == default_parquet:
+            if hf_parquet is not None:
+                args.parquet = str(hf_parquet)
+            elif args.gt_tiles:
+                args.parquet = None
+                print(
+                    f'  parquet: none in {args.hf_dataset} (OK with --gt-tiles)',
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f'  parquet: none in {args.hf_dataset}; fetching '
+                    f'{Path(default_parquet).name} from {args.parquet_repo}',
+                    file=sys.stderr,
+                    flush=True,
+                )
+                args.parquet = str(
+                    fetch_hf_parquet(args.parquet_repo, Path(default_parquet).name, args.hf_cache_dir)
+                )
         print(f'  tiles:   {args.data_dir}', file=sys.stderr)
-        print(f'  parquet: {args.parquet}', file=sys.stderr)
+        if args.parquet is not None:
+            print(f'  parquet: {args.parquet}', file=sys.stderr)
 
     tile_paths = sorted(Path(args.data_dir).glob('*.npz'))
     if args.gt_tiles:

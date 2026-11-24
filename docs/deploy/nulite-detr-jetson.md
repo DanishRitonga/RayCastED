@@ -79,16 +79,25 @@ Dependencies: `pip install huggingface_hub polars pyarrow opencv-python-headless
    python -m raycasted.evals.eval_lsp_deploy \
        --engine deploy/train52_fastvit-t12.fp16.engine \
        --meta   deploy/train52_fastvit-t12.meta.json \
-       --hf-dataset <user>/pannuke-fold3-test \
+       --hf-dataset danishritonga/raycasted \
+       --gt-tiles \
        --batch 8 --workers 2
 
    # Or, without TensorRT (ONNX Runtime; CUDA EP if the wheel has it):
    python -m raycasted.evals.eval_lsp_deploy \
        --onnx deploy/train52_fastvit-t12.onnx \
        --meta deploy/train52_fastvit-t12.meta.json \
-       --hf-dataset <user>/pannuke-fold3-test \
+       --hf-dataset danishritonga/raycasted \
+       --gt-tiles \
        --batch 8 --workers 2
    ```
+
+   `danishritonga/raycasted` holds the transformed tiles for all three splits
+   (`train/` 2,656, `val/` 2,523, `test/` 2,722) but no parquet, so pass
+   `--gt-tiles` to render GT from the tile annotations. Drop `--gt-tiles` and
+   pass `--parquet` (or let it auto-fetch from `RationAI/PanNuke`) to get the
+   literature-comparable dense-mask GT. The HF fetch downloads `test/` only
+   (no `train/` or `val/`).
 
    Local copies of `--data-dir`/`--parquet` override the HF fetch when given;
    `--max-images N` runs the first N sorted tiles for a quick smoke test;
